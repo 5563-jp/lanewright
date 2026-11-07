@@ -6,6 +6,13 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+## [0.1.1] - chk-run の記録の直し / chk-run record fix
+
+### 直したこと / Fixed
+- `chk-run.sh` が npm の作業ツリーで成功を一度も記録しなかった。`node_modules/.bin/*` のシンボリックリンクを見て、毎回「使い回し不可」と判断していたため。
+  リンクの実体が作業ツリーの中にあれば、リンク先の中身をハッシュしたうえで記録・使い回しを続けるようにした。作業ツリーの外を指すリンクや行き先の無いリンクは、今までどおり記録しない。
+  `chk-run.sh` never recorded a successful run in npm worktrees, because the symlinks in `node_modules/.bin/*` disabled reuse. Symlinks that resolve inside the worktree no longer disable reuse (their targets are still hashed). Symlinks pointing outside the worktree, and dangling ones, still disable it.
+
 ## [0.1.0] - 最初の公開 / Initial release
 
 ### 追加 / Added

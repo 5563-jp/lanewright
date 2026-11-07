@@ -275,6 +275,73 @@ has "fake-builder の chmod -x 後は check=126" "$o" '^check=126（'
 [ $rc != 0 ] && ok "fake-builder の chmod -x 後は非 0 終了" || ng "fake-builder の chmod -x 後なのに exit 0"
 rm -rf node_modules
 
+# ---- 追加テスト 5c: 本物の npm の形（node_modules/.bin/* が作業ツリー内へのシンボリックリンク）----
+mkdir -p node_modules/fake-builder/bin node_modules/.bin
+cat > node_modules/fake-builder/bin/cli.js <<'SH'
+#!/bin/sh
+echo build
+SH
+chmod +x node_modules/fake-builder/bin/cli.js
+ln -s ../fake-builder/bin/cli.js node_modules/.bin/fake-builder
+echo "GOOD_MD_5C" > docs/a.md
+git commit -qam "5c: npm 形の .bin リンク"
+o=$(run)
+has "作業ツリー内を指す .bin リンクでも成功を記録する" "$o" '^recorded=.*full'
+o=$(run)
+has "作業ツリー内リンクの記録を同じ tree で使い回す" "$o" '^skip=same-tree'
+qo=$(q 2>/dev/null)
+has "作業ツリー内リンクの記録を問い合わせで使い回せる" "$qo" '^reuse=yes'
+printf '#!/bin/sh\necho build changed\n' > node_modules/fake-builder/bin/cli.js
+o=$(run)
+hasnt "リンク先の中身が変わったら省略しない" "$o" '^skip=same-tree'
+# 作業ツリーの外を指すリンクは今までどおり記録しない
+outside_dir="$real_root/outside-5c"; mkdir -p "$outside_dir"
+printf '#!/bin/sh\necho build\n' > "$outside_dir/cli.sh"; chmod +x "$outside_dir/cli.sh"
+rm node_modules/.bin/fake-builder; ln -s "$outside_dir/cli.sh" node_modules/.bin/fake-builder
+o=$(run --force)
+has "外を指すリンクでも確認自体は通る" "$o" '^check=0（'
+hasnt "作業ツリーの外を指すリンクは記録しない" "$o" '^recorded='
+qo=$(q 2>/dev/null)
+has "外を指すリンクがあれば問い合わせは reuse=no" "$qo" '^reuse=no'
+# 行き先の無いリンクも記録しない
+rm node_modules/.bin/fake-builder; ln -s ../fake-builder/bin/cli.js node_modules/.bin/fake-builder
+ln -s ../nowhere/missing node_modules/.bin/dangling
+o=$(run --force)
+has "行き先の無いリンクでも確認自体は通る" "$o" '^check=0（'
+hasnt "行き先の無いリンクがあれば記録しない" "$o" '^recorded='
+rm node_modules/.bin/dangling
+# 中を指すディレクトリリンク（npm workspaces / pnpm の形）は記録して使い回す
+mkdir -p packages/pkg; echo "PKG_V1" > packages/pkg/index.js
+echo "packages/" >> .git/info/exclude
+ln -s ../packages/pkg node_modules/pkg
+o=$(run --force)
+has "中を指すディレクトリリンクで記録する" "$o" '^recorded=.*full'
+o=$(run)
+has "中を指すディレクトリリンクで使い回す" "$o" '^skip=same-tree'
+echo "PKG_V2" > packages/pkg/index.js
+o=$(run)
+hasnt "ディレクトリリンク先の中身が変わったら省略しない" "$o" '^skip=same-tree'
+# その奥に外を指すリンクがあれば記録しない
+ln -s "$outside_dir/cli.sh" packages/pkg/outside
+o=$(run --force)
+has "奥に外リンクがあっても確認自体は通る" "$o" '^check=0（'
+hasnt "ディレクトリリンクの奥に外へのリンクがあれば記録しない" "$o" '^recorded='
+rm packages/pkg/outside
+# .git の中を指すリンク（大文字違いも）は記録しない
+ln -s ../../.git/HEAD node_modules/.bin/githead
+o=$(run --force)
+has ".git の中を指すリンクでも確認自体は通る" "$o" '^check=0（'
+hasnt ".git の中を指すリンクは記録しない" "$o" '^recorded='
+rm node_modules/.bin/githead
+if [ -e .GIT ]; then
+  ln -s ../../.GIT/HEAD node_modules/.bin/githead
+  o=$(run --force)
+  has "大文字違いの .GIT を指すリンクでも確認自体は通る" "$o" '^check=0（'
+  hasnt "大文字違いの .GIT を指すリンクも記録しない" "$o" '^recorded='
+  rm node_modules/.bin/githead
+fi
+rm -rf node_modules packages "$outside_dir"
+
 # ---- 追加テスト 6: prepare-screen-qa.sh の URL 認証情報秘匿・IPv6 角括弧保持・ラベル検証 ----
 qa_repo="$real_root/qa-repo"
 mkdir -p "$qa_repo"

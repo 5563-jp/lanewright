@@ -430,9 +430,37 @@ generated_dirs = ("dist/", "build/", "out/", ".next/", ".turbo/", "coverage/", "
 other_files = []
 generated_files = []
 
+def inside_worktree(real):
+    # 作業ツリーの中（.git の中は除く）に収まる実体か。npm の node_modules/.bin/* のように
+    # 作業ツリー内を指すリンクは、リンク先の中身を下でハッシュするので再利用を止めなくてよい。
+    if real == wt:
+        return False
+    try:
+        if os.path.commonpath([wt, real]) != wt:
+            return False
+    except ValueError:
+        return False
+    # .git の中は除く。大文字小文字を区別しないファイルシステム（.GIT など）でも抜けないよう、
+    # 名前ではなく実体（st_dev / st_ino）で .git の配下かを確かめる
+    try:
+        git_st = os.stat(os.path.join(wt, ".git"))
+    except OSError:
+        git_st = None
+    cur = real
+    while cur != wt:
+        try:
+            if git_st is not None and os.path.samestat(os.stat(cur), git_st):
+                return False
+        except OSError:
+            return False
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
+    return True
+
 def record_symlink(path, label, visited=None):
     global reusable
-    reusable = False
     lst = os.lstat(path)
     target = os.readlink(path)
     h.update(f"symlink:{label}:{lst.st_mode}:".encode("utf-8", errors="surrogateescape") + os.fsencode(target) + b"\0")
@@ -440,8 +468,14 @@ def record_symlink(path, label, visited=None):
         real = os.path.realpath(path)
         tst = os.stat(path)
     except OSError:
+        # 行き先の無いリンクは中身を証明できないので再利用しない
+        reusable = False
         h.update(f"symlink_target:{label}:missing\0".encode("utf-8", errors="surrogateescape"))
         return
+    # 作業ツリーの外（共有依存など）を指すリンクは、外側の変化を追い切れないので再利用だけ止める
+    if not inside_worktree(real):
+        reusable = False
+    h.update(f"symlink_real:{label}:".encode("utf-8", errors="surrogateescape") + os.fsencode(real) + b"\0")
     if os.path.isfile(real):
         h.update(f"symlink_file:{label}:{tst.st_mode}:{file_token(real)}\0".encode("utf-8", errors="surrogateescape"))
     elif os.path.isdir(real):
@@ -603,7 +637,7 @@ try:
     for rel in other_files:
         fp = os.path.join(wt, rel)
         if os.path.islink(fp):
-            # 共有依存・循環リンクがある場合は成功記録の再利用だけ止め、検証前後の入力照合は維持する。
+            # 作業ツリーの外を指すリンク・行き先の無いリンクがある場合は成功記録の再利用だけ止め、検証前後の入力照合は維持する。
             record_symlink(fp, f"other:{rel}")
         elif os.path.isfile(fp):
             lst = os.lstat(fp)
