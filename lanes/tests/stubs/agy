@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+# 偽の agy（Antigravity CLI。テスト専用）。本物の CLI・ネットワークには触らない。
+# agy にはログイン確認のサブコマンドが無く、ランチャと lanes-doctor.sh はログイン情報の置き場所
+# （$HOME/.gemini/antigravity-cli）の有無で判定する。未ログインを試すときはそのディレクトリを作らない（消す）。
+# 環境変数:
+#   STUB_AGY_RESULT    print モードの result の status（既定 SUCCESS）
+#   STUB_LOG           指定があれば、呼ばれた引数を 1 行 1 JSON で追記する
+import json, os, sys
+args = sys.argv[1:]
+if os.environ.get("STUB_LOG"):
+    with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as f:
+        f.write(json.dumps({"bin": "agy", "args": args}, ensure_ascii=False) + "\n")
+if "--help" in args or args[:1] == ["help"]:
+    print("Usage of agy (stub):\n  --sandbox\n  --settings\n  --model\n  --effort\n  --print")
+    sys.exit(0)
+if "-p" in args or "--print" in args:
+    print(json.dumps({"event": "init"}), flush=True)
+    print(json.dumps({"event": "result", "result": {"status": os.environ.get("STUB_AGY_RESULT", "SUCCESS"),
+                                                    "response": "スタブの応答"}}), flush=True)
+    sys.exit(0)
+print("stub agy: 未対応の呼び出し", file=sys.stderr)
+sys.exit(64)

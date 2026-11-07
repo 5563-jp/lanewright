@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+# 偽の codex（テスト専用）。本物の CLI・ネットワークには触らない。
+# 環境変数:
+#   STUB_CODEX_AUTH    chatgpt（既定）/ apikey / none … login status の結果を切り替える
+#   STUB_CODEX_RESULT  exec（実装）のときに -o のファイルへ書く最終本文（既定 VERDICT: CLEAN）
+#   STUB_CODEX_REVIEW  exec review のときの最終本文（既定 No issues found.）
+#   STUB_LOG           指定があれば、呼ばれた引数を 1 行 1 JSON で追記する
+#   STUB_RUN           指定があれば、本文を返す前にこのシェルのコマンドを子として実行する（push を試す・git の制御ファイルを書き換えるなど。作業ツリーで実行）
+#   STUB_RUN_RC        STUB_RUN の終了コードを追記するファイル
+import json, os, subprocess, sys
+from pathlib import Path
+def run_stub_cmd():
+    cmd = os.environ.get("STUB_RUN")
+    if not cmd:
+        return
+    rc = subprocess.run(["/bin/sh", "-c", cmd], stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+    if os.environ.get("STUB_RUN_RC"):
+        with open(os.environ["STUB_RUN_RC"], "a", encoding="utf-8") as f:
+            f.write(f"{rc}\n")
+args = sys.argv[1:]
+if os.environ.get("STUB_LOG"):
+    with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as f:
+        f.write(json.dumps({"bin": "codex", "args": args}, ensure_ascii=False) + "\n")
+if args[:1] == ["--version"]:
+    print("codex-cli 0.0.0 (stub)"); sys.exit(0)
+if args[:2] == ["login", "status"]:
+    mode = os.environ.get("STUB_CODEX_AUTH", "chatgpt")
+    if mode == "chatgpt":
+        print("Logged in using ChatGPT", file=sys.stderr); sys.exit(0)
+    if mode == "apikey":
+        print("Logged in using an API key - stub-not-a-real-key", file=sys.stderr); sys.exit(0)
+    print("Not logged in", file=sys.stderr); sys.exit(1)
+if "mcp" in args and "list" in args:
+    print("[]"); sys.exit(0)
+# 先頭の -c 設定を飛ばしてサブコマンドを探す
+rest = [a for i, a in enumerate(args) if not (a == "-c" or (i > 0 and args[i - 1] == "-c"))]
+if rest[:2] == ["exec", "review"]:
+    run_stub_cmd()
+    body = os.environ.get("STUB_CODEX_REVIEW", "No issues found.")
+    for event in ({"type": "turn.started"},
+                  {"type": "item.completed", "item": {"type": "agent_message", "text": body}},
+                  {"type": "turn.completed", "usage": {}}):
+        print(json.dumps(event, ensure_ascii=False), flush=True)
+    sys.exit(0)
+if rest[:1] == ["exec"]:
+    sys.stdin.read()
+    run_stub_cmd()
+    if "-o" in args:
+        Path(args[args.index("-o") + 1]).write_text(os.environ.get("STUB_CODEX_RESULT", "VERDICT: CLEAN\n"), encoding="utf-8")
+    print("done (stub)")
+    sys.exit(0)
+print("stub codex: 未対応の呼び出し", file=sys.stderr)
+sys.exit(64)

@@ -1,0 +1,6 @@
+Only a minor naming nit remains.
+
+Review comment:
+
+- [P3] Rename helper for clarity — apps/web/src/x.ts:10-10
+  Optional.

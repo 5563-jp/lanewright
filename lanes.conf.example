@@ -1,0 +1,102 @@
+# レーンのハーネスの設定ファイル（見本）。
+# 置き場所: ${XDG_CONFIG_HOME:-$HOME/.config}/lanewright/lanes.conf（別の場所にするなら環境変数 LANES_CONF で指す）
+#   mkdir -p ~/.config/lanewright && cp lanes.conf.example ~/.config/lanewright/lanes.conf
+# 書き方: zsh で source（読み込み）できる KEY="value" の形。
+#   注意: zsh のコードとしてそのまま読み込まれるので、書いた行はすべて実行される。他人が書き込める場所に置かない・LANES_CONF で他人のファイルを指さない。
+#   どの行も "${KEY:-値}" の形にしておく。こうすると、起動時に環境変数で渡した値が設定ファイルより勝つ
+#   （勝つ順番: 環境変数 > この設定ファイル > lanes/lanes.env の既定）。
+#   使わない行は # を付けたままでよい（付けたままなら既定値で動く）。
+# 値はすべてダミー。自分の環境に合わせて書き換える。鍵・パスワード・トークンはここに書かない。
+# 書いたら `lanes/lanes-doctor.sh` で点検し、`lanes/lanes-roles.sh --print` で役割の割り振りを確かめる。
+
+# ---- 構成 ----
+# 使える道具（スペース区切り）。claude は必須。codex（Codex CLI）/ gemini（Antigravity CLI の agy）は持っていれば足す。
+#   "claude codex gemini" → ① full          実装 Claude と Gemini / レビュー Codex
+#   "claude codex"        → ② claude-codex  実装 Claude            / レビュー Codex
+#   "claude gemini"       → ③ claude-gemini 実装 Claude と Gemini / レビュー Claude（別セッション・読み取り専用。独立性は弱い）
+#   "claude"              → ④ claude-only   実装 Claude            / レビュー Claude（同上）
+LANES_TOOLS="${LANES_TOOLS:-claude codex}"
+
+# 司令塔（レーンを起動・監視する役）。grok = 外のチャット Bot など / claude = Claude デスクトップの Code タブ
+LANES_COMMANDER="${LANES_COMMANDER:-grok}"
+
+# 作業枝を統合する先の枝（マージ済みの判定・後片付け・QA・レビューの比較起点）。main だけの運用なら main
+LANES_BASE_BRANCH="${LANES_BASE_BRANCH:-develop}"
+
+# ---- 置き場所（既定は $HOME/dev/_runs 配下。変えるときだけ # を外して書き換える）----
+# レーンの worktree（1 作業ごとの作業ツリー）を置く場所。監視はここを自動で見つける
+# LANES_RUNS_ROOT="${LANES_RUNS_ROOT:-/Users/you/dev/_runs}"
+# マージ後の残骸（ログ・プロンプトなど）の退避先
+# LANES_ARCHIVE_ROOT="${LANES_ARCHIVE_ROOT:-/Users/you/dev/_runs}"
+# レーン専用の一時領域（scratch = レーンごとの使い捨て作業場所。マージ後の後片付けで消える）
+# LANES_SCRATCH_ROOT="${LANES_SCRATCH_ROOT:-/Users/you/dev/_runs/_scratch}"
+
+# ---- CLI のパス（空なら PATH から claude / codex / agy を探す）----
+# CLAUDE_BIN="${CLAUDE_BIN:-/Users/you/.local/bin/claude}"
+# CODEX_BIN="${CODEX_BIN:-/Users/you/.local/bin/codex}"
+# GEMINI_BIN="${GEMINI_BIN:-/Users/you/.local/bin/agy}"
+
+# ---- モデルと effort（effort = 考える深さ）----
+# モデルは空なら --model を付けず、各 CLI の既定モデルを使う（キットにはモデル名を書かない）。
+# 指定するなら各 CLI のモデル一覧に出る名前を書く（例は架空の名前）。
+CLAUDE_MODEL="${CLAUDE_MODEL:-}"
+CODEX_MODEL="${CODEX_MODEL:-}"
+GEMINI_MODEL="${GEMINI_MODEL:-}"
+# Gemini はモデルによって xhigh・max を受け付けないので high が無難。
+# effort の行だけは "${KEY-値}"（コロン無し）で書く。こうすると、環境変数で空を渡したとき（CLAUDE_EFFORT= zsh run-impl.sh ...）も
+# 空のまま（= --effort を付けない）になる。いつも付けたくないなら、その行を CLAUDE_EFFORT="" のように空で書く
+# （この書き方だけは環境変数より設定ファイルが勝つ）
+CLAUDE_EFFORT="${CLAUDE_EFFORT-xhigh}"
+CODEX_EFFORT="${CODEX_EFFORT-xhigh}"
+GEMINI_EFFORT="${GEMINI_EFFORT-high}"
+# 例（架空のモデル名）: CLAUDE_MODEL="${CLAUDE_MODEL:-my-claude-model}"
+
+# ---- 実装・レビューの許可（AI に何を確認なしでさせるか）----
+# ランチャは非対話で動かすので、許すものを毎回明示して渡す（~/.claude/settings.json や ~/.codex/config.toml に任せない）。
+# 既定のままでよければ書かなくてよい。空（KEY=""）にすると、その指定を付けない（CLI 側の設定に任せる）
+# Claude 実装の許可モード（acceptEdits = 作業ツリー内の編集を確認なしで通す）と、確認なしで使うツール（カンマ区切り）
+# CLAUDE_IMPL_PERMISSION_MODE="${CLAUDE_IMPL_PERMISSION_MODE-acceptEdits}"
+# CLAUDE_IMPL_ALLOWED_TOOLS="${CLAUDE_IMPL_ALLOWED_TOOLS-Bash,Edit,Write,Read,Glob,Grep,TodoWrite}"
+# Codex 実装の sandbox（閉じ込めの範囲）: read-only / workspace-write / danger-full-access（閉じ込めなし。通信が要るときだけ自分の判断で）
+# CODEX_IMPL_SANDBOX="${CODEX_IMPL_SANDBOX-workspace-write}"
+# Codex レビューの sandbox: read-only（既定）か workspace-write だけ（danger-full-access は受け付けない）
+# CODEX_REVIEW_SANDBOX="${CODEX_REVIEW_SANDBOX:-read-only}"
+# Claude のレビュー・QA で使える内蔵ツール（カンマ区切り）。編集系（Edit / Write など）やサブエージェント（Agent / Task）を入れると起動しない
+# CLAUDE_REVIEW_TOOLS="${CLAUDE_REVIEW_TOOLS:-Bash,Read,Glob,Grep}"
+# Claude のレビュー・QA で拒否するものに足すもの（カンマ区切り。例: Bash(npm publish*)）。キット固定の拒否一覧は外せない（docs/config.md）
+# CLAUDE_REVIEW_DENY="${CLAUDE_REVIEW_DENY:-}"
+
+# ---- 確認コマンド ----
+# chk-run.sh が回す確認（lint = 書き方の検査 / typecheck = 型の検査 / build = 本番用の組み立て）。
+# 対象リポジトリに .lanes/check.sh があればそちらが優先。既定は空（# を外して自分のリポジトリの確認に書き換える）
+# LANES_CHECK_CMD="${LANES_CHECK_CMD:-pnpm lint && pnpm typecheck && pnpm build}"
+
+# ---- 画面 QA（QA = 品質確認）の対応表 ----
+# 改行区切りで「origin の URL に含まれる文字列|Preview（公開前の確認用）の URL|観点ファイルのパス」。既定は空（使わない）
+# LANES_SCREEN_QA_MAP="${LANES_SCREEN_QA_MAP:-owner/my-app|https://my-app-preview.example.com|/Users/you/dev/my-app/.lanes/screen-qa.md}"
+
+# ---- Vercel（ホスティングの一種）の自動再デプロイ ----
+# 両方空なら無効。使うときだけプロジェクト名とチーム名（scope）を書く
+LANES_VERCEL_PROJECT="${LANES_VERCEL_PROJECT:-}"
+LANES_VERCEL_SCOPE="${LANES_VERCEL_SCOPE:-}"
+
+# ---- レビュー ----
+# 1 なら、レビューの前に chk-run.sh の確認済みの記録を問い合わせ、親が同じ中身で確認コマンドを通していれば
+# レビューの中で typecheck / lint / unit を回させない（確認コマンドに入れた項目だけが確かめたことになる）。0 なら毎回レビューの中で回させる
+# LANES_REVIEW_REUSE_CHECKS="${LANES_REVIEW_REUSE_CHECKS:-1}"
+
+# ---- そのほか ----
+# 1 なら後片付けのとき ~/Downloads に置き忘れたレビュー出力を警告する
+LANES_DOWNLOADS_SCAN="${LANES_DOWNLOADS_SCAN:-0}"
+# 1 なら after-develop-merge.sh が QA を detach-run.sh で呼び出し元から切り離して起動する（シェルの終了でプロセスの束ごと止める Bot から呼ぶとき用）
+LANES_DETACH_QA="${LANES_DETACH_QA:-0}"
+# レーン終了時に macOS の通知を出す（0 で出さない）
+LANES_NOTIFY="${LANES_NOTIFY:-1}"
+# 最後の出力からこの分数を超えて動きが無ければ、lanes-status.sh が STALLED（止まっていそう）と判定する
+LANES_STALL_MINUTES="${LANES_STALL_MINUTES:-10}"
+# 司令塔が定期に回す確認（lanes-watch.sh --check）の間隔（分）。定期実行（/loop や Bot のルーティン）もこの間隔で組む
+# LANES_CHECK_INTERVAL_MIN="${LANES_CHECK_INTERVAL_MIN:-10}"
+# レビューの周回の上限。超えた周で CLEAN にならなければ GATE: ESCALATE で止め、続けるか締めるかを人に返す
+# LANES_REVIEW_MAX_ROUNDS="${LANES_REVIEW_MAX_ROUNDS:-5}"
+# プロンプトの大きさの上限（バイト）。差分を丸ごと埋め込む事故を止める
+LANES_PROMPT_MAX_BYTES="${LANES_PROMPT_MAX_BYTES:-200000}"

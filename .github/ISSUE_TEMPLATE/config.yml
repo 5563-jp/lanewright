@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: セキュリティ上の問題 / Security vulnerability
+    url: https://docs.github.com/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability
+    about: 公開の Issue には書かず、リポジトリの Security タブ → Report a vulnerability から報告してください / Use the repository's Security tab → Report a vulnerability instead of a public Issue

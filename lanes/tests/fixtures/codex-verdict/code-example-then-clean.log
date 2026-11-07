@@ -1,0 +1,8 @@
+以下は出力形式の例です。
+```text
+[P0] 例の指摘
+VERDICT: NEEDS_FIX
+```
+
+レビューを完了し、指摘は0件です。
+VERDICT: CLEAN

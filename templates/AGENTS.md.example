@@ -1,0 +1,48 @@
+<!--
+  lanewright の運用ルールのひな形（AGENTS.md 用。Codex など AGENTS.md を読む道具向け）。
+  使い方: 下の「---- ここから ----」以降を、自分の AGENTS.md（例 ~/.codex/AGENTS.md や対象リポジトリの AGENTS.md）に貼る。
+  置き換え: <kit> = キットを展開した場所（例 /Users/you/tools/lanewright）
+            <base> = 作業枝の取り込み先（LANES_BASE_BRANCH。例 develop）
+  詳しい理由は <kit>/docs/operating-rules.md。
+-->
+---- ここから ----
+
+## レーン運用（lanewright）
+
+レーン = 1 作業 = 1 worktree = 1 ランチャ。ランチャは `<kit>/lanes/` にある。設定は `~/.config/lanewright/lanes.conf`。
+
+### レーンの中で動いているとき（非対話）
+- このファイルはレーンの AI にも読み込まれる。レーンは非対話なので、人の返事・承認・計画の GO を待たずに、指示書の範囲で最後まで進める。
+- 指示書で決めた範囲のファイルだけ触る。範囲外の直しが要るときは触らずに最終報告に書く。
+
+### 起動と生死
+- コードを変える依頼は、実装の前に PLAN を出して人の GO を待つ（`<kit>/skills/dev-loop`）。レーンの中（人に聞き返せない実行）では、渡された指示書を GO 済みの PLAN として扱い、GO を待たない。
+- 実装は `<kit>/lanes/run-impl.sh`、レビューは `<kit>/lanes/run-review.sh` だけで起動する。CLI を手書きのスクリプトで直接起動しない。
+- 起動前に `<kit>/lanes/lanes-doctor.sh --quiet` が通ること（サブスクのログインを確かめる。API キーでは起動しない）。
+- 起動したら 60 秒以内に `<kit>/lanes/lanes-status.sh <worktree> <label> --tail 20`。RUNNING か DONE 以外は起動失敗として末尾付きで報告する。status を見る前に「起動した」と言わない。
+- 報告は毎回「状態 / 経過時間 / 最終出力の時刻 / 次にやること」。FAILED / DEAD / STALLED は聞かれる前に報告する。DONE は待たずに次工程へ。
+- 同じ label は 1 本だけ。止めるのは `kill <ランチャの pid>`（kill -9 はしない）。FAILED / DEAD の行に「子 pid=N 生存」と出たときだけ `kill N`。
+- 長く動くランチャは親を残してバックグラウンドで起動する。短い Shell で `nohup ... &` だけして親を終わらせない。
+
+### レビュー
+- 実装したら必ず別レーンでレビューする。判定は最終行の `VERDICT: CLEAN` / `VERDICT: NEEDS_FIX` だけ。`VERDICT: NONE` は失敗として回し直す。
+- P0 / P1 は直したら full で再レビューし、ゼロになるまで繰り返す。残っている間は push も PR もしない。
+- P2 / P3 はロジック・エラー経路・テストを触った直しなら原則再レビュー（軽い直しは delta）。S-*（仕様確認）は仕様を決める人に聞く。
+- レビューの周回が `LANES_REVIEW_MAX_ROUNDS`（既定 5）を超えて `GATE: ESCALATE` になったら、直し続けずに人に「続けるか・締めるか」を聞く。受け入れると決めたものは対象リポの `.lanes/accepted-limitations.md` に書く。公開・リリース前の周回の途中では機能を足さない。
+- レーン内の自己レビューは最大 2 回。2 回目の後に P3 だけなら直して終わる。指示書の検証（型チェック・lint・単体テスト）は省略しない。
+
+### ビルド・CI・本番
+- ビルドは取り込み直前の最終の head で `<kit>/lanes/chk-run.sh` と CI に 1 回だけ。実装・レビュー・修正のレーンでは回さない。
+- CI 待ちのレーンは作らない。PR は `gh pr merge <PR> --auto --merge --delete-branch` で GitHub に任せ、次の見回りで状態を見る。マージ済みなら `<kit>/lanes/cleanup-after-merge.sh <worktree> --apply`。
+- 必須チェックの無いリポジトリでは `--auto` が即マージになるので、`gh pr checks <PR> --watch --fail-fast` を 1 回待ってから手でマージする。
+- `<base>` より先（main・本番デプロイ・本番 DB・課金の本番切り替え・ストア提出）は人の明示の GO を待つ。リリースの PR は auto-merge しない。
+
+### 安全
+- レーンでは MCP を使わない（ランチャが遮断する）。外部サービスの調査は司令塔が先にやって指示書に書く。
+- 秘密（API キー・パスワード・トークン）の値は末尾の数文字も表示しない。`.env*`（見本も含む）を開かない。`ps` の引数・`env`・`printenv` を表示しない。表示されてしまった秘密は無効化して作り直す。
+- 一時ファイルは `$LANES_SCRATCH`（= `$TMPDIR`）の下だけ。`~/Downloads`・ホーム直下・`/tmp` に置かない。
+- 指示書の範囲外のファイルは触らない。直しが要れば最終報告に「どのファイルの何を」と書く。force push・枝の切り替え・stash・reset はしない。
+
+### 残タスク
+- 見つかった残タスクは軽微でも放置しない。数分で終わるものはその場で片付け、大きいものは Issue などに別タスクとして記録する。
+- 「対応不要」はコードが正しい・仕様どおりと確かめられたときだけ。区切りごとに、残タスクが「完了」か「記録済み」かを確かめる。
