@@ -126,6 +126,7 @@ if (( ! dry )); then
   for f in "$log" "$json" "$err" "$evidence" "$final" "$json1" "$err1"; do lanes_rotate_log "$f"; done
 fi
 mkdir -p "$logdir"
+(( ! dry )) || lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
 if (( dry )); then scratch="$(lanes_scratch_path "$wt" "$label")"; else lanes_scratch_prepare "$wt" "$label" gemini; scratch="$LANES_SCRATCH"; fi
 
 lanes_require_prompt "$prompt"

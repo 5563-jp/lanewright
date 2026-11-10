@@ -27,6 +27,7 @@ Mac で Claude / Codex / Gemini（Antigravity CLI `agy`）の CLI（コマンド
 | `<label>.pid` | 起動時に書く。pid・`lstart`（プロセス開始時刻）・開始時刻・レーン種別・worktree・子の pid と開始時刻・scratch のパス |
 | `<label>.done` | 終了時に書く。`EXIT:n`・`VERDICT:`・終了時刻・経過分・補足 |
 | `<label>.lock` | 同じ label の二重起動を防ぐ排他ロック（消さない・回転しない） |
+| `.lanes-records` | ランチャの記録の台帳。ランチャと `detach-run.sh` が、`logs/` に何かを書く前に、書く名前の持ち主を 1 行ずつ載せる（`label:<label>` か `file:<名前>`）。`chk-run.sh` は、ここに載っている持ち主の記録だけを入力の指紋から外す（7 章）。手で書き換えない |
 
 既存のログは上書きせず `<name>.prev-<日時>.<ext>` に退避します。
 
@@ -237,7 +238,7 @@ zsh lanes/lanes-watch.sh --check
 - 出どころは `chk-run.sh` の確認済みの記録（`passed.tsv`）だけです。ランチャが計算した記録で、AI の自己申告は使いません。
 - レビューランチャは子を起動する前に `chk-run.sh <worktree> --query` で問い合わせます。一致条件は `skip=same-tree` と同じ（tree・入力の指紋・確認コマンドの指紋）で、緩めません。
   入力の指紋には作業ツリー（無視対象のファイルも含む）と環境変数が入るので、ランチャは scratch や git の通信止めを export する前に、`_common.sh` が外した API キーなども元に戻した環境で問い合わせます。**親は `chk-run.sh` とレビューを同じ環境（同じシェル）から呼び、その間に作業ツリーを変えないでください。** 変えると使い回さず、今までどおりレビューの中で回させます。
-  ランチャの記録（`logs/` の直下の `.pid`・`.done`・ログ・証跡・起動ログなど。名前の一覧は 7 章の `chk-run.sh`）は指紋に入りません。`detach-run.sh` が起動ログ（`logs/launch.log`）を先に書いても、前のレーンの記録が残っていても、記録と合います。
+  ランチャの記録（`logs/` の直下の `.pid`・`.done`・ログ・証跡・起動ログなどのうち、ランチャが台帳 `logs/.lanes-records` に載せた持ち主のもの。7 章の `chk-run.sh`）は指紋に入りません。`detach-run.sh` が起動ログ（`logs/launch.log`）を先に書いても、前のレーンの記録が残っていても、記録と合います。台帳に無い名前のファイル（確認コマンドが読む `logs/input.json` など）は、記録に似た名前でも入力のままです。
 - 使い回せるとき: 指示書に「必須検証（typecheck / lint / unit）は親が同じ中身で実施済み（chk-run の記録: head・日時・確認コマンドの種類）。回さないこと。確かめたい点は該当テスト 1 本か小さな再現だけ」と入れ、必須検証は済んだものとして判定します（Codex: 成功確認 `COMPLETE` と同じ扱い。Claude: テンプレの「検証 1 に未実施があれば CLEAN を出さない」を適用しない）。レビュアーが自分で回したテストの「失敗」の報告だけは不合格にします。証跡には `- 必須検証: 親の chk-run の記録を使用（head・日時・確認コマンド）` を出します。
 - 使い回せないとき（記録が無い・tree が違う・確認コマンドや環境が変わった・未 commit の変更がある・確認コマンドを確実に解決できない書き方など）: 今までとまったく同じ動きです。証跡には `- 必須検証: レビューの中で回すよう指示（親の chk-run の記録は使わない: <理由>）` を出します（指示した事実だけです。回せたかどうかは、証跡の「必須検証の成功確認」の行が示します）。
 - 使い回しの有無と使った記録（head・日時・確認コマンドの種類）は再利用の条件に入ります。記録が変わったら（使い回しが無くなった・親が回し直した）同じ HEAD でも前回の結果を使いません。
@@ -297,10 +298,18 @@ zsh lanes/lanes-watch.sh --check
   | `check=<rc>（.lanes/check.sh）` / `check=<rc>（LANES_CHECK_CMD）` | 確認コマンドの終了コードと出どころ。非 0 なら次の行に `ログ: <outdir>/check.log` |
   | `skip=same-tree ...` と `check=0 SKIP(same-tree)` | 前に同じ入力で通っていたので何も回さなかった |
   | `recorded=tree <短い tree>（full）` | 通ったので記録した |
+  | `record=no reason=<理由>（説明）` | 通ったが記録しなかった（次に同じ中身で呼んでも省かず、レビューの問い合わせは `no-record` になる）。理由は `uncommitted`（未 commit の変更・未追跡のファイル・変更検知を省く設定）か `unresolvable`（確認コマンドや依存を確実に照合できない）。説明に、原因になったファイルや書き方（例: `確認コマンド（.lanes/check.sh）の「exec」`）が出る。確認コマンドが失敗したときは出さない |
 - 同じ git tree かつ同じ入力の指紋（`input_fp`。スクリプト自身・実行環境・確認コマンドの出どころ・確認コマンドの文字列（`.lanes/check.sh` なら中身）と、各コマンドの先頭の実行ファイル（PATH で解決した先とその `#!` の解釈系）の中身・ポート・使うバイナリ・`node_modules` などの追跡外の入力・追跡ファイルの中身から作る）で通っていれば何も回しません（`--force` で強制）。差分があれば部分的に省かず全部回します。
 - 未保存の変更があるとき、変更検知を省く設定（`assume-unchanged` / `skip-worktree`）があるとき、作業ツリーの外を指すシンボリックリンク（共有依存など）か行き先の無いリンクがあるとき（作業ツリーの中を指すリンク（npm の `node_modules/.bin/*` など）はリンク先の中身を指紋に入れて続けます）、または確認コマンドの実体の同一性を確かめられないときは、結果を再利用も記録もしません。確認コマンドに**確実に解決できない書き方が 1 つでもあれば、回すが記録しません**（再利用しない）。対象は、変数・`~`・ワイルドカードで組み立てた名前、見つからない名前、`PATH` の付け替え（`PATH=/別:$PATH tool` の前置・`export PATH=…`）、`cd` などの作業場所の移動、引数のコマンドを起動する包み（`exec`・`env`・`command`・`xargs`・`nohup` など）、関数・alias の定義、`source` / `.`、`eval`、サブシェル `( )`、パイプ `|`、コマンド置換 `$( )` / `` ` ` ``、ヒアドキュメント `<<`、`bash -c` などです。指紋に入れるのは、先頭が素のコマンド名か相対・絶対パスで、前置の代入が `PATH` 以外の単純な形だけです。`.lanes/check.sh` の `#!` やコメントの行は行単位で読み飛ばし、後ろの行のコマンドも見ます。
-- **ランチャの記録は入力に数えません。** 対象は、作業ツリー直下の `logs/` の直下にある、git が無視している普通のファイル（シンボリックリンク・ハードリンクでないもの）のうち、名前がランチャの記録のものだけです: `<label>.pid` / `.done` / `.lock` / `.log`（`.stderr.log`・`.verify.log`・起動ログの `launch.log` や `<label>.launch.log`・`qa-deps-<名前>.log` を含む）/ `.json` / `.prompt.md` / `.evidence.md` / `.last.md` / `.meta.txt`、`<系列>.followups.md`、`qa-case.md`、`.<系列>.review-state`、`.review-reuse-blocked`、回転した前回分（`<名前>.prev-<日時>.<拡張子>`）。レーンを起動・終了するたびに増えるので、数えると「`chk-run.sh` の直後にレビューを起動する」だけで記録が使えなくなります（`detach-run.sh` が起動ログを先に書くため）。
-  `logs/` の中のフォルダ、ほかの名前のファイル（例 `logs/input.txt`）、リンク、追跡しているファイル、下の階層の `logs/`（例 `src/logs/`）は今までどおり入力です。**確認コマンドが読む設定やデータを、`logs/` の直下に上の名前で置かないでください**（変えても気づけません）。`detach-run.sh` の起動ログは、`logs/` の直下に `.log` で終わる名前で置きます。
+- **ランチャの記録は入力に数えません。** レーンを起動・終了するたびに増えるので、数えると「`chk-run.sh` の直後にレビューを起動する」だけで記録が使えなくなります（`detach-run.sh` が起動ログを先に書くため）。
+  **名前が記録に似ているだけでは外しません。** 外すのは、ランチャが書く前に台帳（`logs/.lanes-records`）へ載せた持ち主の、決まった名前のファイルだけです。対象は、作業ツリー直下の `logs/` の直下にある、git が無視している普通のファイル（シンボリックリンク・ハードリンクでないもの）のうち、次のものです。
+  - 台帳に `label:<label>` がある label の `<label>.pid` / `.done` / `.lock` / `.log` / `.stderr.log` / `.json` / `.prompt.md` / `.dry-run.prompt.md` / `.evidence.md` / `.last.md` / `.completion.json` / `.try1.json` / `.try1.stderr.log` / `.verify.log` / `.meta.txt`（名前の組は `chk-run.sh` の `LANE_LABEL_SUFFIXES`）
+  - 台帳に `file:<名前>` がある名前そのもの（`detach-run.sh` の起動ログ、`.<系列>.review-state`、`<系列>.followups.md`、`.review-reuse-blocked`、`qa-case.md`、`qa-deps-<名前>.log`）
+  - 上の名前の回転した前回分（`<名前>.prev-<日時>.<拡張子>`）と、置き換え用の一時ファイル
+  - 台帳そのもの
+  台帳に載せるのは、各ランチャ（`_common.sh` の `lanes_records_claim`。起動時・dry-run・起動前の誤りの記録）、`prepare-screen-qa.sh`、`after-develop-merge.sh`、`detach-run.sh`（起動ログが worktree の `logs/` の直下にあるときだけ）です。行は足すだけで、同じ行は足しません。台帳が symlink・ハードリンクのときは、ランチャは書かず、`chk-run.sh` も使いません（何も外さない）。
+  台帳に無い名前のファイル（例 `logs/input.json`・`logs/input.txt`）、`logs/` の中のフォルダ、リンク、追跡しているファイル、下の階層の `logs/`（例 `src/logs/`）は入力です。確認コマンドが `logs/input.json` を読む構成で中身を変えれば、記録と合わなくなり回し直します。**確認コマンドが読む設定やデータを、起動した label の記録と同じ名前（`logs/<起動した label>.json` など）で置かないでください**（変えても気づけません）。
+  この仕組みより前の版のランチャが書いた記録は台帳に無いので、入力として数えます（同じ label を起動し直すと台帳に載ります）。
 - 生成物（git が無視している、作業ツリー直下の `dist/` `build/` `out/` `.next/` `.turbo/` `coverage/` `test-results/` `playwright-report/` の中と、`*.tsbuildinfo`）は確認コマンド自身が作り直すので、検証の前後の照合からは外し、使い回すときは今の出力が記録のときと同じであることを求めます。定義は `_common.sh` の `LANES_GENERATED_DIRS` / `LANES_GENERATED_SUFFIXES` の 1 か所で、`cleanup-after-merge.sh` も同じものを使います。
 - 検証の前後で HEAD・tree・作業ツリー・`input_fp` を照合し、変化が無く通ったときだけ記録します。記録先は `CHK_CACHE`（既定 `$LANES_RUNS_ROOT/_chk-cache/passed.tsv`）。1 行は `tree・head・full・日時・worktree・input_fp・port・outdir` のタブ区切りです（port と outdir は問い合わせが同じ条件で照合し直すために残します）。
 - 終了コード: 0 = 通った・省略した / 1 = 確認コマンドの失敗・fetch / merge の失敗・検証中の入力の変化 / 2 = 使い方の誤り・確認コマンドが未設定。
@@ -309,7 +318,7 @@ zsh lanes/lanes-watch.sh --check
 - 確認コマンドを一切実行せず、記録・出力先・記録のフォルダを作らず、fetch もしません。`--merge` / `--force` とは組み合わせられません（exit 2）。
 - 一致条件は `skip=same-tree` と同じです（tree・入力の指紋・確認コマンドの指紋）。同じ tree の記録ごとに、その記録の port と outdir で指紋を計算し直して照合します（port・outdir の無い旧形式の記録は使いません）。
 - 使い回せる: 1 行目 `reuse=yes`、続けて `head=<記録の head 12 桁>` / `recorded=<記録の日時>` / `check=<.lanes/check.sh か LANES_CHECK_CMD>` を出して exit 0。
-- 使えない: `reuse=no reason=<理由>` を出して exit 1。理由は `no-check`（確認コマンドが未設定）/ `no-record`（同じ tree の記録が無い）/ `cache-link`（記録がリンク）/ `uncommitted`（未 commit の変更・変更検知を省く設定）/ `unresolvable`（確認コマンドや依存を確実に解決できない）/ `input-changed`（確認コマンド・環境変数・依存・ランチャの記録でない無視対象のファイルなどが記録と違う）/ `state-error`。
+- 使えない: `reuse=no reason=<理由>` を出して exit 1。理由は `no-check`（確認コマンドが未設定）/ `no-record`（同じ tree の記録が無い。`chk-run.sh` をまだ通していないか、通ったが記録できなかった。後者は `chk-run.sh` が `record=no reason=…` の行に理由を出している）/ `cache-link`（記録がリンク）/ `uncommitted`（未 commit の変更・変更検知を省く設定）/ `unresolvable`（確認コマンドや依存を確実に解決できない）/ `input-changed`（確認コマンド・環境変数・依存・ランチャの記録でない無視対象のファイルなどが記録と違う）/ `state-error`。
 - 使い方の誤り（worktree が無い・git の作業ツリーでない・余計な引数）は exit 2。
 - 入力の指紋には環境変数が入るので、`chk-run.sh` を回したのと同じ環境から呼びます。レビューの入口・ランチャだけが持つ制御の値（`LANES_ENTRY_PREFLIGHT`・`LANES_REVIEW_REUSE_CHECKS`）は指紋に入れません。
 
@@ -407,6 +416,7 @@ zsh lanes/prepare-screen-qa.sh <checkout> [label] [--url <preview-url>] [--viewp
 
 外の Bot のシェルの中には、ツールの実行が終わるとプロセスグループごと `TERM` / `KILL` するものがあります。`nohup` や `&!` だけでは同じグループに残った子が巻き込まれます。
 `detach-run.sh <launch.log> <コマンド> [引数...]` は新しいセッション（`setsid` 相当）でコマンドを起動し、呼び出し元から切り離します。出力は `<launch.log>` へ追記し、引数や例外の本文はログに書きません。
+起動ログを worktree の `logs/` の直下（`<worktree>/logs/<名前>`）に置くと、書く前にその名前をランチャの記録の台帳（`logs/.lanes-records`）へ載せるので、`chk-run.sh` の入力には数えません（7 章）。それ以外の場所（ほかのフォルダ・`logs/` の下のフォルダ・worktree の下の階層の `logs/`）に置いたときは、台帳を作りません。
 `after-develop-merge.sh` は設定キー `LANES_DETACH_QA=1` のとき、QA をこれで起動します（既定 `0` は QA へそのまま exec）。Bot のシェルから呼ぶときは、設定ファイルか環境変数で `LANES_DETACH_QA=1` にします。
 
 ## 13. 終了コードのまとめ
@@ -496,7 +506,7 @@ LANES_LINT_STRICT=1 zsh selftest.sh --test tests/test-lint.sh   # shellcheck が
 | `test-common-process.sh` / `test-common-security.sh` | 子プロセスの監督と回収、排他、秘密の扱い |
 | `test-gemini-launcher.sh` | Gemini レーンのサンドボックス・監査・救済 commit |
 | `test-chk-run.sh` / `test-chk-regressions.sh` | 最終確認の省略条件と入力照合・問い合わせ（`--query`） |
-| `test-review-reuse-launch.sh` | `chk-run.sh` の直後に `detach-run.sh` 経由で本物の起動（dry-run でない）をしたレビューが、親の記録を使い回すこと（`node_modules`・`dist` のある worktree。Codex・Claude のレビューとも）。ランチャの記録は入力に数えず、`logs/` に置いたほかの入力・リンク・依存・生成物の変化では使い回さないこと |
+| `test-review-reuse-launch.sh` | `chk-run.sh` の直後に `detach-run.sh` 経由で本物の起動（dry-run でない）をしたレビューが、親の記録を使い回すこと（`node_modules`・`dist` のある worktree。Codex・Claude のレビューとも）。台帳（`logs/.lanes-records`）に載っている持ち主の記録は入力に数えず、台帳に無い名前（記録に似た名前の `logs/input.json` など）・`logs/` に置いたほかの入力・リンク・依存・生成物の変化では使い回さないこと。確認コマンドが `logs/input.json` を読む構成で中身を変えたら回し直すこと。台帳の書き方（リンクの台帳を辿らない） |
 | `test-cleanup-safety.sh` / `test-cleanup-qa.sh` / `test-scratch-cleanup.sh` / `test-cleanup-pg-failures.sh` | 後片付けの停止条件・QA worktree・scratch・一時 PostgreSQL |
 | `test-lanes-monitor.sh` / `test-lanes-watch.sh` | 巡回とウォッチ |
 | `test-prepare-screen-qa.sh` | 画面 QA の準備 |
@@ -517,6 +527,8 @@ LANES_LINT_STRICT=1 zsh selftest.sh --test tests/test-lint.sh   # shellcheck が
 - `git ls-files` / `status --porcelain` は非 ASCII のパスをエスケープして出す → `-c core.quotePath=false`
 - `git rev-parse --git-common-dir` は本体 checkout だと相対パス → `--path-format=absolute`
 - `git ls-remote --heads origin <name>` は末尾一致 → `refs/heads/<name>` で完全一致
-- `chk-run.sh` の入力の指紋にランチャの記録（`logs/` の直下）を入れると、`detach-run.sh` が起動ログ（`logs/launch.log`）をランチャより先に書くだけで記録と合わなくなり、本物の起動でだけ「使い回さない」になる（dry-run や手での問い合わせでは再現しない）→ ランチャの記録の名前だけを指紋から外す。起動の経路を変えたら `test-review-reuse-launch.sh` のように本物の起動で確かめる
+- `chk-run.sh` の入力の指紋にランチャの記録（`logs/` の直下）を入れると、`detach-run.sh` が起動ログ（`logs/launch.log`）をランチャより先に書くだけで記録と合わなくなり、本物の起動でだけ「使い回さない」になる（dry-run や手での問い合わせでは再現しない）→ ランチャの記録を指紋から外す。起動の経路を変えたら `test-review-reuse-launch.sh` のように本物の起動で確かめる
+- ランチャの記録を**名前だけ**で指紋から外すと、ランチャが作っていない `logs/input.json` のような「記録に似た名前の入力」まで外れ、確認コマンドがそれを読む構成では、中身を失敗する内容に変えても古い成功の記録を使い回す → ランチャが書く前に台帳（`logs/.lanes-records`）へ持ち主を載せ、台帳に載っている持ち主の決まった名前だけを外す。ランチャが `logs/` に書く名前を足したら、`chk-run.sh` の `LANE_LABEL_SUFFIXES` に足すか、書く前に `lanes_records_claim` で載せる
+- `chk-run.sh` が「通ったのに記録しない」ときに何も出さないと、レビューの問い合わせが `no-record` になる理由が分からない（`.lanes/check.sh` に `exec zsh -f …` と書いただけで起きる。`exec` は引数のコマンドを起動する包みなので、仕様どおり記録しない）→ `record=no reason=…（理由）` を出す。確認コマンドの最後の行は `exec` を付けずに書く
 - zsh: スクリプトの実行中に、閉じた stderr（`2>&-` で起動されたとき）へ `print -u2` すると、`|| true` を付けていてもそのシェルごと終了コード 1 で止まる（`zsh -c` では止まらない）→ 失敗の経路ではない案内（effort の上書きの注意など）は子シェル `( print -u2 … ) || true` の中で出す
 - zsh: 関数内の `trap ... EXIT` は関数の終わりで発火する / 関数形式の `TRAPEXIT` は `$(...)` の子シェルの終了でも走る（`ZSH_SUBSHELL` で弾く）/ 関数内で `set -e` が発火すると `TRAPEXIT` は走らない（`TRAPZERR` も定義する）。ランチャは `TRAPZERR` と `TRAPEXIT` の 2 段で `.done` を書く

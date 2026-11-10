@@ -43,6 +43,7 @@ fi
 lanes_require_tool claude run-claude.sh
 lanes_entry_preflight
 mkdir -p "$logdir"
+(( ! dry )) || lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
 # レーン専用の作業場所。一時ファイルは ~/Downloads ではなくここへ。マージ後 cleanup が消す
 if (( dry )); then scratch="$(lanes_scratch_path "$wt" "$label")"; else lanes_scratch_prepare "$wt" "$label" claude; scratch="$LANES_SCRATCH"; fi
 

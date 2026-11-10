@@ -3,16 +3,21 @@
 # 経緯: chk-run.sh が成功を記録した直後に detach-run.sh 経由でレビューを起動すると、証跡が毎回
 #       「親の chk-run の記録は使わない: input-changed」になった。detach-run.sh が起動ログ（logs/launch.log）を
 #       ランチャの問い合わせより先に書き、その無視対象のファイルが入力の指紋に入っていたため。
-#       ランチャの記録（logs/ の直下の決まった名前のファイル）は指紋に入れないようにした。
+#       ランチャの記録（logs/ の直下の、ランチャが台帳 logs/.lanes-records に載せた持ち主のファイル）は指紋に入れないようにした。
+#       名前だけで外していたときは、確認コマンドが読む logs/input.json のような「記録に似た名前の入力」まで外れ、
+#       中身を失敗する内容に変えても古い成功の記録を使い回した。台帳に載っている持ち主の記録だけを外す。
 # 確かめること:
 #   1. node_modules と dist のある worktree で、chk-run.sh → detach-run.sh 経由の本物の起動（Codex・Claude のレビューとも）が
 #      記録を使い回す（証跡と指示書の両方）。レビューの後も chk-run.sh は同じ確認を省く（skip=same-tree）
-#   2. dry-run の後・実装レーンの後・同じ worktree の 2 回目以降の起動でも使い回す
-#   3. ランチャが logs/ に書く名前（Gemini・QA・回転した前回分を含む）は、どれも入力に数えない
+#   2. dry-run の後・実装レーン・QA レーン・画面 QA の準備の後・同じ worktree の 2 回目以降の起動でも使い回す
+#   3. ランチャが logs/ に書く名前（Gemini・QA・回転した前回分を含む）でも、台帳に載っていない持ち主のものは入力のまま。
+#      台帳に載せた後は、どれも入力に数えない
 #   4. logs/ に置いた、ランチャの記録でないもの（ほかの名前・フォルダの中・リンク・ハードリンク・追跡ファイル・
 #      下の階層の logs/）と、依存・生成物の変化では、今までどおり使い回さない（照合をすり抜けない）
 #   5. 環境変数の条件は緩めていない（親のシェルに API キーの環境変数があっても同じ環境から呼べば使い回す。
 #      起動のときだけ外すと使い回さず、証跡に理由と一言が出る）
+#   6. 確認コマンドが logs/input.json を読む構成で、中身を失敗する内容に変えたら、古い成功の記録を使い回さない（回し直して失敗する）
+#   7. 台帳の書き方（symlink・ハードリンクの台帳は辿らない・使わない。detach-run.sh は worktree の logs/ の直下のときだけ載せる）
 # 偽の CLI（tests/stubs）と一時リポだけを使う。本物の CLI・ネットワークには触らない。全データを一時領域に置く。
 set -euo pipefail
 # git の環境変数を外し、一時リポの外へ git が上っていかないようにする（本物のリポを書き換えない）
@@ -139,31 +144,70 @@ launch "$wt" impl.launch.log run-codex.sh impl-codex
 launch "$wt" launch.log run-review.sh rev-impl-r1 --base origin/develop --round 1
 reused "$wt" rev-impl-r1 "実装レーンの後のレビュー"
 pass "実装レーン（run-impl.sh・run-codex.sh）が logs/ に記録を残した後でも、レビューは使い回す"
-
-# ---- 3. ランチャが logs/ に書く名前は、どれも入力に数えない（Gemini・QA・画面 QA・回転した前回分・書きかけの一時ファイル）----
-typeset -a records
-records=(
-  x.pid x.done x.lock x.log x.json x.stderr.log x.prompt.md x.dry-run.prompt.md x.evidence.md x.last.md x.completion.json
-  x.try1.json x.try1.stderr.log x.verify.log x.meta.txt x.launch.log launch.log qa-deps-root.log qa-case.md
-  rev-a.followups.md .rev-a.review-state .rev-a.review-state.tmp.12345 .review-reuse-blocked .x.pid.12345.0123456789ab.tmp
-  .x.last.md.12345.1794270246011662000.tmp .x.completion.json.12345.1794270246011662001.tmp
-  x.prev-20260101-000000.pid x.prev-20260101-000000-2.done x.stderr.prev-20260101-000000.log x.prompt.prev-20260101-000000.md
-  x.evidence.prev-20260101-000000.md x.completion.prev-20260101-000000.json x.last.prev-20260101-000000-3.md rev-1.2_b-r3.json
-)
-for f in "${records[@]}"; do
-  print -r -- "記録 $f" > "$wt/logs/$f"
-  [[ "$(query "$wt")" == reuse=yes* ]] || fail "ランチャの記録の名前が入力に数えられている: logs/$f → $(query "$wt")"
-  print -r -- "書き換え" >> "$wt/logs/$f"
-  [[ "$(query "$wt")" == reuse=yes* ]] || fail "ランチャの記録の書き換えが入力に数えられている: logs/$f"
+# QA レーン（run-qa.sh）と画面 QA の準備（prepare-screen-qa.sh）の記録も、台帳に載るので入力に数えない
+launch "$wt" qa.launch.log run-qa.sh qa-1
+zsh -f "$LANES_DIR/prepare-screen-qa.sh" "$wt" screen-1 --url "http://localhost:49997/" > "$T/screen-qa.out" 2>&1 \
+  || { cat "$T/screen-qa.out" >&2; fail "prepare-screen-qa.sh が失敗（用意が誤り）"; }
+[[ -f "$wt/logs/qa-1.done" && -f "$wt/logs/screen-1.prompt.md" && -f "$wt/logs/screen-1.meta.txt" ]] || fail "QA・画面 QA の記録が logs/ に無い（用意が誤り）"
+[[ "$(git -C "$wt" status --porcelain)" == "" ]] || fail "QA レーンの後に未 commit の変更がある（用意が誤り）"
+[[ "$(query "$wt")" == reuse=yes* ]] || fail "QA レーン・画面 QA の準備の記録が入力に数えられている: $(query "$wt")"
+for owner in label:impl-claude label:impl-codex label:rev-impl-r1 label:qa-1 label:screen-1 file:launch.log file:impl.launch.log file:qa.launch.log \
+    file:.rev-impl.review-state file:rev-impl.followups.md file:.review-reuse-blocked; do
+  grep -qxF -- "$owner" "$wt/logs/.lanes-records" || { cat "$wt/logs/.lanes-records" >&2; fail "台帳に載っていない: $owner"; }
 done
-pass "ランチャが logs/ に書く名前（${#records} 通り。Gemini・QA・回転した前回分を含む）は、置いても書き換えても入力に数えない"
+[[ "$(sort "$wt/logs/.lanes-records" | uniq -d)" == "" ]] || fail "台帳に同じ行が 2 回載っている"
+pass "QA レーン・画面 QA の準備の後でも使い回す。ランチャと detach-run.sh は、書く名前の持ち主を台帳（logs/.lanes-records）に 1 回ずつ載せる"
 
-# ---- 4. logs/ に置いた、ランチャの記録でないものは入力のまま（照合をすり抜けない）----
+# ---- 3. ランチャが logs/ に書く名前でも、台帳に載っていない持ち主のものは入力のまま。台帳に載せた後は数えない ----
 no_reuse() {   # <説明> [期待する理由]: 今の状態で問い合わせが reuse=no（既定の理由は input-changed）
   local got; got="$(query "$wt")"
   [[ "$got" == "reuse=no reason=${2:-input-changed}" ]] || fail "$1: 使い回してしまう・理由が違う（$got）"
 }
 yes_again() { [[ "$(query "$wt")" == reuse=yes* ]] || fail "$1: 元に戻したのに reuse=yes に戻らない（$(query "$wt")）"; }
+claim() {   # <logdir> <label:名前|file:名前>...: ランチャと同じ関数で台帳へ載せる（_common.sh の lanes_records_claim）
+  LANES_DIR="$LANES_DIR" zsh -fc 'source "$LANES_DIR/_common.sh"; lanes_records_claim "$@"' claim "$@"
+}
+# label x・rev-1.2_b-r3 と系列 rev-a は、この worktree で一度も起動していない（台帳に無い）
+typeset -a records
+records=(
+  x.pid x.done x.lock x.log x.json x.stderr.log x.prompt.md x.dry-run.prompt.md x.evidence.md x.last.md x.completion.json
+  x.try1.json x.try1.stderr.log x.verify.log x.meta.txt x.launch.log qa-deps-root.log qa-case.md
+  rev-a.followups.md .rev-a.review-state .rev-a.review-state.tmp.12345 .x.pid.12345.0123456789ab.tmp
+  .x.last.md.12345.1794270246011662000.tmp .x.completion.json.12345.1794270246011662001.tmp
+  x.prev-20260101-000000.pid x.prev-20260101-000000-2.done x.stderr.prev-20260101-000000.log x.prompt.prev-20260101-000000.md
+  x.evidence.prev-20260101-000000.md x.completion.prev-20260101-000000.json x.last.prev-20260101-000000-3.md rev-1.2_b-r3.json
+)
+# 指摘の形そのもの（確認コマンドが読むデータのつもりで置いた、記録と同じ語尾の名前）
+typeset -a lookalikes
+lookalikes=(input.json input.log data.done settings.prompt.md report.evidence.md notes.last.md cache.lock)
+for f in "${records[@]}" "${lookalikes[@]}"; do
+  print -r -- "入力 $f" > "$wt/logs/$f"
+  no_reuse "台帳に無い持ち主の logs/$f（名前が記録に似ているだけ）"
+  rm -f "$wt/logs/$f"
+done
+yes_again "記録に似た名前のファイルを消した後"
+pass "台帳に載っていない持ち主のファイルは、名前が記録に似ていても入力のまま（$(( ${#records} + ${#lookalikes} )) 通り。logs/input.json を含む）"
+# 台帳に載せた後は、置いても書き換えても入力に数えない（全部を一度に置いて、1 つでも数えられたら使い回さなくなる）
+claim "$wt/logs" label:x label:rev-1.2_b-r3 file:x.launch.log file:qa-deps-root.log file:qa-case.md file:rev-a.followups.md file:.rev-a.review-state
+for f in "${records[@]}" launch.log .review-reuse-blocked; do print -r -- "記録 $f" >> "$wt/logs/$f"; done
+[[ "$(query "$wt")" == reuse=yes* ]] || fail "台帳に載せた持ち主の記録が入力に数えられている: $(query "$wt")"
+for f in "${records[@]}" launch.log .review-reuse-blocked; do print -r -- "書き換え" >> "$wt/logs/$f"; done
+[[ "$(query "$wt")" == reuse=yes* ]] || fail "台帳に載せた持ち主の記録の書き換えが入力に数えられている: $(query "$wt")"
+pass "台帳に載せた持ち主の記録（$(( ${#records} + 2 )) 通り。Gemini・QA・回転した前回分・書きかけの一時ファイルを含む）は、置いても書き換えても入力に数えない"
+# 台帳に載っていても、持ち主の決まった名前でないもの（label x の、ランチャが書かない語尾）は入力のまま
+for f in x.txt x.config.json.bak x.pid.txt x-extra.json xx.json; do
+  print -r -- "入力" > "$wt/logs/$f"; no_reuse "logs/$f（label x の決まった名前ではない）"; rm -f "$wt/logs/$f"
+done
+yes_again "label x の決まった名前でないファイルを消した後"
+pass "台帳に載っている label でも、ランチャが書く決まった名前でないファイルは入力のまま"
+# 台帳を消す・空にすると、何も外さない（載せた事実が無ければ、記録に似た名前はすべて入力）
+cp "$wt/logs/.lanes-records" "$T/ledger.bak"
+rm -f "$wt/logs/.lanes-records"; no_reuse "台帳を消した後"
+: > "$wt/logs/.lanes-records"; no_reuse "台帳を空にした後"
+cp "$T/ledger.bak" "$wt/logs/.lanes-records"; yes_again "台帳を戻した後"
+pass "台帳が無い・空なら、記録に似た名前のファイルはすべて入力として数える"
+
+# ---- 4. logs/ に置いた、ランチャの記録でないものは入力のまま（照合をすり抜けない）----
 # ほかの名前のファイル（確認コマンドが読む設定やデータのつもりで置いたもの）
 for f in input.txt config.yaml data.json.bak notes.md x.prompt.txt .hidden x.review-state "x.prev-2026.log.txt"; do
   print -r -- "入力" > "$wt/logs/$f"; no_reuse "logs/$f（記録でない名前）"; rm -f "$wt/logs/$f"; yes_again "logs/$f"
@@ -219,5 +263,81 @@ grep -q '^- 必須検証: レビューの中で回すよう指示（親の chk-r
   || { grep '必須検証' "$wt/logs/rev-key-r2.evidence.md" >&2 || true; fail "起動のときだけ環境変数を外したのに、証跡が「使わない: input-changed」と一言になっていない"; }
 if grep -q '親が同じ中身で実施済み' "$wt/logs/rev-key-r2.prompt.md"; then fail "使い回さないのに、指示書に「回さないこと」が入っている"; fi
 pass "起動のときだけ環境変数を外すと使い回さず、証跡に理由（input-changed）と一言が出る（証跡と指示書が食い違わない）"
+
+# ---- 6. 指摘の再現: 確認コマンドが logs/input.json を読む構成で、中身を変えたら古い成功の記録を使い回さない ----
+# （名前だけで外していたときは、logs/input.json も「ランチャの記録」として指紋から外れ、失敗する内容に変えても skip=same-tree になった）
+mkrepo wt-input; wt="$REPLY"
+print -r -- $'import pathlib, sys\nsys.exit(1 if pathlib.Path("logs/input.json").read_text().strip() == "fail" else 0)' > "$wt/check.py"
+git -C "$wt" add check.py
+git -C "$wt" -c user.name="Test User" -c user.email=you@example.com -c commit.gpgSign=false commit -qm 'test: logs/input.json を読む確認を足す'
+mkdir -p "$wt/logs"; print -r -- ok > "$wt/logs/input.json"
+export LANES_CHECK_CMD='python3 check.py'
+chk "$wt"; [[ "$REPLY" == *'check=0（LANES_CHECK_CMD）'*'recorded=tree '* ]] || fail "logs/input.json を読む確認の成功を記録できない: $REPLY"
+chk "$wt"; [[ "$REPLY" == *'skip=same-tree'* ]] || fail "入力が同じなのに省かない（用意が誤り）: $REPLY"
+# 本物のレビューを起動しても（ランチャの記録が logs/ に増えても）、入力が同じ間は使い回す
+launch "$wt" launch.log run-review.sh rev-input-r1 --base origin/develop --round 1
+reused "$wt" rev-input-r1 "logs/input.json が同じ間の起動"
+# 入力を失敗する内容に変える。古い成功の記録は使い回さず、回し直して失敗する
+print -r -- fail > "$wt/logs/input.json"
+no_reuse "logs/input.json を失敗する内容に変えた後の問い合わせ"
+rc=0; out="$(bash "$LANES_DIR/chk-run.sh" "$wt" 49997 "$T/chk-out" 2>&1)" || rc=$?
+[[ "$out" != *'skip='* && "$out" == *'check=1（LANES_CHECK_CMD）'* && "$out" != *'recorded='* && "$rc" == 1 ]] \
+  || { print -u2 -r -- "$out"; fail "logs/input.json を失敗する内容に変えたのに、古い成功の記録を使い回した・失敗にならない（rc=$rc）"; }
+launch "$wt" launch.log run-review.sh rev-input-r2 --base origin/develop --round 2 --force
+grep -q '^- 必須検証: レビューの中で回すよう指示（親の chk-run の記録は使わない: input-changed' "$wt/logs/rev-input-r2.evidence.md" \
+  || { grep '必須検証' "$wt/logs/rev-input-r2.evidence.md" >&2 || true; fail "入力が変わったのに、レビューの証跡が記録の使用になっている"; }
+# 元に戻せば、また使い回す（入力の中身で決まる。ランチャの記録が増えたことは理由にならない）
+print -r -- ok > "$wt/logs/input.json"; yes_again "logs/input.json を元に戻した後"
+export LANES_CHECK_CMD=/usr/bin/true
+pass "確認コマンドが読む logs/input.json を失敗する内容に変えたら、古い成功の記録を使い回さない（chk-run.sh は回し直して失敗・レビューも使わない）"
+
+# ---- 7. 台帳の書き方: リンクの台帳は辿らない・使わない。detach-run.sh は worktree の logs/ の直下のときだけ載せる ----
+mkrepo wt-ledger; wt="$REPLY"
+chk "$wt"
+launch "$wt" launch.log run-review.sh rev-ledger-r1 --base origin/develop --round 1
+yes_again "台帳のテストの用意"
+cp "$wt/logs/.lanes-records" "$T/ledger-copy"; cp "$T/ledger-copy" "$T/ledger-before"
+# symlink の台帳: chk-run.sh は使わない（外を指すリンクとして入力に数える）。ランチャの関数・detach-run.sh はその先へ書かない
+rm -f "$wt/logs/.lanes-records"; ln -s "$T/ledger-copy" "$wt/logs/.lanes-records"
+no_reuse "symlink の台帳" unresolvable
+note="$(claim "$wt/logs" label:evil 2>&1)" || fail "台帳へ載せる関数が失敗で返った（起動を止めない決まり）"
+[[ "$note" == *'NOTE: ランチャの記録の台帳'*'載せられない'* ]] || fail "symlink の台帳に載せられないことを知らせない: $note"
+pid="$(zsh -f "$LANES_DIR/detach-run.sh" "$wt/logs/evil.launch.log" /usr/bin/true)" || fail "symlink の台帳があると detach-run.sh が起動できない"
+cmp -s "$T/ledger-copy" "$T/ledger-before" || fail "symlink の台帳を辿って、その先のファイルへ書いた"
+[[ -f "$wt/logs/evil.launch.log" ]] || fail "symlink の台帳のとき、detach-run.sh が起動ログを書いていない（起動は続ける決まり）"
+rm -f "$wt/logs/.lanes-records" "$wt/logs/evil.launch.log"
+# ハードリンクの台帳: 同じく使わない・書かない
+ln "$T/ledger-copy" "$wt/logs/.lanes-records"
+no_reuse "ハードリンクの台帳"
+claim "$wt/logs" label:evil 2>/dev/null
+pid="$(zsh -f "$LANES_DIR/detach-run.sh" "$wt/logs/evil.launch.log" /usr/bin/true)" || fail "ハードリンクの台帳があると detach-run.sh が起動できない"
+cmp -s "$T/ledger-copy" "$T/ledger-before" || fail "ハードリンクの台帳へ書いた"
+rm -f "$wt/logs/.lanes-records" "$wt/logs/evil.launch.log"
+cp "$T/ledger-before" "$wt/logs/.lanes-records"; yes_again "台帳を普通のファイルに戻した後"
+pass "symlink・ハードリンクの台帳は chk-run.sh が使わず（記録を入力として数える）、ランチャと detach-run.sh もその先へ書かない"
+# 不正な名前は載せない（/ や改行を含む名前・知らない種類）
+before="$(cat "$wt/logs/.lanes-records")"
+claim "$wt/logs" "file:../outside.json" 2>/dev/null; claim "$wt/logs" "file:a/b.log" 2>/dev/null; claim "$wt/logs" "other:x" 2>/dev/null
+claim "$wt/logs" $'file:a\nlabel:input' 2>/dev/null; claim "$wt/logs" "label:" 2>/dev/null
+[[ "$(cat "$wt/logs/.lanes-records")" == "$before" ]] || fail "不正な名前（/・改行・知らない種類・空）を台帳に載せた"
+# 台帳に / を含む行・label の形でない行があっても、chk-run.sh は外さない（手で書き足しても logs/ の直下の決まった名前だけ）
+print -r -- 'label:../src' >> "$wt/logs/.lanes-records"; print -r -- 'file:sub/x.log' >> "$wt/logs/.lanes-records"
+mkdir -p "$wt/logs/sub"; print -r -- x > "$wt/logs/sub/x.log"; no_reuse "台帳に logs/ の下のフォルダの名前を書き足した"
+rm -rf "$wt/logs/sub"; cp "$T/ledger-before" "$wt/logs/.lanes-records"; yes_again "台帳と logs/ を戻した後"
+pass "不正な名前（/・改行・知らない種類・空）は台帳に載せず、台帳に書いてあっても logs/ の直下の名前しか外さない"
+# detach-run.sh は、worktree の logs/ の直下の起動ログだけを台帳に載せる（同じ名前は 2 回載せない。ほかの場所には台帳を作らない）
+pid="$(zsh -f "$LANES_DIR/detach-run.sh" "$wt/logs/again.launch.log" /usr/bin/true)" || fail "detach-run.sh で起動できない"
+pid="$(zsh -f "$LANES_DIR/detach-run.sh" "$wt/logs/again.launch.log" /usr/bin/true)" || fail "detach-run.sh で 2 回目を起動できない"
+[[ "$(grep -cxF 'file:again.launch.log' "$wt/logs/.lanes-records")" == 1 ]] || fail "detach-run.sh が起動ログの名前を 1 回だけ載せていない"
+yes_again "detach-run.sh が起動ログを書いた後"
+mkdir -p "$T/elsewhere"
+pid="$(zsh -f "$LANES_DIR/detach-run.sh" "$T/elsewhere/launch.log" /usr/bin/true)" || fail "worktree の外の起動ログで起動できない"
+pid="$(zsh -f "$LANES_DIR/detach-run.sh" "$T/elsewhere/logs/launch.log" /usr/bin/true)" || fail "worktree でない logs/ の起動ログで起動できない"
+pid="$(zsh -f "$LANES_DIR/detach-run.sh" "$wt/src/logs/launch.log" /usr/bin/true)" || fail "下の階層の logs/ の起動ログで起動できない"
+[[ ! -e "$T/elsewhere/.lanes-records" && ! -e "$T/elsewhere/logs/.lanes-records" && ! -e "$wt/src/logs/.lanes-records" ]] \
+  || fail "detach-run.sh が、worktree の logs/ の直下でない場所に台帳を作った"
+no_reuse "下の階層の logs/ に置いた起動ログ（入力のまま）"
+rm -rf "$wt/src/logs"; yes_again "下の階層の logs/ を消した後"
+pass "detach-run.sh は worktree の logs/ の直下の起動ログだけを台帳に載せる（同じ名前は 1 回。ほかの場所には台帳を作らない）"
 
 print -r -- "合格 $count 件"

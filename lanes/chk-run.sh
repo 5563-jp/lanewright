@@ -6,7 +6,8 @@
 #     1) 対象リポの .lanes/check.sh（あれば優先。bash で worktree を作業場所にして実行）
 #     2) 設定キー LANES_CHECK_CMD（例: pnpm lint && pnpm typecheck && pnpm build。bash -c で実行）
 #   確認コマンドには LANES_CHECK_PORT（<port>。画面確認用のサーバーを立てるならこの番号を使う）と
-#   LANES_CHECK_OUTDIR（<outdir>）を渡す。出力の行は head= / check= / recorded= の形
+#   LANES_CHECK_OUTDIR（<outdir>）を渡す。出力の行は head= / check= / recorded= の形。通ったのに記録しないときは
+#   record=no reason=<uncommitted|unresolvable>（理由の説明）を出す（黙って記録しないままにしない）
 #   確認コマンドは共通監督役（_common.sh の LANES_PROCESS_GUARD）の下で起動し、裏で立てたサーバー等の孫まで回収する
 # 省くもの:
 #   同じ中身（git tree）かつ同じ実行環境・依存状態・確認コマンドを前に通していたら、何も回さない（skip=same-tree）
@@ -18,10 +19,11 @@
 #   （assume-unchanged / skip-worktree）があるときは記録も省略もしない。追跡ファイルは内容も照合する
 #   サブモジュールの中（checkout した commit・追跡・未追跡・無視対象）も入力に含める。共有依存のリンクや
 #   読めないファイルがあると再利用だけ止め、検証前後の入力照合は続ける
-#   ランチャの記録（作業ツリー直下の logs/ の直下に、ランチャと detach-run.sh が書くファイル。名前の一覧は下の LANE_RECORD_RE）は
-#   入力に数えない。レーンを起動・終了するたびに増えるので、数えると「chk-run の直後にレビューを起動する」だけで記録が使えなくなる
-#   （起動ログ logs/launch.log を detach-run.sh が先に書くため）。数えないのは、git が無視している・リンクでもハードリンクでもない
-#   普通のファイルで、名前が一覧に合うものだけ。logs/ の中のフォルダ・ほかの名前のファイル・追跡ファイルは今までどおり入力
+#   ランチャの記録（作業ツリー直下の logs/ の直下に、ランチャと detach-run.sh が書くファイル）は入力に数えない。
+#   レーンを起動・終了するたびに増えるので、数えると「chk-run の直後にレビューを起動する」だけで記録が使えなくなる
+#   （起動ログ logs/launch.log を detach-run.sh が先に書くため）。名前が記録に似ているだけでは外さない。数えないのは、
+#   ランチャが書く前に台帳（logs/.lanes-records）へ載せた持ち主の、決まった名前のファイルだけ（下の「ランチャの記録」の説明）。
+#   台帳に無い名前（確認コマンドが読む logs/input.json など）・logs/ の中のフォルダ・リンク・追跡ファイルは今までどおり入力
 #   生成物（dist/ など）の定義は _common.sh の LANES_GENERATED_DIRS / LANES_GENERATED_SUFFIXES（cleanup-after-merge.sh と同じもの）
 # 確認済みの記録: ${CHK_CACHE:-${LANES_RUNS_ROOT:-~/dev/_runs}/_chk-cache/passed.tsv}
 #   （tree<TAB>head<TAB>full<TAB>日時<TAB>worktree<TAB>input_fp<TAB>port<TAB>outdir）。port と outdir は問い合わせが同じ条件で照合し直すために残す
@@ -178,14 +180,31 @@ def hash_file_hex(path):
             digest.update(chunk)
     return digest.hexdigest()
 
+# 再利用（記録・省略）を止めた理由。人が読む説明で、最初の数件だけを出力の why= に出す（通ったのに黙って記録しないままにしない）
+no_reuse = []
+dirty_why = ""
+def stop_reuse(why):
+    global reusable
+    reusable = False
+    if why not in no_reuse:
+        no_reuse.append(why)
+
+def show_path(path):
+    # 作業ツリーの中なら相対パスで出す
+    try:
+        if os.path.commonpath([wt, path]) == wt:
+            return os.path.relpath(path, wt)
+    except ValueError:
+        pass
+    return path
+
 def file_token(path):
     # 読めない・走査中に消えたファイルで状態取得ごと失敗させない。内容を証明できないので再利用だけ止め、
     # 読めなかった事実と属性は入力に含めて検証前後の照合は続ける。
-    global reusable
     try:
         return hash_file_hex(path)
     except OSError as error:
-        reusable = False
+        stop_reuse(f"読めないファイル: {show_path(path)}")
         try:
             st = os.lstat(path)
             return f"unreadable:{error.errno}:{st.st_size}:{st.st_mtime_ns}"
@@ -323,15 +342,16 @@ def resolve_exe(word):
         return cand if os.path.isfile(cand) and os.access(cand, os.X_OK) else ""
     return shutil.which(word) or ""
 def fingerprint_check_cmd(text, origin):
-    global reusable
     h.update(f"check_cmd:{origin}:".encode() + text.encode("utf-8", errors="surrogateescape") + b"\0")
-    def unsure(what):
-        global reusable
-        reusable = False
+    def unsure(what, why="呼ぶ実行ファイルを確実に決められない書き方"):
+        # 理由には、その語（#! の解釈系のときは台本の名前）だけを出す。引数・ほかの代入の値は出さない
+        shown = what.split("#!", 1)[0]
+        stop_reuse(f"確認コマンド（{origin}）の「{shown[:60]}」: {why}")
         h.update(f"check_exe:{what}:unresolved\0".encode("utf-8", errors="surrogateescape"))
     tokens, sure = split_words(text)
     if not sure:
-        unsure("<syntax>")
+        stop_reuse(f"確認コマンド（{origin}）に、コマンド置換・$'…'・閉じていない引用符など、読み切れない書き方がある")
+        h.update(b"check_exe:<syntax>:unresolved\0")
     at_cmd, skip_next, cmd = True, False, ""
     # case 文の分岐の型（a|b) など）はコマンドではないので読み飛ばす
     case_depth, case_head, in_pattern = 0, False, False
@@ -389,7 +409,7 @@ def fingerprint_check_cmd(text, origin):
             continue
         path = resolve_exe(tok)
         if not path or not exe_token(path, tok):
-            reusable = False
+            stop_reuse(f"確認コマンド（{origin}）の「{tok[:60]}」: 実行ファイルが見つからない")
             h.update(f"check_exe:{tok}:missing\0".encode("utf-8", errors="surrogateescape"))
             continue
         cmd = os.path.basename(tok)
@@ -404,30 +424,30 @@ def fingerprint_check_cmd(text, origin):
             # 実際に使われるファイルを比べられないので、結果を保存・再利用しない
             parts = first[2:].decode("utf-8", errors="replace").split()
             if not parts:
-                unsure(f"{tok}#!<empty>")
+                unsure(f"{tok}#!<empty>", "#! の解釈系を確実に決められない")
                 continue
             interp = parts[0]
             if os.path.basename(interp) == "env":
                 if not exe_token(interp, f"{tok}#!env"):
-                    unsure(f"{tok}#!env")
+                    unsure(f"{tok}#!env", "#! の解釈系を確実に決められない")
                     continue
                 rest = parts[1:]
                 if not rest or rest[0].startswith("-") or ASSIGN.match(rest[0]) or ("/" in rest[0] and not os.path.isabs(rest[0])):
-                    unsure(f"{tok}#!env-args")
+                    unsure(f"{tok}#!env-args", "#! の解釈系を確実に決められない")
                     continue
                 interp = rest[0] if os.path.isabs(rest[0]) else (shutil.which(rest[0]) or "")
                 if not interp:
-                    unsure(f"{tok}#!{rest[0]}")
+                    unsure(f"{tok}#!{rest[0]}", "#! の解釈系を確実に決められない")
                     continue
             if not exe_token(interp, f"{tok}#!"):
-                unsure(f"{tok}#!{interp}")
+                unsure(f"{tok}#!{interp}", "#! の解釈系を確実に決められない")
 check_src = os.environ.get("CHK_CHECK_SRC", "")
 if check_src == ".lanes/check.sh":
     try:
         with open(os.path.join(wt, ".lanes", "check.sh"), encoding="utf-8", errors="surrogateescape") as stream:
             fingerprint_check_cmd(stream.read(), check_src)
     except OSError:
-        reusable = False
+        stop_reuse(".lanes/check.sh を読めない")
 else:
     fingerprint_check_cmd(os.environ.get("LANES_CHECK_CMD", ""), check_src)
 
@@ -448,30 +468,66 @@ if not generated_dirs:
 other_files = []
 generated_files = []
 
-# ランチャの記録の名前（作業ツリー直下の logs/ の直下に、ランチャと detach-run.sh が書くファイル）。入力に数えない。
-#   <label>.pid / .done / .lock / .log（.stderr.log・.verify.log・.launch.log・launch.log・qa-deps-<名前>.log を含む）/
-#   .json（.completion.json・.try1.json を含む）/ .prompt.md（.dry-run.prompt.md を含む）/ .evidence.md / .last.md / .meta.txt、
-#   <系列>.followups.md、qa-case.md、.<系列>.review-state（書きかけの .tmp.<pid> も）、.review-reuse-blocked、
-#   置き換え用の一時ファイル（.<名前>.<pid>.<英数字>.tmp。_common.sh の .pid と codex-review-output.py の本文・完了証明）、
-#   回転した前回分（<名前>.prev-<日時>[-<n>].<拡張子>）
-# label は英数で始まり、英数と . _ - だけ（_common.sh の lanes_require_label）。ランチャが書く名前を足したら、ここにも足す
+# ランチャの記録（作業ツリー直下の logs/ の直下に、ランチャと detach-run.sh が書くファイル）は入力に数えない。
+# 名前が記録に似ているだけでは外さない（確認コマンドが読む logs/input.json を外すと、中身を変えても古い成功の記録を使い回してしまう）。
+# 外すのは、ランチャが書く前に台帳（logs/.lanes-records。_common.sh の lanes_records_claim と detach-run.sh が載せる）へ載せた
+# 持ち主の、決まった名前のファイルだけ:
+#   label:<label> … <label>.<下の LANE_LABEL_SUFFIXES のどれか>（その label のランチャが書く名前の組）
+#   file:<名前>   … その名前そのもの（detach-run.sh の起動ログ・qa-case.md・qa-deps-<名前>.log・.<系列>.review-state・
+#                   <系列>.followups.md・.review-reuse-blocked）
+# と、その回転した前回分（<名前>.prev-<日時>[-<n>].<拡張子>）・置き換え用の一時ファイル（.<名前>.<pid>.<英数字>.tmp と <名前>.tmp.<pid>）。
+# 台帳そのものも数えない。台帳に無い名前は入力のまま。
+# ランチャが label ごとに書く名前を足したら LANE_LABEL_SUFFIXES にも足し、label で決まらない名前を足したら、書く前に台帳へ載せる
 # （tests/test-review-reuse-launch.sh が、各ランチャを実際に回した後も記録を使い回せることを確かめている）
-LANE_RECORD_RE = re.compile(
-    r"(?:[A-Za-z0-9][A-Za-z0-9._-]*\.(?:pid|done|lock|log|json|prompt\.md|evidence\.md|last\.md|followups\.md|meta\.txt)"
-    r"|qa-case\.md"
-    r"|\.[A-Za-z0-9][A-Za-z0-9._-]*\.review-state(?:\.tmp\.[0-9]+)?"
-    r"|\.review-reuse-blocked"
-    r"|\.[A-Za-z0-9][A-Za-z0-9._-]*\.[0-9]+\.[0-9a-f]+\.tmp)")
+LANE_RECORDS_NAME = ".lanes-records"
+LANE_LABEL_SUFFIXES = ("pid", "done", "lock", "log", "stderr.log", "json", "prompt.md", "dry-run.prompt.md", "evidence.md",
+                       "last.md", "completion.json", "try1.json", "try1.stderr.log", "verify.log", "meta.txt")
+# label は英数で始まり、英数と . _ - だけ（_common.sh の lanes_require_label）
+LANE_LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 LANE_RECORD_PREV_RE = re.compile(r"\.prev-[0-9]{8}-[0-9]{6}(?:-[0-9]+)?(?=\.[A-Za-z0-9-]+$)")
+LANE_RECORD_TMP_RES = (re.compile(r"\.(.+)\.[0-9]+\.[0-9a-f]+\.tmp"), re.compile(r"(.+)\.tmp\.[0-9]+"))
+lane_records = frozenset()   # 台帳から決まる記録の名前（logs/ の直下の名前）。scan_repo が最上位のリポの一覧を取った後で読む
+
+def load_lane_records():
+    # 台帳を symlink を辿らずに読む。symlink・ハードリンク・普通のファイルでない台帳は使わない（何も外さない）
+    names = set()
+    try:
+        fd = os.open(os.path.join(wt, "logs", LANE_RECORDS_NAME), os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as stream:
+            st = os.fstat(stream.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                return frozenset()
+            data = stream.read()
+    except OSError:
+        return frozenset()
+    for line in data.decode("utf-8", errors="surrogateescape").split("\n"):
+        kind, sep, name = line.partition(":")
+        if not sep or not name or "/" in name:
+            continue
+        if kind == "label" and LANE_LABEL_RE.fullmatch(name):
+            names.update(f"{name}.{suffix}" for suffix in LANE_LABEL_SUFFIXES)
+        elif kind == "file":
+            names.add(name)
+    return frozenset(names)
+
+def lane_record_name(name):
+    # 台帳そのもの・台帳に載っている持ち主の名前・その回転した前回分・置き換え用の一時ファイルか
+    if name == LANE_RECORDS_NAME or LANE_RECORD_PREV_RE.sub("", name) in lane_records:
+        return True
+    for pattern in LANE_RECORD_TMP_RES:
+        found = pattern.fullmatch(name)
+        if found and found.group(1) in lane_records:
+            return True
+    return False
 
 def is_lane_record(rel, is_ignored):
-    # 作業ツリー直下の logs/ の直下にあり、git が無視していて、名前がランチャの記録のもの。
-    # logs/ の中のフォルダ・ほかの名前のファイルは入力のまま（logs/ に置いた入力で照合をすり抜けさせない）。
+    # 作業ツリー直下の logs/ の直下にあり、git が無視していて、台帳に載っている持ち主の記録（か台帳そのもの）。
+    # logs/ の中のフォルダ・台帳に無い名前のファイルは入力のまま（logs/ に置いた入力で照合をすり抜けさせない）。
     # symlink・ハードリンク・特殊ファイルも入力のまま（ランチャ自身も logs/ にそれらがあると起動しない）
     if not is_ignored or not rel.startswith("logs/"):
         return False
     name = rel[len("logs/"):]
-    if "/" in name or not LANE_RECORD_RE.fullmatch(LANE_RECORD_PREV_RE.sub("", name)):
+    if "/" in name or not lane_record_name(name):
         return False
     try:
         st = os.lstat(os.path.join(wt, rel))
@@ -511,7 +567,7 @@ def inside_worktree(real):
     return True
 
 def record_symlink(path, label, visited=None):
-    global reusable
+    shown = label.split(":", 1)[1] if label.startswith(("tracked:", "other:")) else label
     lst = os.lstat(path)
     target = os.readlink(path)
     h.update(f"symlink:{label}:{lst.st_mode}:".encode("utf-8", errors="surrogateescape") + os.fsencode(target) + b"\0")
@@ -520,12 +576,12 @@ def record_symlink(path, label, visited=None):
         tst = os.stat(path)
     except OSError:
         # 行き先の無いリンクは中身を証明できないので再利用しない
-        reusable = False
+        stop_reuse(f"行き先の無いリンク: {shown}")
         h.update(f"symlink_target:{label}:missing\0".encode("utf-8", errors="surrogateescape"))
         return
     # 作業ツリーの外（共有依存など）を指すリンクは、外側の変化を追い切れないので再利用だけ止める
     if not inside_worktree(real):
-        reusable = False
+        stop_reuse(f"作業ツリーの外（か .git の中）を指すリンク: {shown}")
     h.update(f"symlink_real:{label}:".encode("utf-8", errors="surrogateescape") + os.fsencode(real) + b"\0")
     if os.path.isfile(real):
         h.update(f"symlink_file:{label}:{tst.st_mode}:{file_token(real)}\0".encode("utf-8", errors="surrogateescape"))
@@ -582,7 +638,7 @@ def walk_plain_dir(dir_path):
                 other_files.append(frel)
 
 def scan_repo(repo_dir, rel_prefix="", visited_repos=None):
-    global dirty, reusable
+    global dirty, dirty_why, lane_records
     if visited_repos is None:
         visited_repos = set()
     real_repo = os.path.realpath(repo_dir)
@@ -610,6 +666,7 @@ def scan_repo(repo_dir, rel_prefix="", visited_repos=None):
             i += 1
         if path and not is_repo_internal(path):
             dirty = 1
+            dirty_why = dirty_why or f"未 commit の変更か未追跡のファイルがある: {rel_prefix}{path}"
             break
         i += 1
 
@@ -620,6 +677,7 @@ def scan_repo(repo_dir, rel_prefix="", visited_repos=None):
         sys.exit(2)
     if any(e[:1].islower() or e[:1] == b"S" for e in flags.stdout.split(b"\0") if e):
         dirty = 1
+        dirty_why = dirty_why or "変更検知を省く設定（assume-unchanged / skip-worktree）のファイルがある"
 
     # サブモジュールは検出した HEAD も入力に含める（索引の gitlink とずれた checkout を同一視しない）。
     # 最上位の HEAD は含めない。記録は tree 単位で、tree が同じ別 commit（release 枝等）でも省略するため。
@@ -652,7 +710,7 @@ def scan_repo(repo_dir, rel_prefix="", visited_repos=None):
                 # 未初期化のサブモジュール等。中の実ファイルは入力に含めるので、再利用は止めない。
                 walk_plain_dir(tp)
         elif os.path.exists(tp):
-            reusable = False
+            stop_reuse(f"普通のファイルでもフォルダでもリンクでもない追跡ファイル: {name}")
             h.update(f"tracked:{name}:{os.lstat(tp).st_mode}\0".encode("utf-8", errors="surrogateescape"))
         else:
             h.update(f"tracked:{name}:missing\0".encode("utf-8", errors="surrogateescape"))
@@ -665,6 +723,8 @@ def scan_repo(repo_dir, rel_prefix="", visited_repos=None):
     if not rel_prefix:
         ignored = set(subprocess.check_output(
             ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"], cwd=repo_dir).split(b"\0"))
+        # 台帳は一覧を取った後で読む（ランチャは書く前に載せるので、一覧にある記録は必ず台帳に載っている）
+        lane_records = load_lane_records()
     for raw in others.stdout.split(b"\0"):
         if not raw:
             continue
@@ -715,7 +775,7 @@ try:
             for rel in sorted(set(generated_files)):
                 path = os.path.join(wt, rel)
                 if os.path.islink(path) or not os.path.isfile(path):
-                    reusable = False
+                    stop_reuse(f"生成物がリンクか、普通のファイルでない: {rel}")
                     break
                 lst = os.lstat(path)
                 generated_hash.update(os.fsencode(rel) + b"\0" + f"{lst.st_mode}\0".encode("ascii") + bytes.fromhex(hash_file_hex(path)))
@@ -723,10 +783,18 @@ try:
                 cache_fp = fp_hex + ":" + generated_hash.hexdigest()[:32]
         except OSError:
             cache_fp = ""
+            stop_reuse("生成物を読めない")
 except Exception:
     sys.exit(2)
 
-print(f"dirty={dirty}\nfp={fp_hex}\ncache_fp={cache_fp}")
+# 記録・省略できない理由（1 行）。未 commit の変更が先（問い合わせの理由の順と同じ）。記録できるときは空
+why = ""
+if dirty:
+    why = dirty_why or "未 commit の変更がある"
+elif not cache_fp:
+    why = "; ".join(no_reuse[:3]) + (f"（ほか {len(no_reuse) - 3} 件）" if len(no_reuse) > 3 else "")
+why = "".join(ch if ch.isprintable() else "?" for ch in why)
+sys.stdout.buffer.write(f"dirty={dirty}\nfp={fp_hex}\ncache_fp={cache_fp}\nwhy={why}\n".encode("utf-8", errors="replace"))
 PY
 }
 export CHK_CHECK_SRC="$check_src"
@@ -770,7 +838,8 @@ dirty=$(printf '%s\n' "$state_info" | sed -n 's/^dirty=//p' | head -1)
 [ "$dirty" = "0" ] && dirty=""
 input_fp=$(printf '%s\n' "$state_info" | sed -n 's/^fp=//p' | head -1)
 cache_fp=$(printf '%s\n' "$state_info" | sed -n 's/^cache_fp=//p' | head -1)
-input_state=$(printf '%s\n' "$state_info" | sed '/^cache_fp=/d')
+# 検証の前後で比べる入力。生成物は確認コマンドが作り直すので、生成物で決まる行（cache_fp と、記録できない理由の why）は比べない
+input_state=$(printf '%s\n' "$state_info" | sed '/^cache_fp=/d; /^why=/d')
 if [ -z "$input_fp" ]; then
   echo "作業ツリー状態の取得に失敗" >&2
   exit 1
@@ -837,23 +906,31 @@ pp=""
 echo "check=${r}（${check_src}）"
 [ $r = 0 ] || { fail=1; echo "  ログ: $o/check.log"; }
 # 検証中に履歴・作業ツリー・環境・依存が変わった結果を古い入力へ結び付けない。
+why=""
 if [ $fail = 0 ]; then
-  after_state=$(read_state) || fail=1
+  after_state=$(read_state) || { echo "検証後の作業ツリー状態の取得に失敗したため記録しない" >&2; fail=1; }
   after_head=$(git rev-parse --verify HEAD 2>/dev/null) || fail=1
   after_tree=$(git rev-parse --verify 'HEAD^{tree}' 2>/dev/null) || fail=1
   after_fp=$(printf '%s\n' "$after_state" | sed -n 's/^fp=//p' | head -1)
-  if [ -z "$after_fp" ] || [ "$after_head" != "$head" ] || [ "$after_tree" != "$tree" ] || [ "$(printf '%s\n' "$after_state" | sed '/^cache_fp=/d')" != "$input_state" ]; then
+  if [ -z "$after_fp" ] || [ "$after_head" != "$head" ] || [ "$after_tree" != "$tree" ] || [ "$(printf '%s\n' "$after_state" | sed '/^cache_fp=/d; /^why=/d')" != "$input_state" ]; then
     echo "検証中に入力が変化したため記録しない。再実行する" >&2
     fail=1
   fi
   cache_fp=$(printf '%s\n' "$after_state" | sed -n 's/^cache_fp=//p' | head -1)
+  why=$(printf '%s\n' "$after_state" | sed -n 's/^why=//p' | head -1)
 fi
 if [ $fail = 0 ] && [ -z "$dirty" ] && [ -n "$input_fp" ] && [ -n "$cache_fp" ]; then
   kind=full
   if printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$tree" "$head" "$kind" "$(date '+%Y-%m-%d %H:%M %Z')" "$wt" "$cache_fp" "$port" "$o" >> "$cache"; then
     echo "recorded=tree ${tree:0:12}（${kind}）"
   else
+    echo "確認済みの記録を書けない: $cache" >&2
     fail=1
   fi
+elif [ $fail = 0 ]; then
+  # 通ったが記録しない。黙って終わらず、理由を出す（次に同じ中身で呼んでも省かない。レビューの問い合わせ --query は no-record になる）。
+  # 理由の語は問い合わせと同じ（uncommitted = 未 commit の変更など / unresolvable = 確認コマンドや依存を確実に照合できない）
+  if [ -n "$dirty" ]; then reason=uncommitted; else reason=unresolvable; fi
+  echo "record=no reason=${reason}（通ったが記録しない。次も省かずに回し、レビューも親の記録を使い回せない。理由: ${why:-不明}）"
 fi
 exit "$fail"

@@ -136,6 +136,8 @@ prompt="$logdir/${label}.prompt.md"
 meta="$logdir/${label}.meta.txt"
 [[ "${prompt:h:A}" == "$logdir" && "${prompt:t}" == "${label}.prompt.md" && ! -L "$prompt" ]] || lanes_die "保存先が logs/ 外: $prompt"
 [[ "${meta:h:A}" == "$logdir" && "${meta:t}" == "${label}.meta.txt" && ! -L "$meta" ]] || lanes_die "保存先が logs/ 外: $meta"
+# 書く前に、この label をランチャの記録の台帳へ載せる（chk-run.sh は台帳に載っている持ち主の記録だけを入力から外す）
+lanes_records_claim "$logdir" "label:$label"
 
 {
   print -- "# 画面QA実行プロンプト（画面操作ができるエージェント向け）"

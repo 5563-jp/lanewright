@@ -457,8 +457,9 @@ rvd_mark_blocked() {   # <logdir> → 0 = logs/ の外の印は置けた（logs/
 # <lanes_dir> <wt>: chk-run.sh --query で問い合わせ、結果を RVD_CHECKS_REUSE（yes / no / off）・RVD_CHECKS_HEAD・RVD_CHECKS_AT・
 # RVD_CHECKS_SRC・RVD_CHECKS_REASON に入れる。LANES_REVIEW_REUSE_CHECKS=0 なら問い合わせず off。
 # 指紋には環境変数も入るので、ランチャは scratch や git の通信止めの export より前に呼ぶ。
-# ランチャの記録（logs/ の直下の .pid・ログ・証跡・起動ログなど）は指紋に入らない（chk-run.sh の LANE_RECORD_RE）ので、
-# detach-run.sh が先に logs/launch.log を書いていても、前のレーンの記録が残っていても、記録と合う。
+# ランチャの記録（logs/ の直下の .pid・ログ・証跡・起動ログなどのうち、ランチャが台帳 logs/.lanes-records に載せた持ち主のもの）は
+# 指紋に入らない（chk-run.sh の is_lane_record）ので、detach-run.sh が先に logs/launch.log を書いていても、前のレーンの記録が
+# 残っていても、記録と合う。台帳に無い名前のファイル（確認コマンドが読む logs/input.json など）は入力のまま。
 # _common.sh が外した API キーなどは、親が chk-run.sh を回したときの環境に戻して渡す（chk-run.sh は何も実行しない）
 rvd_checks_query() {
   local lanes_dir="$1" wt="$2" out="" rc=0 line
@@ -498,7 +499,7 @@ rvd_checks_key() {
 rvd_checks_reason_hint() {
   case "${1:-}" in
     no-check) print -r -- "確認コマンドが未設定" ;;
-    no-record) print -r -- "この中身の確認済みの記録が無い。先に chk-run.sh を通す" ;;
+    no-record) print -r -- "この中身の確認済みの記録が無い。先に chk-run.sh を通す（通したのに無いときは、chk-run.sh の出力の record=no の行に、記録しなかった理由が出ている）" ;;
     cache-link) print -r -- "記録のファイルがリンクになっている" ;;
     uncommitted) print -r -- "未 commit の変更か未追跡のファイルがある（logs/ が git に無視されていなければ .gitignore に足す）" ;;
     unresolvable) print -r -- "確認コマンドか依存を確実に照合できない（外を指すリンク・解決できない書き方など）" ;;

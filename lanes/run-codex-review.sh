@@ -50,11 +50,12 @@ rvd_checks_query "$LANES_DIR" "$wt"
 [[ "$RVD_CHECKS_REUSE" == yes ]] && LANES_REVIEW_CHECKS_REUSED=1 || LANES_REVIEW_CHECKS_REUSED=0
 checks_key="$(rvd_checks_key)"
 logdir="$wt/logs"
-(( dry )) || lanes_mark_start "$logdir" "$label" codex-review "$wt"
+# 系列の記録（再利用の記録・後回し票・「使い回し禁止」の印）は label では名前が決まらないので、ランチャの記録の台帳へ名前で載せる
+series="$(rvd_series "$label")"
+(( dry )) || lanes_mark_start "$logdir" "$label" codex-review "$wt" "file:.$series.review-state" "file:$series.followups.md" "file:.review-reuse-blocked"
 lanes_require_tool codex run-codex-review.sh
 lanes_entry_preflight
 lanes_require_prompt "$prompt"
-series="$(rvd_series "$label")"
 round="$(rvd_round "$logdir" "$series" "$label" "$round")"
 [[ "$round" == <-> && ${#round} -le 6 ]] || lanes_die "round が不正"
 record="$(rvd_prev_record "$logdir" "$series" "$round")"
@@ -129,6 +130,7 @@ else
   for f in "$log" "$err" "$evidence" "$final" "$proof" "$body_log"; do lanes_rotate_log "$f"; done
 fi
 mkdir -p "$logdir"
+(( ! dry )) || lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
 # レーン専用の作業場所。レビュー役の一時 DB・ビルド・ログはここへ（~/Downloads に置かせない）。マージ後 cleanup が消す
 if (( dry )); then scratch="$(lanes_scratch_path "$wt" "$label")"; else lanes_scratch_prepare "$wt" "$label" codex-review; scratch="$LANES_SCRATCH"; fi
 scratch_rule="$(lanes_scratch_rule "$scratch")"

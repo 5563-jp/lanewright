@@ -10,14 +10,28 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 - `chk-run.sh` が成功を記録した直後に `detach-run.sh` 経由でレビューを起動すると、証跡が毎回「親の chk-run の記録は使わない: input-changed」になり、
   必須検証の使い回しが効かなかった。`detach-run.sh` が起動ログ（`<worktree>/logs/launch.log`）をランチャの問い合わせより先に書き、
   その無視対象のファイルが入力の指紋に入っていたため（dry-run や手での問い合わせでは再現しない）。
-  ランチャの記録（作業ツリー直下の `logs/` の直下にある、git が無視している普通のファイルのうち、`<label>.pid`・`.done`・`.log`・`.json`・`.prompt.md`・
-  `.evidence.md`・起動ログなど決まった名前のもの）を入力の指紋に入れないようにした。`logs/` の中のフォルダ、ほかの名前のファイル、リンク、
-  追跡しているファイルは今までどおり入力として照合する。レビューの後に `chk-run.sh` を呼び直しても、同じ確認を省く（`skip=same-tree`）。
+  ランチャの記録を入力の指紋に入れないようにした。名前が記録に似ているだけでは外さない: ランチャと `detach-run.sh` が、`logs/` に書く前に
+  書く名前の持ち主を台帳（`logs/.lanes-records`。`label:<label>` か `file:<名前>` の行）へ載せ、`chk-run.sh` は台帳に載っている持ち主の
+  決まった名前のファイル（`<label>.pid`・`.done`・`.log`・`.json`・`.prompt.md`・`.evidence.md`・起動ログなど。git が無視している普通のファイル）だけを外す。
+  台帳に無い名前のファイル（確認コマンドが読む `logs/input.json` など）、`logs/` の中のフォルダ、リンク、追跡しているファイルは今までどおり入力として
+  照合する（中身を変えれば、古い成功の記録を使い回さずに回し直す）。レビューの後に `chk-run.sh` を呼び直しても、同じ確認を省く（`skip=same-tree`）。
+  この版より前のランチャが書いた記録は台帳に無いので入力として数える（同じ label を起動し直すと台帳に載る）。
   Reviews launched through `detach-run.sh` right after a successful `chk-run.sh` never reused the parent's check record
   (`input-changed`), because `detach-run.sh` wrote the launch log (`<worktree>/logs/launch.log`) before the launcher queried the record,
-  and that git-ignored file was part of the input fingerprint. Launcher records (git-ignored regular files directly under the worktree's
-  top-level `logs/` with well-known names such as `<label>.pid`, `.done`, `.log`, `.json`, `.prompt.md`, `.evidence.md`, and launch logs)
-  are no longer part of the fingerprint. Subdirectories, other file names, links, and tracked files under `logs/` are still fingerprinted.
+  and that git-ignored file was part of the input fingerprint. Launcher records are no longer part of the fingerprint. A record-like name is not enough:
+  launchers and `detach-run.sh` register the owner of what they write in a ledger (`logs/.lanes-records`, lines of `label:<label>` or `file:<name>`)
+  before writing, and `chk-run.sh` only skips the well-known file names of registered owners (`<label>.pid`, `.done`, `.log`, `.json`, `.prompt.md`,
+  `.evidence.md`, launch logs, and so on; git-ignored regular files). Unregistered names (for example a `logs/input.json` read by the check command),
+  subdirectories, links, and tracked files under `logs/` are still fingerprinted, so changing them re-runs the check instead of reusing an old success.
+  Records written by launchers older than this version are not in the ledger and count as input until the same label is launched again.
+- `chk-run.sh` が、確認コマンドは通ったのに結果を記録しないとき（未 commit の変更がある・確認コマンドや依存を確実に照合できない）、何も出さずに終わっていた。
+  そのためレビューの証跡が `no-record` になる理由が分からなかった（`.lanes/check.sh` に `exec zsh -f …` と書いただけで起きる。`exec` は
+  「引数のコマンドを起動する包み」なので、仕様どおり記録しない）。`record=no reason=<uncommitted|unresolvable>（理由）` の行を出すようにした。
+  説明には原因になったファイルや書き方が出る（例: `確認コマンド（.lanes/check.sh）の「exec」`）。記録する・しないの条件は変えていない。
+  `chk-run.sh` printed nothing when the check command passed but the result was not recorded (uncommitted changes, or a check command or dependency
+  that cannot be fingerprinted reliably), so it was unclear why review evidence said `no-record` (writing `exec zsh -f …` in `.lanes/check.sh` is enough:
+  `exec` is a wrapper that launches its argument, so by design the result is not recorded). It now prints
+  `record=no reason=<uncommitted|unresolvable>` with an explanation naming the file or construct. The conditions for recording are unchanged.
 - `cleanup-after-merge.sh` が、`chk-run.sh` のビルドが残した無視対象の `dist/` で止まった（`EXIT:4`）。git が無視している生成物
   （作業ツリー直下の `dist/` `build/` `out/` の中など）は、残骸と同じく退避してから後片付けを続けるようにした（本体 checkout の生成物は退避も削除もしない）。
   生成物の定義は `chk-run.sh` と共通の 1 か所（`lanes/_common.sh` の `LANES_GENERATED_DIRS` / `LANES_GENERATED_SUFFIXES`）にまとめた。

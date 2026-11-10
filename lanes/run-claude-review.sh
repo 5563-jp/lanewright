@@ -66,11 +66,12 @@ log="$logdir/$label.log"; json="$logdir/$label.json"; err="$logdir/$label.stderr
 final="$logdir/$label.prompt.md"; evidence="$logdir/$label.evidence.md"
 # 起動の事実（.pid）を最初に残す（以後どこで落ちても .done は今回の失敗を指し、status が前回の証跡を案内しない）。
 # dry-run は .pid / .done / ログを触らず、結合結果だけ <label>.dry-run.prompt.md に書く
-(( dry )) || lanes_mark_start "$logdir" "$label" claude-review "$wt"
+# 系列の記録（再利用の記録・後回し票・「使い回し禁止」の印）は label では名前が決まらないので、ランチャの記録の台帳へ名前で載せる
+series="$(rvd_series "$label")"
+(( dry )) || lanes_mark_start "$logdir" "$label" claude-review "$wt" "file:.$series.review-state" "file:$series.followups.md" "file:.review-reuse-blocked"
 lanes_require_tool claude run-claude-review.sh
 lanes_entry_preflight
 lanes_require_prompt "$prompt"
-series="$(rvd_series "$label")"
 round="$(rvd_round "$logdir" "$series" "$label" "$round")"
 [[ "$round" == <-> && ${#round} -le 6 ]] || lanes_die "round が不正"
 record="$(rvd_prev_record "$logdir" "$series" "$round")"
@@ -129,6 +130,7 @@ else
   for f in "$log" "$json" "$err" "$evidence" "$final"; do lanes_rotate_log "$f"; done
 fi
 mkdir -p "$logdir"
+(( ! dry )) || lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
 # レーン専用の作業場所（TMPDIR / LANES_SCRATCH）。マージ後 cleanup が消す
 (( dry )) || lanes_scratch_prepare "$wt" "$label" claude-review
 lanes_check_claude_subscription

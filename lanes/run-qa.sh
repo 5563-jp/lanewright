@@ -49,6 +49,7 @@ fi
 # 構成（LANES_TOOLS）の点検。誤った構成・claude の無い構成では起動しない（exit 2。排他の後なので .done に残る）
 lanes_require_tool claude run-qa.sh
 mkdir -p "$logdir"
+(( ! dry )) || lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
 # レーン専用の作業場所（TMPDIR / LANES_SCRATCH）。マージ後 cleanup が消す
 (( dry )) || lanes_scratch_prepare "$wt" "$label" qa
 

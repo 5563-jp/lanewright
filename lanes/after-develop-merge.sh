@@ -371,6 +371,7 @@ _install_qa_deps() {
     name="${${d#$QA_WORKTREE}#/}"; name="${${name:-root}//\//-}"
     log="$QA_WORKTREE/logs/qa-deps-$name.log"
     _qa_require_local_path "$log" || return 1
+    lanes_records_claim "$QA_WORKTREE/logs" "file:${log:t}"   # 書く前にランチャの記録の台帳へ載せる（chk-run.sh が入力に数えない）
     print -- "QA worktree: 依存を用意: ${name}（${cmd[*]}。ログ $log）"
     ( cd "$d" && "${cmd[@]}" ) > "$log" 2>&1 || { print -u2 -- "依存の用意に失敗: $d（$log）"; return 1; }
   done
@@ -448,6 +449,7 @@ _qa_require_local_path "$QA_WORKTREE/logs" || lanes_die "QA ログの保存先�
 mkdir -p "$QA_WORKTREE/logs"
 _qa_require_local_path "$LOCAL_PROMPT" || lanes_die "QA 指示書の保存先が不正"
 [[ ! -e "$LOCAL_PROMPT" && ! -L "$LOCAL_PROMPT" ]] || lanes_die "QA 指示書の保存先に既存ファイルがある"
+lanes_records_claim "$QA_WORKTREE/logs" "file:${LOCAL_PROMPT:t}"   # 書く前にランチャの記録の台帳へ載せる（chk-run.sh が入力に数えない）
 if [[ -n "$QA_PROMPT" ]]; then
   cp "$QA_PROMPT" "$LOCAL_PROMPT"
 else
