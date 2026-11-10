@@ -483,8 +483,11 @@ pass "対照: 普通のファイルの起動ログ（新規・追記）と /dev/
 #       本物の起動のたびに「使わない: input-changed」になった。
 #       このテストも、回す場所で結果が変わった: 入口を一度通った後の環境（レーンの中・chk-run.sh の確認コマンドの中）から回すと緑、
 #       普段のシェルから回すと赤（pyenv の形は、一度通ると PATH の先頭が本物になり、そこから先は入口を通らないので、赤が隠れた）。
-# どの Mac でも同じ形になるよう、通るたびに環境変数を書き換える偽の入口を PATH の先頭に置いて確かめる
-real_py="$(command -v python3)" || fail "python3 が無い（用意が誤り）"
+# どの Mac でも同じ形になるよう、通るたびに環境変数を書き換える偽の入口を PATH の先頭に置いて確かめる。
+# 偽の入口が起動する「本物」は、python3 自身が答える実体（sys.executable）にする。PATH から見つかる python3 が pyenv の shims のような
+# 入口だと、その入口が PATH の先頭に本物の場所を足すので、2 回目から偽の入口を通らなくなる（毎回通る形にならない）
+real_py="$(python3 -I -c 'import sys; print(sys.executable)')" || fail "python3 を起動できない（用意が誤り）"
+[[ -n "$real_py" && -f "$real_py" && -x "$real_py" ]] || fail "本物の python3 の場所が分からない（用意が誤り）"
 mkdir -p "$T/pyshim"
 cat > "$T/pyshim/python3" <<EOF_PYSHIM
 #!/bin/sh
