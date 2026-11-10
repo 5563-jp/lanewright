@@ -171,6 +171,64 @@ cleanup || fail 'パッケージ配下の依存があると後片付けできな
 [[ ! -d "$wt" ]] || fail 'worktree が残った'
 ok 'パッケージ配下の node_modules も生成物として削除し、任意の除外物では止める'
 
+# 確認コマンド（chk-run.sh）のビルドが残した ignore 済みの生成物（dist/ build/ out/）は、残骸と同じく退避して後片付けを続ける。
+# 生成物の定義は _common.sh の LANES_GENERATED_DIRS / LANES_GENERATED_SUFFIXES の 1 か所で、chk-run.sh と同じものを使う。
+# 依存・キャッシュ（*.tsbuildinfo など）は今までどおり退避せずに消す。symlink は辿らずリンクのまま退避する
+new_case generated_dist
+mkdir -p "$repo/.git/info"; print -- 'dist/\nbuild/\nout/\n*.tsbuildinfo' >> "$repo/.git/info/exclude"
+gen_outside="$T/generated-outside.txt"; print -r -- '外の中身' > "$gen_outside"
+mkdir -p "$wt/dist/assets" "$wt/build" "$wt/out" "$wt/logs"
+print built > "$wt/dist/gen-index.js"; print asset > "$wt/dist/assets/gen-a.css"; ln -s "$gen_outside" "$wt/dist/gen-link.js"
+print b > "$wt/build/gen-b.js"; print o > "$wt/out/gen-o.html"
+print info > "$wt/tsconfig.tsbuildinfo"; print log > "$wt/logs/gen-x.log"
+rc=0; zsh "$T/lanes/cleanup-after-merge.sh" "$wt" > "$T/out" 2>&1 || rc=$?
+[[ "$rc" == 0 && -f "$wt/dist/gen-index.js" ]] && grep -q 'ignore 済み残骸 1 件 + ignore 済みの生成物 5 件を退避' "$T/out" \
+  || fail "dry-run が ignore 済みの生成物を退避対象に数えない（rc=$rc）"
+rc=0; cleanup || rc=$?
+[[ "$rc" == 0 && ! -d "$wt" ]] || fail "ignore 済みの生成物（dist/ など）で後片付けが止まった（rc=$rc）"
+for f in dist/gen-index.js dist/assets/gen-a.css build/gen-b.js out/gen-o.html logs/gen-x.log; do
+  [[ -n "$(print -l "$LANES_ARCHIVE_ROOT"/**/$f(N.))" ]] || fail "生成物・残骸を退避していない: $f"
+done
+link="$(print -l "$LANES_ARCHIVE_ROOT"/**/dist/gen-link.js(N))"
+[[ -n "$link" && -L "$link" && "$(< "$gen_outside")" == '外の中身' ]] || fail '生成物の中の symlink をリンクのまま退避していない'
+[[ -z "$(print -l "$LANES_ARCHIVE_ROOT"/**/tsconfig.tsbuildinfo(N))" ]] || fail '依存・キャッシュ（*.tsbuildinfo）まで退避した'
+ok 'ignore 済みの生成物（dist/ build/ out/）は残骸と同じく退避して、後片付けを続ける'
+
+# 無視されていない dist/ の未追跡ファイルは、作業中かもしれないので今までどおり止まる（生成物として扱うのは ignore 済みだけ）
+new_case generated_untracked
+mkdir -p "$wt/dist"; print wip > "$wt/dist/wip.js"
+rc=0; cleanup || rc=$?
+[[ "$rc" == 4 && -f "$wt/dist/wip.js" ]] && grep -q 'dist/wip.js' "$T/out" || fail "無視されていない dist/ の未追跡ファイルで止まらない（rc=$rc）"
+ok '無視されていない dist/ の未追跡ファイルでは、今までどおり止まる'
+
+# 生成物があっても、知らない除外ファイルがあれば止まる（止める理由に出すのは知らない物だけ）
+new_case generated_with_unknown
+mkdir -p "$repo/.git/info"; print -- 'dist/' >> "$repo/.git/info/exclude"
+mkdir -p "$wt/dist" "$wt/local-data"; print built > "$wt/dist/x.js"; print 手動メモ > "$wt/local-data/notes.txt"
+rc=0; cleanup || rc=$?
+[[ "$rc" == 4 && -f "$wt/dist/x.js" && -f "$wt/local-data/notes.txt" ]] && grep -q 'local-data/notes.txt' "$T/out" && ! grep -q 'dist/x.js' "$T/out" \
+  || fail "生成物と知らない除外ファイルが混ざったときの止まり方が違う（rc=$rc）"
+ok '生成物があっても、知らない除外ファイルがあれば止まる（生成物は止める理由に数えない）'
+
+# 生成物の定義は chk-run.sh と同じく作業ツリー直下のフォルダだけ。パッケージ配下の dist/ は定義の外なので、今までどおり止まる
+new_case generated_nested_dist
+mkdir -p "$repo/.git/info"; print -- 'dist/' >> "$repo/.git/info/exclude"
+mkdir -p "$wt/apps/web/dist"; print built > "$wt/apps/web/dist/x.js"
+rc=0; cleanup || rc=$?
+[[ "$rc" == 4 && -f "$wt/apps/web/dist/x.js" ]] && grep -q 'apps/web/dist/x.js' "$T/out" || fail "パッケージ配下の dist/ を生成物として扱った（rc=$rc）"
+ok 'パッケージ配下の dist/（作業ツリー直下でない）は生成物の定義の外で、今までどおり止まる'
+
+# 本体 checkout の生成物は退避も削除もしない（残骸だけ退避して消す）
+new_case generated_main
+mkdir -p "$repo/.git/info"; print -- 'dist/' >> "$repo/.git/info/exclude"
+mkdir -p "$repo/dist" "$repo/logs"; print built > "$repo/dist/gen-main.js"; print log > "$repo/logs/gen-main.log"
+rc=0; zsh "$T/lanes/cleanup-after-merge.sh" "$repo" --apply > "$T/out" 2>&1 || rc=$?
+[[ "$rc" == 0 && -f "$repo/dist/gen-main.js" && ! -e "$repo/logs/gen-main.log" ]] || fail "本体 checkout の生成物を消した・残骸を消していない（rc=$rc）"
+grep -q 'ignore 済みの生成物 1 件は触らない' "$T/out" || fail '本体 checkout の生成物を触らない旨を出さない'
+[[ -z "$(print -l "$LANES_ARCHIVE_ROOT"/**/dist/gen-main.js(N))" && -n "$(print -l "$LANES_ARCHIVE_ROOT"/**/logs/gen-main.log(N.))" ]] \
+  || fail '本体 checkout の生成物を退避した・残骸を退避していない'
+ok '本体 checkout の生成物は退避も削除もしない（残骸だけ退避して消す）'
+
 new_case pg_identity
 sleep 600 & sleeper=$!
 mkdir -p "$d/pg"

@@ -333,17 +333,18 @@ zsh lanes/lanes-watch.sh --check
 ### `cleanup-after-merge.sh <worktree> [--apply]`
 1. HEAD が `origin/$LANES_BASE_BRANCH` に含まれる（マージ済み）ことを確かめる。含まれなければ何もしない（`EXIT:5`）。**squash / rebase でマージした枝は祖先にならないので「未マージ」扱い**（安全側）。その場合は手で `git worktree remove` と `git branch -D`
 2. 追跡ファイルの未 commit 変更（staged を含む）があれば `uncommitted.patch` を退避先に保存して停止（`EXIT:4`）
-3. 残骸（`run-*.sh` / `prompts/` / `logs/` / `*.log` / レビュー出力など。ignore 済みも含む）を `$LANES_ARCHIVE_ROOT/<repo>/<日付>-<枝>/` へ退避（消さない・GitHub にも上げない）
+3. 残骸（`run-*.sh` / `prompts/` / `logs/` / `*.log` / レビュー出力など。ignore 済みも含む）を `$LANES_ARCHIVE_ROOT/<repo>/<日付>-<枝>/` へ退避（消さない・GitHub にも上げない）。
+   ignore 済みの生成物（確認コマンドのビルドが残した、作業ツリー直下の `dist/` `build/` `out/` の中など）も、残骸と同じく退避してから続けます。生成物の定義は `chk-run.sh` と同じ（`_common.sh` の `LANES_GENERATED_DIRS` / `LANES_GENERATED_SUFFIXES`。7 章）。依存とキャッシュ（下の表の「削除してよいもの」）は退避せず worktree ごと消します
 4. worktree を削除 → ローカル枝を削除 → リモート枝は先端も統合済みのときだけ削除。`main` / `master` / 統合先の枝は永久枝として、ローカルもリモートも絶対に消さない
 5. そのレーンの scratch を削除（中の一時 PostgreSQL は実体を照合して `pg_ctl stop`）
 6. `LANES_DOWNLOADS_SCAN=1` のときだけ、`~/Downloads` に直近 3 日で置き忘れたレビュー出力らしいもの（`*review*` / `*.diff` / `*.patch` / `*.prompt.md` / `*.log` など）を報告だけする（消さない。既定 `0` では見ない）
 
-本体 checkout を渡した場合は退避と残骸削除だけ行い、worktree と枝は消しません。
+本体 checkout を渡した場合は退避と残骸削除だけ行い、worktree と枝は消しません（本体 checkout の生成物は退避も削除もせず、そのまま残します）。
 
 止まる条件（安全側）:
 | 終了コード | 条件 |
 |---|---|
-| 4 | 追跡ファイルの未 commit 変更、または退避対象・削除してよい生成物（`node_modules/` `.next/` `.turbo/` `.cache/` `coverage/` `test-results/` `playwright-report/` `*.tsbuildinfo`）・`.env*` 以外の未追跡・除外ファイル（手書きのメモなど）がある |
+| 4 | 追跡ファイルの未 commit 変更、または退避対象（残骸と、ignore 済みの生成物 `dist/` `build/` `out/` など）・削除してよいもの（依存とキャッシュ: `node_modules/` `.next/` `.turbo/` `.cache/` `coverage/` `test-results/` `playwright-report/` `*.tsbuildinfo`）・`.env*` 以外の未追跡・除外ファイル（手書きのメモなど）がある。git が無視していない `dist/` などの未追跡ファイルと、パッケージ配下の `dist/`（例 `apps/web/dist/`。生成物の定義は作業ツリー直下だけ）もここで止まる |
 | 5 | 未マージ |
 | 6 | linked worktree の `.env*` が本体 checkout と一致しない（worktree を消すと一緒に消えるため。一致していれば worktree ごと消えてよい） |
 | 7 | 実行中・同一性不明のレーンがある（生存情報は `$LANES_SCRATCH_ROOT/.cleanup-guards/` に保全）、一時 PostgreSQL を照合・停止できない、枝の先端が確認後に変わった |
