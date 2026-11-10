@@ -18,6 +18,8 @@
 #      起動のときだけ外すと使い回さず、証跡に理由と一言が出る）
 #   6. 確認コマンドが logs/input.json を読む構成で、中身を失敗する内容に変えたら、古い成功の記録を使い回さない（回し直して失敗する）
 #   7. 台帳の書き方（symlink・ハードリンクの台帳は辿らない・使わない。detach-run.sh は worktree の logs/ の直下のときだけ載せる）
+#   8. FIFO（名前付きパイプ）で止まらない・辿らない（台帳が FIFO でも chk-run.sh・問い合わせ・レビューの起動・台帳へ載せる側が待たずに返る。
+#      detach-run.sh は、起動ログが FIFO・ハードリンク・symlink なら、その先へ書かずに起動を断る）
 # 偽の CLI（tests/stubs）と一時リポだけを使う。本物の CLI・ネットワークには触らない。全データを一時領域に置く。
 set -euo pipefail
 # git の環境変数を外し、一時リポの外へ git が上っていかないようにする（本物のリポを書き換えない）
@@ -355,5 +357,108 @@ pid="$(zsh -f "$LANES_DIR/detach-run.sh" "$wt/src/logs/launch.log" /usr/bin/true
 no_reuse "下の階層の logs/ に置いた起動ログ（入力のまま）"
 rm -rf "$wt/src/logs"; yes_again "下の階層の logs/ を消した後"
 pass "detach-run.sh は worktree の logs/ の直下の起動ログだけを台帳に載せる（同じ名前は 1 回。ほかの場所には台帳を作らない）"
+
+# ---- 8. FIFO（名前付きパイプ）で止まらない・辿らない: 台帳と起動ログ ----
+# 経緯: 台帳を O_RDONLY で開いていたので、台帳が FIFO で書き手がいないと open が返らず、種別の検査（普通のファイル以外は使わない）に
+#       届かなかった。chk-run.sh と、--query を同期で呼ぶレビューの起動が止まった。detach-run.sh の起動ログ（O_WRONLY）も同じ形で、
+#       FIFO だと読み手が現れるまで待ち続け、読み手がいればその先へ書いた。どちらも待たずに開き、開いた後で種別を確かめる。
+# 時間内に終わること。<秒> <待たせうる FIFO> <説明> <コマンド...> → stdout を REPLY、stderr を within_err、終了コードを within_rc に入れる。
+# macOS に timeout コマンドは無いので、裏で動かして終了を待つ。時間切れのときは、FIFO を読み手と書き手の両方として少しの間だけ開き、
+# open で待っているプロセスを起こしてから失敗にする（待ち続けるプロセスを残さない）
+within() {
+  local limit="$1" fifo="$2" what="$3" out="$T/within.out" pid n=0; shift 3
+  rm -f "$out" "$out.err" "$out.rc"
+  { local rc=0; "$@" > "$out" 2> "$out.err" || rc=$?; print -r -- "$rc" > "$out.rc" } &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    n=$(( n + 1 ))
+    if (( n > limit * 10 )); then
+      python3 -I -c 'import os, sys, time
+r = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK)
+w = os.open(sys.argv[1], os.O_WRONLY | os.O_NONBLOCK)
+time.sleep(2)' "$fifo" 2>/dev/null || true
+      kill "$pid" 2>/dev/null || true
+      fail "$what: $limit 秒たっても返らない（FIFO を開こうとして待ち続けている）"
+    fi
+    sleep 0.1
+  done
+  n=0; while [[ ! -s "$out.rc" ]]; do n=$(( n + 1 )); (( n <= 50 )) || fail "$what: 終了コードを取れない"; sleep 0.1; done
+  within_rc="$(<"$out.rc")"; within_err="$(<"$out.err")"; REPLY="$(<"$out")"
+}
+mkrepo wt-fifo; wt="$REPLY"
+chk "$wt"
+launch "$wt" launch.log run-review.sh rev-fifo-r1 --base origin/develop --round 1
+yes_again "FIFO のテストの用意"
+cp "$wt/logs/.lanes-records" "$T/fifo-ledger-before"
+fifo="$wt/logs/.lanes-records"
+rm -f "$fifo"; mkfifo "$fifo"
+# 問い合わせ: 待たずに返り、FIFO の台帳は使わない（何も外さないので、logs/ のランチャの記録が入力に数えられて合わなくなる）
+within 60 "$fifo" "FIFO の台帳があるときの問い合わせ（chk-run.sh --query）" bash "$LANES_DIR/chk-run.sh" "$wt" --query
+[[ "$REPLY" == "reuse=no reason=input-changed" ]] || fail "FIFO の台帳を使った・理由が違う（$REPLY / rc=$within_rc）"
+pass "台帳が FIFO（書き手なし）でも、chk-run.sh --query は待たずに返り、台帳を使わない（reuse=no reason=input-changed）"
+# 回すほう: 待たずに入力を取り、合う記録が無いので確認コマンドを回し直す
+within 60 "$fifo" "FIFO の台帳があるときの chk-run.sh" bash "$LANES_DIR/chk-run.sh" "$wt" 49997 "$T/chk-out"
+[[ "$within_rc" == 0 && "$REPLY" != *'skip='* && "$REPLY" == *'check=0（LANES_CHECK_CMD）'* ]] \
+  || { print -u2 -r -- "$REPLY"; fail "FIFO の台帳があるとき、chk-run.sh が回し直さない・失敗する（rc=$within_rc）"; }
+pass "台帳が FIFO でも、chk-run.sh は待たずに確認コマンドを回す"
+# レビューの起動: 問い合わせで止まらず、logs/ に特殊ファイルがあることを理由に起動を断る（exit 2）
+within 60 "$fifo" "FIFO の台帳があるときのレビューの起動" \
+  zsh -f "$LANES_DIR/run-review.sh" "$wt" "$T/prompt.md" rev-fifo-r2 --base origin/develop --round 2 --force
+[[ "$within_rc" == 2 && "$within_err" == *'logs/.lanes-records'*'特殊ファイル'* ]] \
+  || { print -u2 -r -- "$within_err"; fail "FIFO の台帳があるとき、レビューの起動が「logs/ に特殊ファイルがある」で止まらない（rc=$within_rc）"; }
+[[ ! -e "$wt/logs/rev-fifo-r2.pid" && ! -e "$wt/logs/rev-fifo-r2.done" ]] || fail "起動を断ったのに、レビューの記録を書いた"
+pass "台帳が FIFO でも、レビューの起動は問い合わせで止まらず、logs/ の特殊ファイルを理由に起動を断る（exit 2）"
+# 台帳へ載せる側（ランチャの関数・detach-run.sh）: 待たずに返り、FIFO へは書かない。起動は止めない
+within 60 "$fifo" "FIFO の台帳へ載せる関数（lanes_records_claim）" claim "$wt/logs" label:evil
+[[ "$within_rc" == 0 && "$within_err" == *'NOTE: ランチャの記録の台帳'*'載せられない'* ]] \
+  || fail "FIFO の台帳に載せられないことを知らせない・失敗で返った（rc=$within_rc）: $within_err"
+within 60 "$fifo" "FIFO の台帳があるときの detach-run.sh" zsh -f "$LANES_DIR/detach-run.sh" "$wt/logs/evil.launch.log" /usr/bin/true
+[[ "$within_rc" == 0 && -f "$wt/logs/evil.launch.log" ]] || fail "FIFO の台帳があると detach-run.sh が起動できない（起動は続ける決まり。rc=$within_rc）"
+[[ -p "$fifo" ]] || fail "FIFO の台帳が別の物に置き換わった"
+rm -f "$fifo" "$wt/logs/evil.launch.log"
+cp "$T/fifo-ledger-before" "$wt/logs/.lanes-records"; yes_again "台帳を普通のファイルに戻した後"
+pass "台帳が FIFO でも、台帳へ載せる側（lanes_records_claim・detach-run.sh）は待たずに返り、起動を止めない"
+# 起動ログが FIFO（読み手なし）: 待たずに起動を断り（exit 2）、コマンドを起動しない
+log="$wt/logs/pipe.launch.log"; mkfifo "$log"
+within 60 "$log" "FIFO の起動ログ（読み手なし）" zsh -f "$LANES_DIR/detach-run.sh" "$log" /usr/bin/touch "$T/started-fifo-log"
+sleep 0.5
+[[ "$within_rc" == 2 && "$REPLY" == "" && ! -e "$T/started-fifo-log" ]] || fail "FIFO の起動ログで起動を断らない・コマンドを起動した（rc=$within_rc）"
+[[ "$within_err" == *'ERROR: 起動ログ'* && "$within_err" != *"$T"* ]] || fail "FIFO の起動ログを断った理由が出ない・パスを出した: $within_err"
+# 起動ログが FIFO（読み手あり）: 開けてしまっても、その先へ書かず・コマンドの出力もつながない
+cat "$log" > "$T/fifo-read.out" &
+reader=$!
+sleep 0.5
+within 60 "$log" "FIFO の起動ログ（読み手あり）" zsh -f "$LANES_DIR/detach-run.sh" "$log" /usr/bin/touch "$T/started-fifo-log"
+sleep 0.5
+if kill -0 "$reader" 2>/dev/null; then kill "$reader" 2>/dev/null || true; fi
+[[ "$within_rc" == 2 && ! -e "$T/started-fifo-log" ]] || fail "読み手のいる FIFO の起動ログで起動を断らない・コマンドを起動した（rc=$within_rc）"
+[[ ! -s "$T/fifo-read.out" ]] || fail "FIFO の起動ログの先（読み手）へ書いた"
+rm -f "$log"
+pass "起動ログが FIFO なら、detach-run.sh は待たずに起動を断る（読み手がいても、その先へ書かない・コマンドを起動しない）"
+# 起動ログがハードリンク: 追記が別の名前のファイルにも届くので、書かずに起動を断る
+print -r -- keep > "$T/hard-target.txt"; ln "$T/hard-target.txt" "$wt/logs/hard.launch.log"
+within 60 "" "ハードリンクの起動ログ" zsh -f "$LANES_DIR/detach-run.sh" "$wt/logs/hard.launch.log" /usr/bin/touch "$T/started-hard-log"
+sleep 0.5
+[[ "$within_rc" == 2 && ! -e "$T/started-hard-log" && "$(<"$T/hard-target.txt")" == keep ]] \
+  || fail "ハードリンクの起動ログへ書いた・コマンドを起動した（rc=$within_rc）"
+rm -f "$wt/logs/hard.launch.log"
+# 起動ログが symlink: 今までどおり辿らずに断る
+print -r -- keep > "$T/link-target.txt"; ln -s "$T/link-target.txt" "$wt/logs/link.launch.log"
+within 60 "" "symlink の起動ログ" zsh -f "$LANES_DIR/detach-run.sh" "$wt/logs/link.launch.log" /usr/bin/touch "$T/started-link-log"
+sleep 0.5
+[[ "$within_rc" == 2 && ! -e "$T/started-link-log" && "$(<"$T/link-target.txt")" == keep ]] \
+  || fail "symlink の起動ログを辿って書いた・コマンドを起動した（rc=$within_rc）"
+rm -f "$wt/logs/link.launch.log"
+pass "起動ログがハードリンク・symlink なら、detach-run.sh はその先へ書かずに起動を断る"
+# 対照: 普通のファイル（新しく作る・追記する）と /dev/null（文字デバイス）は今までどおり使える
+for log in "$wt/logs/plain.launch.log" "$wt/logs/plain.launch.log" /dev/null; do
+  rm -f "$T/started-plain-log"
+  within 60 "" "普通の起動ログ（$log）" zsh -f "$LANES_DIR/detach-run.sh" "$log" /usr/bin/touch "$T/started-plain-log"
+  [[ "$within_rc" == 0 && "$REPLY" == <-> ]] || fail "起動ログ $log で起動できない（rc=$within_rc）: $within_err"
+  n=0; while [[ ! -e "$T/started-plain-log" ]]; do n=$(( n + 1 )); (( n <= 100 )) || fail "起動ログ $log で、コマンドが起動していない"; sleep 0.1; done
+done
+[[ "$(grep -c '^=== detach-run ===$' "$wt/logs/plain.launch.log")" == 2 ]] || fail "普通の起動ログへ 2 回分を追記していない"
+yes_again "起動ログのテストの後"
+pass "対照: 普通のファイルの起動ログ（新規・追記）と /dev/null は、今までどおり起動できる"
 
 print -r -- "合格 $count 件"

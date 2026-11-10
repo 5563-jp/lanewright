@@ -16,6 +16,8 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   台帳に無い名前のファイル（確認コマンドが読む `logs/input.json` など）、`logs/` の中のフォルダ、リンク、追跡しているファイルは今までどおり入力として
   照合する（中身を変えれば、古い成功の記録を使い回さずに回し直す）。レビューの後に `chk-run.sh` を呼び直しても、同じ確認を省く（`skip=same-tree`）。
   この版より前のランチャが書いた記録は台帳に無いので入力として数える（同じ label を起動し直すと台帳に載る）。
+  台帳が symlink・ハードリンク・FIFO（名前付きパイプ）など、普通のファイルでないときは、ランチャは書かず、`chk-run.sh` も使わない
+  （どちらも待たずに開いてから種別を確かめるので、台帳が FIFO でも `chk-run.sh`・レビューの起動は止まらない）。
   Reviews launched through `detach-run.sh` right after a successful `chk-run.sh` never reused the parent's check record
   (`input-changed`), because `detach-run.sh` wrote the launch log (`<worktree>/logs/launch.log`) before the launcher queried the record,
   and that git-ignored file was part of the input fingerprint. Launcher records are no longer part of the fingerprint. A record-like name is not enough:
@@ -24,6 +26,16 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   `.evidence.md`, launch logs, and so on; git-ignored regular files). Unregistered names (for example a `logs/input.json` read by the check command),
   subdirectories, links, and tracked files under `logs/` are still fingerprinted, so changing them re-runs the check instead of reusing an old success.
   Records written by launchers older than this version are not in the ledger and count as input until the same label is launched again.
+  If the ledger is a symlink, a hard link, or not a regular file (for example a FIFO), launchers do not write to it and `chk-run.sh` ignores it;
+  both open it without blocking and check the file type afterwards, so a FIFO ledger cannot make `chk-run.sh` or a review launch hang.
+- `detach-run.sh` が、起動ログのパスに FIFO（名前付きパイプ）があると、読み手が現れるまで待ち続けた（読み手がいれば、起動したコマンドの出力が
+  その先へ流れた）。ハードリンクのときは、追記が別の名前のファイルにも届いた。起動ログは待たずに開いてから種別を確かめ、普通のファイル
+  （ハードリンクでないもの）か `/dev/null` のような文字デバイスでなければ、書かずに exit 2 で止め、コマンドを起動しないようにした
+  （symlink を辿らないのは今までどおり）。
+  `detach-run.sh` waited forever when the launch log path was a FIFO with no reader (with a reader, the launched command's output went into it),
+  and appended through a hard link into the file's other name. The launch log is now opened without blocking and its type is checked afterwards:
+  unless it is a regular file with a single link or a character device such as `/dev/null`, nothing is written, the command is not started,
+  and the script exits with status 2 (symlinks are still not followed).
 - `chk-run.sh` が、確認コマンドは通ったのに結果を記録しないとき（未 commit の変更がある・確認コマンドや依存を確実に照合できない）、何も出さずに終わっていた。
   そのためレビューの証跡が `no-record` になる理由が分からなかった（`.lanes/check.sh` に `exec zsh -f …` と書いただけで起きる。`exec` は
   「引数のコマンドを起動する包み」なので、仕様どおり記録しない）。`record=no reason=<uncommitted|unresolvable>（理由）` の行を出すようにした。

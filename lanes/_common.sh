@@ -598,8 +598,9 @@ lanes_codex_verdict() { lanes_parse_review "$1" codex "${2:-}"; }
 #                  qa-case.md、qa-deps-<名前>.log、detach-run.sh の起動ログ）
 # 行は足すだけ（消さない・並べ替えない）。同じ行は足さない。detach-run.sh も同じ形で載せる（_common.sh を読まないので、同じ書き方を中に持つ）。
 # 台帳は logs/ の中に置く（worktree と一緒に動き、後片付けで一緒に退避される。別の場所に対応表を持たない）。
-# 書き方: logs/ を symlink を辿らずに開き、その中の台帳を O_NOFOLLOW で開いて追記する。台帳が symlink・ハードリンク・普通のファイルで
-# ないときは書かない（子が置いたリンクを辿って外へ書かない）。
+# 書き方: logs/ を symlink を辿らずに開き、その中の台帳を O_NOFOLLOW と O_NONBLOCK で開いて追記する。台帳が symlink・ハードリンク・
+# 普通のファイルでない（FIFO など）ときは書かない（子が置いたリンクを辿って外へ書かない。FIFO を開こうとして待ち続けない。
+# 種別は開いた後で確かめるので、開くところで待たないようにする。普通のファイルの読み書きには影響しない）。
 # 限界: 台帳は子も書ける場所（logs/）にあるので、worktree に書ける者が行を足せば、外す範囲を広げられる。入力の指紋は「うっかり古い成功を
 # 使い回す」のを防ぐ仕組みで、意図的な細工までは防がない（確認コマンド自体を書き換えられるのと同じ前提。lanes/README.md の 7 章）。
 # 載せられなくても起動は止めない（chk-run.sh がこのランチャの記録を入力として数え、確認済みの記録を使い回せなくなるだけ。安全側）。
@@ -616,11 +617,11 @@ for entry in entries:
     lines.append(entry.encode("utf-8", "surrogateescape"))
 try:
     dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    fd = os.open(".lanes-records", os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o666, dir_fd=dfd)
+    fd = os.open(".lanes-records", os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o666, dir_fd=dfd)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        sys.exit(1)
     with os.fdopen(fd, "r+b") as f:
-        st = os.fstat(f.fileno())
-        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-            sys.exit(1)
         data = f.read()
         have = set(data.split(b"\n"))
         add = [line for line in dict.fromkeys(lines) if line not in have]
@@ -632,7 +633,7 @@ try:
 except OSError:
     sys.exit(1)' "$logdir" "$@" 2>/dev/null && return 0
   # 子シェルの中で出す（閉じた stderr へ print -u2 すると、そのシェルごと止まるため）
-  ( print -u2 -- "NOTE: ランチャの記録の台帳（logs/.lanes-records）に載せられない（symlink・ハードリンクになっている、または書けない）。起動は続けるが、chk-run.sh はこのランチャの記録を入力として数える（確認済みの記録を使い回せない）: $logdir" ) || true
+  ( print -u2 -- "NOTE: ランチャの記録の台帳（logs/.lanes-records）に載せられない（symlink・ハードリンク・FIFO などになっている、または書けない）。起動は続けるが、chk-run.sh はこのランチャの記録を入力として数える（確認済みの記録を使い回せない）: $logdir" ) || true
   return 0
 }
 

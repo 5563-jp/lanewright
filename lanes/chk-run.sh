@@ -490,10 +490,12 @@ LANE_RECORD_TMP_RES = (re.compile(r"\.(.+)\.[0-9]+\.[0-9a-f]+\.tmp"), re.compile
 lane_records = frozenset()   # 台帳から決まる記録の名前（logs/ の直下の名前）。scan_repo が最上位のリポの一覧を取った後で読む
 
 def load_lane_records():
-    # 台帳を symlink を辿らずに読む。symlink・ハードリンク・普通のファイルでない台帳は使わない（何も外さない）
+    # 台帳を symlink を辿らず・待たずに開いて読む。symlink・ハードリンク・普通のファイルでない台帳は使わない（何も外さない）。
+    # O_NONBLOCK: 台帳が FIFO（名前付きパイプ）だと、付けずに開くと書き手が現れるまで open が返らず、下の種別の検査に届かない
+    # （chk-run.sh と、--query を同期で呼ぶレビューの起動が止まる）。普通のファイルの読み取りには影響しない
     names = set()
     try:
-        fd = os.open(os.path.join(wt, "logs", LANE_RECORDS_NAME), os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(os.path.join(wt, "logs", LANE_RECORDS_NAME), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, "rb") as stream:
             st = os.fstat(stream.fileno())
             if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
