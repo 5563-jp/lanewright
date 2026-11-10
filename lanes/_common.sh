@@ -37,7 +37,8 @@ lanes_die() { print -u2 -- "ERROR: $*"; lanes_record_early_failure "$*"; exit 2;
 # ---- 生成物（確認コマンドのビルド・テストが作る出力）の定義 ----
 # chk-run.sh（成功の記録の指紋）と cleanup-after-merge.sh（マージ後の後片付け）が同じ定義を使う。直すのはここ 1 か所だけ。
 # 対象は git が無視しているもののうち、作業ツリー直下のこの名前のフォルダの中と、この語尾のファイル（どの深さでも）。
-# 名前に空白を入れない（chk-run.sh へスペース区切りで渡す）
+# 名前に空白を入れない（chk-run.sh へスペース区切りで渡す）。設定キーではない（同じ名前の環境変数が持ち込まれても使わず、子にも渡さない）
+unset LANES_GENERATED_DIRS LANES_GENERATED_SUFFIXES
 typeset -ga LANES_GENERATED_DIRS=(dist build out .next .turbo coverage test-results playwright-report)
 typeset -ga LANES_GENERATED_SUFFIXES=(.tsbuildinfo)
 
