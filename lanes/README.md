@@ -310,6 +310,7 @@ zsh lanes/lanes-watch.sh --check
 - 台帳（`logs/.lanes-records`）に載せるのは、各ランチャ（`_common.sh` の `lanes_records_claim`。起動時・dry-run・起動前の誤りの記録）、`prepare-screen-qa.sh`、`after-develop-merge.sh`、`detach-run.sh`（起動ログが worktree の `logs/` の直下にあるときだけ）です。行は足すだけで、同じ行は足しません。台帳が symlink・ハードリンクのときは、ランチャは書かず、`chk-run.sh` も使いません（何も外さない）。
 - 台帳に無い名前のファイル（例 `logs/input.json`・`logs/input.txt`）、`logs/` の中のフォルダ、リンク、追跡しているファイル、下の階層の `logs/`（例 `src/logs/`）は入力です。確認コマンドが `logs/input.json` を読む構成で中身を変えれば、記録と合わなくなり回し直します。**確認コマンドが読む設定やデータを、起動した label の記録と同じ名前（`logs/<起動した label>.json` など）で置かないでください**（変えても気づけません）。
 - 台帳の仕組みより前の版のランチャが書いた記録は台帳に無いので、入力として数えます（同じ label を起動し直すと台帳に載ります）。
+- 限界: 台帳は `logs/` の中にあるので、worktree に書ける者（レーンの子・確認コマンド）が行を足せば、外す範囲を広げられます。入力の指紋は「うっかり古い成功を使い回す」のを防ぐ仕組みで、worktree に書ける者の意図的な細工までは防ぎません（確認コマンド自体を書き換えられるのと同じ前提です）。気になるときは `logs/.lanes-records` に起動した覚えの無い label・名前が無いかを見るか、`chk-run.sh --force` で回し直してください。
 - 生成物（git が無視している、作業ツリー直下の `dist/` `build/` `out/` `.next/` `.turbo/` `coverage/` `test-results/` `playwright-report/` の中と、`*.tsbuildinfo`）は確認コマンド自身が作り直すので、検証の前後の照合からは外し、使い回すときは今の出力が記録のときと同じであることを求めます。定義は `_common.sh` の `LANES_GENERATED_DIRS` / `LANES_GENERATED_SUFFIXES` の 1 か所で、`cleanup-after-merge.sh` も同じものを使います。
 - 検証の前後で HEAD・tree・作業ツリー・`input_fp` を照合し、変化が無く通ったときだけ記録します。記録先は `CHK_CACHE`（既定 `$LANES_RUNS_ROOT/_chk-cache/passed.tsv`）。1 行は `tree・head・full・日時・worktree・input_fp・port・outdir` のタブ区切りです（port と outdir は問い合わせが同じ条件で照合し直すために残します）。
 - 終了コード: 0 = 通った・省略した / 1 = 確認コマンドの失敗・fetch / merge の失敗・検証中の入力の変化 / 2 = 使い方の誤り・確認コマンドが未設定。
