@@ -645,12 +645,21 @@ for claude in (False, True):
     check(f'使い回し-指示書に回さない旨-{kind}', '親が同じ中身で実施済み' in text and '回さないこと' in text and '該当テスト 1 本か小さな再現だけ' in text)
     check(f'使い回し-必須検証は済んだものとしてCLEAN-{kind}', r.returncode == 0 and 'VERDICT: CLEAN' in done)
     check(f'使い回し-証跡に記録を出す-{kind}', '必須検証: 親の chk-run の記録を使用（head ' in evidence)
-    # 1 回目のレビューが logs/ に書いたので、chk-run の入力の指紋（無視対象の logs/ も入る）はもう記録と合わない。
-    # 条件を緩めないので使い回さず、条件の変化として同じ HEAD でも前回の結果を使わずにレビューの中で回させる
+    # 1 回目のレビューが logs/ に書いた記録（.pid・.done・ログ・証跡・再利用の記録）は、chk-run の入力に数えない。
+    # 同じ HEAD で呼び直しても記録と合うので、条件は変わらず前回の結果を使う（同じレビューを繰り返さない）
     r, argv, done = launch(wt, 'review-r2', claude=claude, body=unrun, extra_env=check_env)
-    text = sent(wt, 'review-r2', claude, argv)
+    evidence = (wt / 'logs' / 'review-r2.evidence.md').read_text()
+    check(f'ランチャの記録が増えても同じHEADは前回の結果を使う-{kind}', argv is None and 'skip-same-head' in done and 'VERDICT: CLEAN' in done)
+    check(f'省略の証跡も記録の使用を出す-{kind}', '必須検証: 親の chk-run の記録を使用（head ' in evidence)
+    # logs/ に置いた、ランチャの記録でないファイルは入力のまま。置けば記録と合わなくなり、条件の変化として
+    # 同じ HEAD でも前回の結果を使わずにレビューの中で回させる（logs/ に入力を置いて照合をすり抜けられない）
+    (wt / 'logs' / 'input.txt').write_text('確認コマンドが読むかもしれない入力')
+    r, argv, done = launch(wt, 'review-r2', claude=claude, body=unrun, extra_env=check_env)
+    text = sent(wt, 'review-r2', claude, argv); evidence = (wt / 'logs' / 'review-r2.evidence.md').read_text()
     check(f'記録と合わなくなれば同じHEADでも再レビュー-{kind}', argv is not None and 'VERDICT: NEEDS_FIX' in done and '親が同じ中身で実施済み' not in text and 'CHECKS:' in text)
-    check(f'使い回し無し-証跡に理由-{kind}', '親の chk-run の記録は使わない: input-changed' in (wt / 'logs' / 'review-r2.evidence.md').read_text())
+    check(f'使い回し無し-証跡に理由-{kind}', '親の chk-run の記録は使わない: input-changed' in evidence)
+    # 使い回さないときの証跡は「回すよう指示」と書く（回せたかは成功確認の行。未実施なのに「実施」と書かない）
+    check(f'使い回し無し-証跡は実施と言い切らない-{kind}', 'レビューの中で回すよう指示' in evidence and 'レビューの中で実施' not in evidence and '必須検証の成功確認: INCOMPLETE' in evidence)
     # 親が回し直して記録が合えば、また使い回す（前回 NEEDS_FIX なので full で見直す）
     # （本文は模擬 CLI へ環境変数で渡すので、chk-run も同じ本文の環境で回す）
     resolved_body = 'RESOLVED_PREVIOUS_FINDINGS: YES\n' + unrun

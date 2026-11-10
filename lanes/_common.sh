@@ -34,6 +34,14 @@ lanes_with_caller_auth_env() { lanes_restore_caller_auth_env; "$@"; }
 
 lanes_die() { print -u2 -- "ERROR: $*"; lanes_record_early_failure "$*"; exit 2; }
 
+# ---- 生成物（確認コマンドのビルド・テストが作る出力）の定義 ----
+# chk-run.sh（成功の記録の指紋）と cleanup-after-merge.sh（マージ後の後片付け）が同じ定義を使う。直すのはここ 1 か所だけ。
+# 対象は git が無視しているもののうち、作業ツリー直下のこの名前のフォルダの中と、この語尾のファイル（どの深さでも）。
+# 名前に空白を入れない（chk-run.sh へスペース区切りで渡す）。設定キーではない（同じ名前の環境変数が持ち込まれても使わず、子にも渡さない）
+unset LANES_GENERATED_DIRS LANES_GENERATED_SUFFIXES
+typeset -ga LANES_GENERATED_DIRS=(dist build out .next .turbo coverage test-results playwright-report)
+typeset -ga LANES_GENERATED_SUFFIXES=(.tsbuildinfo)
+
 # ---- Claude のレビュー・QA の読み取り専用の担保（外から上書きできない部分）----
 # 拒否の固定の一覧。lanes.env の CLAUDE_REVIEW_DENY は「足す」ものだけで、この一覧は環境変数や設定ファイルでは外せない。
 # 編集系ツール・サブエージェント・Bash 経由の履歴操作・別エージェントの起動・秘密の取得・作業ツリーの外への副作用（PR のマージ・
@@ -106,6 +114,8 @@ lanes_record_early_failure() {
   # logs/ の中に外を指すファイル（symlink・ハードリンクなど）があれば、辿って書かないよう記録をあきらめる
   lanes_logdir_entries_ok "$logdir" 2>/dev/null || { print -u2 -- "NOTE: logs/ の中に symlink などがあるので、失敗の記録（$label.done）は書かない"; return 0; }
   zmodload zsh/system 2>/dev/null || return 0
+  # この label の記録（.lock・.done）を書く前に、ランチャの記録の台帳へ載せる
+  lanes_records_claim "$logdir" "label:$label" 2>/dev/null
   ( : >> "$logdir/$label.lock" ) 2>/dev/null || return 0
   if ! zsystem flock -t 0 -f fd "$logdir/$label.lock" 2>/dev/null; then
     print -u2 -- "NOTE: 同じ label が実行中のため、前回の記録（$label.done）には触らない。lanes-status.sh はその実行の状態を返す"
@@ -139,6 +149,27 @@ lanes_resolve_bin() {
     [[ -n "$found" ]] || lanes_die "$name が見つからない（${var} にも PATH にも無い）。入れてから lanes-doctor.sh で確かめる"
     typeset -g "$var"="$found"
   fi
+}
+
+# 環境変数の effort が、設定ファイル（無ければ既定）と違う値で勝っているときだけ、注意を 1 行出す（stderr）。
+# <キー> = CLAUDE_EFFORT / CODEX_EFFORT / GEMINI_EFFORT。各ランチャが、自分の使うキーについて起動時に 1 回呼ぶ。
+# 経緯: アプリから起動したシェルが CLAUDE_EFFORT を環境変数として持っていて、設定ファイルに書いた値が黙って負けたことがあった。
+# 勝つ順番（環境変数 > 設定ファイル > 既定）は変えない。知らせるだけで、CLI に渡す値も子の環境も変えない
+lanes_effort_override_note() {
+  local key="$1" now conf_value
+  (( ${+LANES_EFFORT_FROM_ENV[$key]} )) || return 0   # 環境変数で渡されていない（lanes.env が控えを作る）
+  now="${(P)key}"
+  # 環境変数が無かったら何になるか（設定ファイル、無ければ既定）を、子シェルで設定を読み直して確かめる。今のシェルの値は変えない
+  conf_value="$( { unset CLAUDE_EFFORT CODEX_EFFORT GEMINI_EFFORT LANES_DEFER_CONFIG_ERROR
+                   source "$LANES_DIR/lanes.env" && print -r -- "value:${(P)key}" } 2>/dev/null )" || return 0
+  conf_value="${conf_value##*$'\n'}"   # 設定ファイルが何か出力していても、最後の 1 行だけを見る
+  [[ "$conf_value" == value:* ]] || return 0
+  conf_value="${conf_value#value:}"
+  [[ "$now" != "$conf_value" ]] || return 0
+  # 子シェルの中で出す。zsh はスクリプトの実行中に、閉じた stderr へ print -u2 するとそのシェルごと止まる（|| true でも続かない）。
+  # 注意を出せなくても起動は止めない
+  ( print -u2 -- "注意: $key は環境変数の値「${now:-（空＝付けない）}」で動く。設定ファイル（無ければ既定）の値「${conf_value:-（空＝付けない）}」は使われない（環境変数が設定ファイルより勝つ）。設定の値に固定するなら、設定ファイルに $key=\"$conf_value\" と値をそのまま書く（docs/config.md）" ) || true
+  return 0
 }
 
 # 今の構成（LANES_TOOLS）にこの道具が入っているか。入っていなければ代わりの入口を案内して止める（exit 2）。
@@ -556,6 +587,56 @@ lanes_count_findings() { lanes_parse_review "$1" "$2"; }
 lanes_infer_verdict() { lanes_parse_review "$1" infer; }
 lanes_codex_verdict() { lanes_parse_review "$1" codex "${2:-}"; }
 
+# ---- ランチャの記録の台帳（logs/.lanes-records）----
+# chk-run.sh は、ランチャの記録（logs/ の直下の .pid・ログ・証跡・起動ログなど）を入力の指紋から外す。レーンを起動するたびに増えるので、
+# 数えると「chk-run.sh の直後にレビューを起動する」だけで確認済みの記録と合わなくなるため。
+# ただし名前だけで外すと、確認コマンドが読む logs/input.json のような「記録に似た名前の入力」まで外れ、中身を変えても気づけない。
+# そこでランチャは、logs/ に何かを書く前に、書く名前の持ち主をこの台帳に 1 行ずつ載せる。chk-run.sh が外すのは、台帳に載っている
+# 持ち主の決まった名前のファイルだけ（台帳に無い名前は、記録に似ていても入力のまま）。
+#   label:<label>  その label のランチャの記録（<label>.pid / .done / .log など。名前の組は chk-run.sh の LANE_LABEL_SUFFIXES）
+#   file:<名前>    label では決まらない記録（レビューの系列の .<系列>.review-state と <系列>.followups.md、.review-reuse-blocked、
+#                  qa-case.md、qa-deps-<名前>.log、detach-run.sh の起動ログ）
+# 行は足すだけ（消さない・並べ替えない）。同じ行は足さない。detach-run.sh も同じ形で載せる（_common.sh を読まないので、同じ書き方を中に持つ）。
+# 台帳は logs/ の中に置く（worktree と一緒に動き、後片付けで一緒に退避される。別の場所に対応表を持たない）。
+# 書き方: logs/ を symlink を辿らずに開き、その中の台帳を O_NOFOLLOW と O_NONBLOCK で開いて追記する。台帳が symlink・ハードリンク・
+# 普通のファイルでない（FIFO など）ときは書かない（子が置いたリンクを辿って外へ書かない。FIFO を開こうとして待ち続けない。
+# 種別は開いた後で確かめるので、開くところで待たないようにする。普通のファイルの読み書きには影響しない）。
+# 限界: 台帳は子も書ける場所（logs/）にあるので、worktree に書ける者が行を足せば、外す範囲を広げられる。入力の指紋は「うっかり古い成功を
+# 使い回す」のを防ぐ仕組みで、意図的な細工までは防がない（確認コマンド自体を書き換えられるのと同じ前提。lanes/README.md の 7 章）。
+# 載せられなくても起動は止めない（chk-run.sh がこのランチャの記録を入力として数え、確認済みの記録を使い回せなくなるだけ。安全側）。
+# 知らせて 0 を返す（set -e の下で呼び出し元を止めない）
+lanes_records_claim() {   # <logdir> <label:名前|file:名前>...
+  local logdir="$1"; shift
+  python3 -I -c 'import os, stat, sys
+d, entries = sys.argv[1], sys.argv[2:]
+lines = []
+for entry in entries:
+    kind, sep, name = entry.partition(":")
+    if kind not in ("label", "file") or not name or name in (".", "..") or any(c in name for c in "/\n\r\0"):
+        sys.exit(1)
+    lines.append(entry.encode("utf-8", "surrogateescape"))
+try:
+    dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    fd = os.open(".lanes-records", os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o666, dir_fd=dfd)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        sys.exit(1)
+    with os.fdopen(fd, "r+b") as f:
+        data = f.read()
+        have = set(data.split(b"\n"))
+        add = [line for line in dict.fromkeys(lines) if line not in have]
+        if not data:
+            add.insert(0, "# ランチャの記録の台帳。ランチャが logs/ に書く名前の持ち主を載せる（chk-run.sh が入力の指紋から外す）。手で書き換えない".encode("utf-8"))
+        if add:
+            # 1 回の追記で書く（並行して起動した別の label の行と混ざらない）
+            f.write((b"" if not data or data.endswith(b"\n") else b"\n") + b"\n".join(add) + b"\n")
+except OSError:
+    sys.exit(1)' "$logdir" "$@" 2>/dev/null && return 0
+  # 子シェルの中で出す（閉じた stderr へ print -u2 すると、そのシェルごと止まるため）
+  ( print -u2 -- "NOTE: ランチャの記録の台帳（logs/.lanes-records）に載せられない（symlink・ハードリンク・FIFO などになっている、または書けない）。起動は続けるが、chk-run.sh はこのランチャの記録を入力として数える（確認済みの記録を使い回せない）: $logdir" ) || true
+  return 0
+}
+
 # ---- 起動の事実と生死をファイルで残す（lanes-status.sh が読む）----
 # <label>.pid  : 起動時。pid= / lstart=（プロセス開始時刻。pid 再利用の誤判定防止）/ started= / started_epoch= / lane= / worktree= / child_pid=
 # <label>.done : 終了時。EXIT:n / VERDICT: ... / finished= / elapsed_min= / note=
@@ -876,8 +957,11 @@ lanes_start_child() {
 }
 
 # 同じ label が実行中なら起動しない（ログとマーカーが混ざる）。前回の .pid / .done は .prev-<日時> に回転
+# <logdir> <label> <lane> <worktree> [台帳に一緒に載せる名前（file:<名前>）...]
+# この label を、何かを書く前にランチャの記録の台帳へ載せる。5 つ目以降は、label では決まらない記録の名前（レビューの系列の記録など）
 lanes_mark_start() {
   local logdir="$1" label="$2" lane="$3" wt="$4"
+  local -a claims; claims=("label:$label" "${@:5}")
   local pidfile="$logdir/$label.pid" donefile="$logdir/$label.done"
   # ここから先の誤りは自分で理由（実行中など）を出し、排他を取った後の失敗は TRAPEXIT が .done に残す
   unset LANES_EARLY_LABEL LANES_EARLY_LOGDIR
@@ -887,6 +971,8 @@ lanes_mark_start() {
   typeset -g LANES_LOGDIR="$logdir" LANES_LOGDIR_ID="$(lanes_logdir_id "$logdir")"
   [[ -n "$LANES_LOGDIR_ID" ]] || lanes_die "logs/ の識別子を取れない: $logdir"
   lanes_logdir_entries_ok "$logdir" || lanes_die "logs/ の中に symlink・ハードリンク・特殊ファイルがある（上に一覧）→ 起動禁止。中身を確かめてから消す: $logdir"
+  # .lock を含め、この label の記録を書く前に台帳へ載せる（chk-run.sh が外すのは台帳に載っている持ち主の記録だけ）
+  lanes_records_claim "$logdir" "${claims[@]}"
   # ファイルを消すと別 inode に別のロックを取れてしまうため、.lock は削除・回転しない。
   # カーネルがシェル終了時に解放するので、強制終了後の残骸も次回起動を妨げない。
   [[ -z "${LANES_LOCK_FD:-}" ]] || lanes_die "このランチャは既に label を取得している"

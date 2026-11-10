@@ -456,7 +456,10 @@ rvd_mark_blocked() {   # <logdir> → 0 = logs/ の外の印は置けた（logs/
 # ---- 必須検証の使い回し（親の chk-run.sh の記録）----
 # <lanes_dir> <wt>: chk-run.sh --query で問い合わせ、結果を RVD_CHECKS_REUSE（yes / no / off）・RVD_CHECKS_HEAD・RVD_CHECKS_AT・
 # RVD_CHECKS_SRC・RVD_CHECKS_REASON に入れる。LANES_REVIEW_REUSE_CHECKS=0 なら問い合わせず off。
-# 指紋には環境変数も入るので、ランチャは logs/ を触る前（lanes_mark_start より前）・scratch や git の通信止めの export より前に呼ぶ。
+# 指紋には環境変数も入るので、ランチャは scratch や git の通信止めの export より前に呼ぶ。
+# ランチャの記録（logs/ の直下の .pid・ログ・証跡・起動ログなどのうち、ランチャが台帳 logs/.lanes-records に載せた持ち主のもの）は
+# 指紋に入らない（chk-run.sh の is_lane_record）ので、detach-run.sh が先に logs/launch.log を書いていても、前のレーンの記録が
+# 残っていても、記録と合う。台帳に無い名前のファイル（確認コマンドが読む logs/input.json など）は入力のまま。
 # _common.sh が外した API キーなどは、親が chk-run.sh を回したときの環境に戻して渡す（chk-run.sh は何も実行しない）
 rvd_checks_query() {
   local lanes_dir="$1" wt="$2" out="" rc=0 line
@@ -492,12 +495,32 @@ rvd_checks_query() {
 rvd_checks_key() {
   if [[ "${RVD_CHECKS_REUSE:-}" == yes ]]; then print -r -- "yes:${RVD_CHECKS_HEAD}:${RVD_CHECKS_AT}:${RVD_CHECKS_SRC}:${RVD_CHECKS_FP}"; else print -r -- none; fi
 }
-# 証跡に出す 1 行
+# 使わなかった理由（chk-run.sh --query の reason）に、人が読める一言を足す
+rvd_checks_reason_hint() {
+  case "${1:-}" in
+    no-check) print -r -- "確認コマンドが未設定" ;;
+    no-record) print -r -- "この中身の確認済みの記録が無い。先に chk-run.sh を通す（通したのに無いときは、chk-run.sh の出力の record=no の行に、記録しなかった理由が出ている）" ;;
+    cache-link) print -r -- "記録のファイルがリンクになっている" ;;
+    uncommitted) print -r -- "未 commit の変更か未追跡のファイルがある（logs/ が git に無視されていなければ .gitignore に足す）" ;;
+    unresolvable) print -r -- "確認コマンドか依存を確実に照合できない（外を指すリンク・解決できない書き方など）" ;;
+    input-changed) print -r -- "記録の後で入力が変わった（依存・環境変数・確認コマンド・ランチャの記録でない無視対象のファイル）。chk-run.sh と同じ環境から呼ぶ（起動のときだけ環境変数を足す・外すと合わない）" ;;
+    state-error) print -r -- "作業ツリーの状態を読めない" ;;
+  esac
+  return 0
+}
+# 証跡に出す 1 行。<skip>: 同じ head の前回の結果を使って、今回はレビューしていないとき
+# 使い回さないときは「回させた」（指示した）事実だけを書く。回せたかどうかは、証跡の「必須検証の成功確認」の行が示す
 rvd_checks_evidence() {
+  local reason="${RVD_CHECKS_REASON:-なし}" hint
   if [[ "${RVD_CHECKS_REUSE:-}" == yes ]]; then
     print -r -- "- 必須検証: 親の chk-run の記録を使用（head ${RVD_CHECKS_HEAD}・${RVD_CHECKS_AT}・確認コマンド ${RVD_CHECKS_SRC}）。レビューの中では回していない"
+    return 0
+  fi
+  hint="$(rvd_checks_reason_hint "$reason")"; [[ -z "$hint" ]] || reason+="＝$hint"
+  if [[ "${1:-}" == skip ]]; then
+    print -r -- "- 必須検証: 今回は回していない（同じ head の前回の結果を使用。親の chk-run の記録は使わない: $reason）"
   else
-    print -r -- "- 必須検証: レビューの中で実施（親の chk-run の記録は使わない: ${RVD_CHECKS_REASON:-なし}）"
+    print -r -- "- 必須検証: レビューの中で回すよう指示（親の chk-run の記録は使わない: $reason）。回せたかは「必須検証の成功確認」の行を見る"
   fi
 }
 # 指示書に足す必須検証のきまり。使い回すときは「回さない」、使わないときは成功行（CHECKS:）の書き方

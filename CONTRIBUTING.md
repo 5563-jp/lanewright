@@ -30,6 +30,7 @@ zsh -f selftest.sh                                 # 全部（4 構成。15〜20
 - **新しい動き・バグの修正には、テストを足してください。** 安全策（書き込み先の検査、push の遮断、symlink を辿らない書き方など）を触るときは、
   「直す前のコードで赤になり、直した後で緑になる」テストを付けてください。
 - ランチャが書くファイルは、子（AI）が書ける場所に置くなら、symlink やハードリンクを辿らない書き方（`lanes_fresh_file`、`O_NOFOLLOW`、開いたフォルダの中での置き換え）にしてください。
+  前からあるファイルを読む・追記するために開くときは `O_NONBLOCK` も付け、開いた後で普通のファイルかを確かめてください（FIFO（名前付きパイプ）を開こうとして待ち続けないため）。
 - 固有のモデル名・個人のパス・メールアドレス・サービスの ID をコードや文書に書かないでください。
 - 設定キーを足したら、`lanes/lanes.env`（既定値と値の検査）・`lanes.conf.example`・`docs/config.md` を同じ PR で直してください。
 
@@ -69,6 +70,7 @@ zsh -f selftest.sh                                 # everything (4 tool profiles
 - Code comments, documentation, and log messages are primarily in Japanese. Keep `README.en.md` in sync with `README.md`.
 - **Add tests for new behavior and bug fixes.** When touching a safety mechanism (write-target checks, push blocking, not following symlinks, and so on), include a test that fails on the old code and passes on the new code.
 - Files the launcher writes in places the child (the AI) can write to must be written without following symlinks or hard links (`lanes_fresh_file`, `O_NOFOLLOW`, replacing within an opened directory).
+  When opening an existing file there to read or append, also pass `O_NONBLOCK` and verify after opening that it is a regular file (so that a FIFO planted at that path cannot make the open wait forever).
 - Do not put specific model names, personal paths, email addresses, or service IDs in code or documentation.
 - When adding a configuration key, update `lanes/lanes.env` (defaults and validation), `lanes.conf.example`, and `docs/config.md` in the same PR.
 

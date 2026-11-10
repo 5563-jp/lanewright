@@ -131,10 +131,14 @@ print('SMOKE_OK')
     (repo/'merge.log').unlink()
     (repo/'src/tests/a.ts').write_text('BAD'); git('commit','-qam','test: 一括入力の破損')
     r=run(); check(r.returncode==1 and 'check=9' in r.stdout and 'recorded=' not in r.stdout,'一括読み込みのテストも build を省略しない')
+    check('record=no' not in r.stdout,'確認コマンドが失敗したときは「通ったが記録しない」の行を出さない')
     (repo/'src/tests/a.ts').write_text('GOOD'); git('commit','-qam','test: 入力復旧')
     shared=root/'shared'; shared.mkdir(); (shared/'value').write_text('GOOD')
     (repo/'node_modules').symlink_to(shared, target_is_directory=True)
     r=run(); check(r.returncode==0 and 'recorded=' not in r.stdout,'リンクした共有依存は確認結果を再利用しない')
+    # （.gitignore の node_modules/ はフォルダだけに効くので、リンクの node_modules は未追跡のファイルとして数える）
+    check('record=no reason=uncommitted（' in r.stdout and '未 commit の変更か未追跡のファイルがある: node_modules）' in r.stdout,
+          '通ったのに記録しないときは理由を出す（リンクした共有依存）')
     (shared/'value').write_text('BAD')
     r=run(); check(r.returncode==1 and 'check=9' in r.stdout,'共有依存の内容変更で再検証する')
     (shared/'value').write_text('GOOD')
@@ -191,6 +195,7 @@ print('SMOKE_OK')
         r=run(); check(r.returncode==1 and 'check=9' in r.stdout and 'skip=' not in r.stdout,'省略設定の追跡ファイル書き換えで再利用しない'+flag)
         (repo/'src/value').write_text('GOOD')
         r=run(); check(r.returncode==0 and 'skip=' not in r.stdout and 'recorded=' not in r.stdout,'省略設定がある間は記録も省略もしない'+flag)
+        check('record=no reason=uncommitted（' in r.stdout and '変更検知を省く設定' in r.stdout,'通ったのに記録しないときは理由を出す（変更検知を省く設定）'+flag)
         git('update-index','--no-'+flag[2:],'src/value')
         r=run(); check(r.returncode==0 and 'skip=same-tree' in r.stdout,'解除後は同じ内容の記録を再利用'+flag)
 
@@ -315,8 +320,12 @@ exec /bin/ps "$@"
     # 変数で組み立てた名前・見つからない名前は同一性を確かめられないので、回すが記録しない
     r=run(extra={**tool_env,'LANES_CHECK_CMD':'"$CHK_TOOL" --all','CHK_TOOL':str(tool)})
     check(r.returncode==0 and 'check=0' in r.stdout and 'recorded=' not in r.stdout,'変数で組み立てた実行ファイル名は記録しない')
+    check('record=no reason=unresolvable（' in r.stdout and '確認コマンド（LANES_CHECK_CMD）の「$CHK_TOOL」' in r.stdout
+          and str(tool) not in r.stdout,'通ったのに記録しないときは理由を出す（変数で組み立てた名前。変数の値は出さない）')
     r=run(extra={**tool_env,'LANES_CHECK_CMD':'check-tool --all || no-such-tool-xyz'})
     check(r.returncode==0 and 'recorded=' not in r.stdout,'見つからない実行ファイル名があれば記録しない')
+    check('record=no reason=unresolvable（' in r.stdout and '「no-such-tool-xyz」: 実行ファイルが見つからない' in r.stdout,
+          '通ったのに記録しないときは理由を出す（見つからない実行ファイル）')
     # .lanes/check.sh の中から呼ぶ外の実行ファイルも見る
     (repo/'.lanes').mkdir(exist_ok=True)
     (repo/'.lanes/check.sh').write_text('set -e\nif true; then\n  FOO=1 check-tool --sh 2>&1\nfi\n')
@@ -340,6 +349,22 @@ exec /bin/ps "$@"
     tool.write_text('#!/bin/sh\nexit 00\n')
     (repo/'.lanes/check.sh').write_text(f'#!/bin/bash\nexport PATH={tools2}:$PATH\ncheck-tool --sh\n')
     r=run(extra=tool_env); check(r.returncode==0 and 'recorded=' not in r.stdout,'.lanes/check.sh で PATH を書き換えたら記録しない')
+    check('record=no reason=unresolvable（' in r.stdout and '確認コマンド（.lanes/check.sh）の「PATH=' in r.stdout,
+          '通ったのに記録しないときは理由を出す（.lanes/check.sh の PATH の付け替え）')
+    # 報告された形: .lanes/check.sh が exec でコマンドを起動する（exec zsh -f selftest.sh など）。
+    # 「引数のコマンドを起動する包み」なので仕様どおり記録しないが、黙らずに理由を出す。
+    # 直す前は check=0（.lanes/check.sh）だけを出して終わり、レビューの問い合わせが no-record になる理由が分からなかった
+    (repo/'.lanes/check.sh').write_text('#!/bin/bash\n# この worktree の手元確認\nexec check-tool --sh\n')
+    (root/'passed.tsv').write_text('')
+    r=run(extra=tool_env)
+    check(r.returncode==0 and 'check=0（.lanes/check.sh）' in r.stdout and 'recorded=' not in r.stdout,'exec で起動する .lanes/check.sh は回すが記録しない')
+    check('record=no reason=unresolvable（' in r.stdout and '確認コマンド（.lanes/check.sh）の「exec」' in r.stdout,
+          'exec で起動する .lanes/check.sh は、記録しない理由（exec）を出す')
+    q=subprocess.run(['bash',str(lanes/'chk-run.sh'),str(repo),'--query'],env={**env,**tool_env},capture_output=True,text=True,timeout=40)
+    check(q.returncode==1 and q.stdout.strip()=='reuse=no reason=no-record','記録しなかった後の問い合わせは no-record（理由は chk-run.sh の record=no の行に出ている）')
+    (repo/'.lanes/check.sh').write_text('#!/bin/bash\n# この worktree の手元確認\ncheck-tool --sh\n')
+    r=run(extra=tool_env)
+    check(r.returncode==0 and 'recorded=' in r.stdout and 'record=no' not in r.stdout,'exec を外せば記録する（記録したときは record=no を出さない）')
     (repo/'.lanes/check.sh').unlink()
     path_cmd=f'PATH={tools2}:$PATH check-tool --all'
     (root/'passed.tsv').write_text('')
@@ -356,9 +381,11 @@ exec /bin/ps "$@"
                 'xargs check-tool </dev/null','cat <<EOF\nEOF\ncheck-tool','"check-tool',"echo $'a\\'' ; check-tool"):
         r=run(extra={**tool_env,'LANES_CHECK_CMD':cmd})
         check('skip=' not in r.stdout and 'recorded=' not in r.stdout,'解決できない書き方は記録しない: '+cmd.replace('\n','⏎'))
+        check(r.returncode!=0 or 'record=no reason=unresolvable（' in r.stdout,'解決できない書き方で通ったら、記録しない理由を出す: '+cmd.replace('\n','⏎'))
     # 単純な形（素の名前・前置の代入が PATH 以外・リダイレクト・改行の区切り）は今までどおり記録して再利用する
     simple='set -e\nFOO=1 check-tool --all 2>&1 >/dev/null\ncheck-tool --again && true\n'
     r=run(extra={**tool_env,'LANES_CHECK_CMD':simple}); check(r.returncode==0 and 'recorded=' in r.stdout,'単純な形は記録する')
+    check('record=no' not in r.stdout,'記録したときは record=no を出さない')
     r=run(extra={**tool_env,'LANES_CHECK_CMD':simple}); check('skip=same-tree' in r.stdout,'単純な形は再利用する')
     import shutil as _sh; _sh.rmtree(repo/'.lanes')
     # 記録の日時は時間帯の表記を固定しない（%Z）

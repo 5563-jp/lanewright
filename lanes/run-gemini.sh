@@ -126,6 +126,7 @@ if (( ! dry )); then
   for f in "$log" "$json" "$err" "$evidence" "$final" "$json1" "$err1"; do lanes_rotate_log "$f"; done
 fi
 mkdir -p "$logdir"
+(( ! dry )) || lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
 if (( dry )); then scratch="$(lanes_scratch_path "$wt" "$label")"; else lanes_scratch_prepare "$wt" "$label" gemini; scratch="$LANES_SCRATCH"; fi
 
 lanes_require_prompt "$prompt"
@@ -197,6 +198,8 @@ if (( ! dry )); then archive_message; fi
 
 # 設定は起動単位で渡す。利用者の許可設定より deny が優先され、設定ファイルを変更しない。
 gem_settings='{"permissions":{"deny":["mcp(*)"]},"allowNonWorkspaceAccess":false,"enableTerminalSandbox":true,"modelProvider":"","useG1Credits":false}'
+# 環境変数の effort が設定ファイルと違う値で勝っていたら知らせる（渡す値は変えない）
+lanes_effort_override_note GEMINI_EFFORT
 cmd=("$GEMINI_BIN")
 if [[ -n "$GEMINI_MODEL" ]]; then cmd+=(--model "$GEMINI_MODEL"); fi
 if [[ -n "$GEMINI_EFFORT" ]]; then cmd+=(--effort "$GEMINI_EFFORT"); fi

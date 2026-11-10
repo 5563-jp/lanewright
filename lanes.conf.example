@@ -49,6 +49,12 @@ GEMINI_MODEL="${GEMINI_MODEL:-}"
 CLAUDE_EFFORT="${CLAUDE_EFFORT-xhigh}"
 CODEX_EFFORT="${CODEX_EFFORT-xhigh}"
 GEMINI_EFFORT="${GEMINI_EFFORT-high}"
+# 注意: アプリ（デスクトップアプリやエディタなど）から起動したシェルは、CLAUDE_EFFORT などを環境変数として持っていることがある。
+# 上の書き方は環境変数が勝つので、そのときはここに書いた値が使われない（ランチャは起動時に
+# 「注意: CLAUDE_EFFORT は環境変数の値「…」で動く …」を 1 行出す。lanes-doctor.sh でも同じ注意が出る）。
+# いつもここに書いた値で動かしたいなら、値をそのまま書いて固定する（この書き方は環境変数より設定ファイルが勝つ）:
+#   CLAUDE_EFFORT="xhigh"
+# 固定すると、その場だけの上書き（CLAUDE_EFFORT=low zsh run-impl.sh ...）は効かなくなる
 # 例（架空のモデル名）: CLAUDE_MODEL="${CLAUDE_MODEL:-my-claude-model}"
 
 # ---- 実装・レビューの許可（AI に何を確認なしでさせるか）----

@@ -6,10 +6,13 @@
 #   1. HEAD が origin/<統合先>（設定キー LANES_BASE_BRANCH。既定 develop）に含まれている（＝マージ済み）ことを確認。未マージなら何もしない（squash / rebase マージは祖先にならないので「未マージ」扱い＝安全側）
 #   2. tracked の未 commit 変更（staged 含む）があれば patch を退避先に保存して停止。残骸パターン外の未追跡（git add 忘れ）があっても停止。勝手に捨てない
 #   3. 残骸（run-*.sh / prompts/ / logs/ / *.log / review 出力 等。ignore 済みも含む）を $LANES_ARCHIVE_ROOT/<repo>/<日付>-<枝>/ へ退避
+#      ignore 済みの生成物（確認コマンドのビルドが残した dist/ など。定義は _common.sh の LANES_GENERATED_DIRS / LANES_GENERATED_SUFFIXES で
+#      chk-run.sh と同じ）も、残骸と同じく退避して続ける。依存とキャッシュ（node_modules/ .next/ など）は退避せず worktree ごと消す
 #   4. worktree 削除 → ローカル枝削除 → リモート枝はリモート先端も origin/<統合先> 済みのときだけ削除
 #   5. main / master / 統合先は永久枝。ローカルもリモートも絶対に消さない
 #   .env* は退避しない。linked worktree の .env* は本体 checkout と同一でなければ停止（worktree 削除で消えるため）
 #   本体 checkout（.git ディレクトリを直接持つ方）を渡した場合は 3 の退避 + 残骸削除だけ行い、worktree / 枝は消さない
+#   （本体 checkout の生成物は退避も削除もしない。そのまま残す）
 #   6. そのレーンの作業場所（$LANES_SCRATCH_ROOT/<repo>/<label>/。.lane の worktree= が一致するもの）を削除。
 #      一時 PostgreSQL は実体を照合して pg_ctl stop。実行中のレーンや不明な DB があれば後片付け全体を停止する
 #   7. LANES_DOWNLOADS_SCAN=1 のときだけ、~/Downloads に置き忘れたレビュー出力らしい一時物（*review* / *.diff / *.patch 等）を
@@ -281,11 +284,22 @@ if (( ${#tracked} )); then
 fi
 
 # 3. 退避対象 = 残骸パターンに一致する未追跡（ignore 外）+ ignore 済み。残骸パターン外の未追跡は git add 忘れの可能性があるので停止
-# 退避してよい残骸（キットのランチャ・指示書が作る名前だけ）。ここにも下の生成物（generated_re）にも当たらない未追跡ファイルは「知らない物」として後片付けを止める
+# 退避してよい残骸（キットのランチャ・指示書が作る名前だけ）。ここにも下の「消してよいもの」「生成物」にも当たらない未追跡・除外ファイルは
+# 「知らない物」として後片付けを止める
 residue_re='^(logs/|prompts/|run-[^/]*\.sh$|[^/]*\.log$|IMPLEMENTATION_DONE|review[^/]*\.md$|[^/]*\.prompt\.md$|[^/]*\.patch$|\.claude-task-[^/]*\.md$|\.check-[^/]*\.sh$|\.launch-[^/]*\.sh$|\.ci-fix-[^/]*\.md$|\.login-[^/]*\.md$)'
-# 依存とフレームワークのキャッシュはモノレポの各パッケージ配下（apps/web/node_modules/ 等）にもできる
-generated_re='^(node_modules/|\.next/|\.turbo/|\.cache/|coverage/|test-results/|playwright-report/|[^/]*\.tsbuildinfo$)|^([^/]+/)+(node_modules|\.next|\.turbo)/|^([^/]+/)+[^/]*\.tsbuildinfo$'
-untracked=(); ignored=(); others=()
+# 退避せずに worktree ごと消してよいもの（依存とフレームワークのキャッシュ。大きく、作り直せる）。
+# モノレポの各パッケージ配下（apps/web/node_modules/ 等）にもできる
+disposable_re='^(node_modules/|\.next/|\.turbo/|\.cache/|coverage/|test-results/|playwright-report/|[^/]*\.tsbuildinfo$)|^([^/]+/)+(node_modules|\.next|\.turbo)/|^([^/]+/)+[^/]*\.tsbuildinfo$'
+# 生成物（確認コマンドのビルド・テストが作る出力）か。定義は _common.sh の LANES_GENERATED_DIRS / LANES_GENERATED_SUFFIXES の 1 か所で、
+# chk-run.sh と同じ（作業ツリー直下のその名前のフォルダの中と、その語尾のファイル）。git が無視しているものだけに使う。
+# 上の「消してよいもの」に当たらない生成物（dist/ build/ out/ など。名前が一般的で、手で置いたものが混ざりうる）は、残骸と同じく退避する
+is_generated() {   # <作業ツリーからの相対パス>
+  local f="$1" d sfx
+  for d in "${LANES_GENERATED_DIRS[@]}"; do [[ "$f" == "$d"/* ]] && return 0; done
+  for sfx in "${LANES_GENERATED_SUFFIXES[@]}"; do [[ "$f" == *"$sfx" ]] && return 0; done
+  return 1
+}
+untracked=(); ignored=(); generated=(); others=()
 for f in "${(@0)$(g ls-files -z --others --exclude-standard)}"; do
   [[ -n "$f" ]] || continue
   [[ "$f" =~ '(^|/)\.env' ]] && continue
@@ -296,7 +310,11 @@ for f in "${(@0)$(g ls-files -z --others --ignored --exclude-standard)}"; do
   [[ "$f" =~ '(^|/)\.env' ]] && continue
   if [[ "$f" =~ "$residue_re" && "$f" != */ ]]; then
     ignored+=("$f")
-  elif [[ ! "$f" =~ "$generated_re" || "$f" == */ ]]; then
+  elif [[ "$f" =~ "$disposable_re" && "$f" != */ ]]; then
+    :   # 依存・キャッシュ: 退避せず worktree ごと消す
+  elif [[ "$f" != */ ]] && is_generated "$f"; then
+    generated+=("$f")
+  else
     others+=("$f")
   fi
  done
@@ -306,6 +324,8 @@ if (( ${#others} )); then
   exit 4
 fi
 archive=("${untracked[@]}" "${ignored[@]}")
+# ignore 済みの生成物: linked worktree では worktree ごと消えるので、残骸と同じく退避する。本体 checkout では触らない（退避も削除もしない）
+(( is_main )) || archive+=("${generated[@]}")
 
 # .env*: 本体 checkout なら触らない。linked worktree は削除で一緒に消えるので、本体と同一コピーがあるときだけ進む
 envs=()
@@ -330,7 +350,10 @@ check_active_lanes || exit $?
 
 if (( ${#archive} )); then
   preview="$(printf '%s ' "${archive[@]:0:6}")"; (( ${#archive} > 6 )) && preview+="…(計 ${#archive})"
-  say "残骸 ${#untracked} 件 + ignore 済み残骸 ${#ignored} 件を退避: $preview"
+  # 生成物を一緒に退避するとき（linked worktree で 1 件以上）だけ、件数を足して出す
+  generated_note=""
+  if (( ! is_main && ${#generated} )); then generated_note=" + ignore 済みの生成物 ${#generated} 件"; fi
+  say "残骸 ${#untracked} 件 + ignore 済み残骸 ${#ignored} 件${generated_note}を退避: $preview"
   if (( apply )); then
     # 同じ日・同じ枝で後片付けを繰り返すと退避先が重なり、前回退避した symlink を cp が書き込み先として辿りうる。
     # 既にあるなら番号付きの新しいフォルダにして、退避先は必ず空から作る
@@ -343,6 +366,9 @@ if (( ${#archive} )); then
   fi
 else
   print -- "退避対象なし"
+fi
+if (( is_main && ${#generated} )); then
+  print -- "注意: ignore 済みの生成物 ${#generated} 件は触らない（本体 checkout。退避も削除もしない）"
 fi
 
 cleanup_scratch

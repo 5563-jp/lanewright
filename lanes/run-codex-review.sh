@@ -44,17 +44,18 @@ lanes_require_worktree "$wt"
 # 起点はレビュー開始前に commit へ固定し、再利用判定にも含める。
 source "$LANES_DIR/review-dedup.zsh"
 [[ "$round" == <-> && ${#round} -le 6 ]] || lanes_die "--round は 0〜999999 の整数"
-# 必須検証の使い回しの問い合わせ。指紋に作業ツリー（無視対象の logs/ も含む）と環境変数が入るので、logs/ に .pid を書く前・
-# scratch や git の通信止めを export する前に、親が chk-run.sh を回したのと同じ環境で呼ぶ
+# 必須検証の使い回しの問い合わせ。指紋に環境変数が入るので、scratch や git の通信止めを export する前に、
+# 親が chk-run.sh を回したのと同じ環境で呼ぶ。ランチャの記録（logs/ の直下の .pid・ログ・起動ログなど）は指紋に入らない
 rvd_checks_query "$LANES_DIR" "$wt"
 [[ "$RVD_CHECKS_REUSE" == yes ]] && LANES_REVIEW_CHECKS_REUSED=1 || LANES_REVIEW_CHECKS_REUSED=0
 checks_key="$(rvd_checks_key)"
 logdir="$wt/logs"
-(( dry )) || lanes_mark_start "$logdir" "$label" codex-review "$wt"
+# 系列の記録（再利用の記録・後回し票・「使い回し禁止」の印）は label では名前が決まらないので、ランチャの記録の台帳へ名前で載せる
+series="$(rvd_series "$label")"
+(( dry )) || lanes_mark_start "$logdir" "$label" codex-review "$wt" "file:.$series.review-state" "file:$series.followups.md" "file:.review-reuse-blocked"
 lanes_require_tool codex run-codex-review.sh
 lanes_entry_preflight
 lanes_require_prompt "$prompt"
-series="$(rvd_series "$label")"
 round="$(rvd_round "$logdir" "$series" "$label" "$round")"
 [[ "$round" == <-> && ${#round} -le 6 ]] || lanes_die "round が不正"
 record="$(rvd_prev_record "$logdir" "$series" "$round")"
@@ -114,7 +115,7 @@ if (( skip_same )); then
     print -- "- $prev_v"
     print -- "- 対象: $(lanes_git_summary "$wt")"
     print -- "- モード: skip-same-head（前回 round と同じ head ${prev_head:0:12}。レビューしていない）/ round=$round"
-    rvd_checks_evidence
+    rvd_checks_evidence skip
     print -- "- 実行: $(lanes_now) / 約 0 分 / EXIT:0"
     print -- "- HEAD: ${prev_head:0:12} → ${prev_head:0:12} / 作業ツリー差分行 0"
   } > "$evidence"
@@ -129,6 +130,7 @@ else
   for f in "$log" "$err" "$evidence" "$final" "$proof" "$body_log"; do lanes_rotate_log "$f"; done
 fi
 mkdir -p "$logdir"
+(( ! dry )) || lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
 # レーン専用の作業場所。レビュー役の一時 DB・ビルド・ログはここへ（~/Downloads に置かせない）。マージ後 cleanup が消す
 if (( dry )); then scratch="$(lanes_scratch_path "$wt" "$label")"; else lanes_scratch_prepare "$wt" "$label" codex-review; scratch="$LANES_SCRATCH"; fi
 scratch_rule="$(lanes_scratch_rule "$scratch")"
@@ -186,12 +188,14 @@ lanes_codex_no_mcp_args "$wt"
 CODEX_REVIEW_SANDBOX="${CODEX_REVIEW_SANDBOX:-read-only}"
 [[ "$CODEX_REVIEW_SANDBOX" == read-only || "$CODEX_REVIEW_SANDBOX" == workspace-write ]] \
   || lanes_die "CODEX_REVIEW_SANDBOX は read-only か workspace-write: '$CODEX_REVIEW_SANDBOX'"
+# 環境変数の effort が設定ファイルと違う値で勝っていたら知らせる（渡す値は変えない）
+lanes_effort_override_note CODEX_EFFORT
 cmd=("$CODEX_BIN" exec review --json "${LANES_CODEX_NO_MCP_ARGS[@]}" -c "sandbox_mode=\"$CODEX_REVIEW_SANDBOX\"")
 if [[ -n "$CODEX_MODEL" ]]; then cmd+=(-c "model=$CODEX_MODEL"); fi
 if [[ -n "$CODEX_EFFORT" ]]; then cmd+=(-c "model_reasoning_effort=$CODEX_EFFORT"); fi
 cmd+=(-c "developer_instructions=$devinst" --base "$base")
 if (( dry )); then
-  print -- "[dry-run] series=$series round=$round mode=$mode base=$base prev_head=${prev_head:0:12}（判定 $decided）"
+  print -- "[dry-run] series=$series round=$round mode=$mode base=$base prev_head=${prev_head:0:12}（判定 $decided）/ 必須検証の使い回し: $RVD_CHECKS_REUSE"
   print -- "[dry-run] scratch: $scratch（TMPDIR / LANES_SCRATCH。developer_instructions に置き場所の指示あり）"
   print -- "[dry-run] cd ${(q)wt} && TMPDIR=${(q)scratch}/ LANES_SCRATCH=${(q)scratch} ${(q)cmd[@]} > ${(q)log} 2> ${(q)err}  # prompt archived at ${(q)final}"
   exit 0

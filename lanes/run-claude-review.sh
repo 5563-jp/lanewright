@@ -55,8 +55,8 @@ else
     || lanes_die "比較起点 origin/${LANES_BASE_BRANCH:-develop} が無い。その枝の無い repo では --base <sha|branch> を指定する（統合先は LANES_BASE_BRANCH で変えられる）"
 fi
 review_base="$base"
-# 必須検証の使い回しの問い合わせ。指紋に作業ツリー（無視対象の logs/ も含む）と環境変数が入るので、logs/ に .pid を書く前・
-# scratch や git の通信止めを export する前に、親が chk-run.sh を回したのと同じ環境で呼ぶ
+# 必須検証の使い回しの問い合わせ。指紋に環境変数が入るので、scratch や git の通信止めを export する前に、
+# 親が chk-run.sh を回したのと同じ環境で呼ぶ。ランチャの記録（logs/ の直下の .pid・ログ・起動ログなど）は指紋に入らない
 rvd_checks_query "$LANES_DIR" "$wt"
 [[ "$RVD_CHECKS_REUSE" == yes ]] && LANES_REVIEW_CHECKS_REUSED=1 || LANES_REVIEW_CHECKS_REUSED=0
 checks_key="$(rvd_checks_key)"
@@ -66,11 +66,12 @@ log="$logdir/$label.log"; json="$logdir/$label.json"; err="$logdir/$label.stderr
 final="$logdir/$label.prompt.md"; evidence="$logdir/$label.evidence.md"
 # 起動の事実（.pid）を最初に残す（以後どこで落ちても .done は今回の失敗を指し、status が前回の証跡を案内しない）。
 # dry-run は .pid / .done / ログを触らず、結合結果だけ <label>.dry-run.prompt.md に書く
-(( dry )) || lanes_mark_start "$logdir" "$label" claude-review "$wt"
+# 系列の記録（再利用の記録・後回し票・「使い回し禁止」の印）は label では名前が決まらないので、ランチャの記録の台帳へ名前で載せる
+series="$(rvd_series "$label")"
+(( dry )) || lanes_mark_start "$logdir" "$label" claude-review "$wt" "file:.$series.review-state" "file:$series.followups.md" "file:.review-reuse-blocked"
 lanes_require_tool claude run-claude-review.sh
 lanes_entry_preflight
 lanes_require_prompt "$prompt"
-series="$(rvd_series "$label")"
 round="$(rvd_round "$logdir" "$series" "$label" "$round")"
 [[ "$round" == <-> && ${#round} -le 6 ]] || lanes_die "round が不正"
 record="$(rvd_prev_record "$logdir" "$series" "$round")"
@@ -114,7 +115,7 @@ if (( skip_same )); then
     print -- "- $prev_v"
     print -- "- 対象: $(lanes_git_summary "$wt")"
     print -- "- モード: skip-same-head（前回 round と同じ head ${prev_head:0:12}。レビューしていない）/ round=$round"
-    rvd_checks_evidence
+    rvd_checks_evidence skip
     print -- "- 実行: $(lanes_now) / 約 0 分 / EXIT:0"
     print -- "- HEAD: ${prev_head:0:12} → ${prev_head:0:12} / 作業ツリー差分行 0"
   } > "$evidence"
@@ -129,6 +130,7 @@ else
   for f in "$log" "$json" "$err" "$evidence" "$final"; do lanes_rotate_log "$f"; done
 fi
 mkdir -p "$logdir"
+(( ! dry )) || lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
 # レーン専用の作業場所（TMPDIR / LANES_SCRATCH）。マージ後 cleanup が消す
 (( dry )) || lanes_scratch_prepare "$wt" "$label" claude-review
 lanes_check_claude_subscription
@@ -161,6 +163,8 @@ PY
 # --output-format stream-json: 1 行 1 イベントで進行中も $json が増える（生死監視の「最終出力」に使う）。json だと終了までゼロ出力
 # 使えるツールに編集系・サブエージェントがあれば止め、拒否は固定の一覧 + CLAUDE_REVIEW_DENY にする（外から外せない）
 lanes_claude_review_resolve
+# 環境変数の effort が設定ファイルと違う値で勝っていたら知らせる（渡す値は変えない）
+lanes_effort_override_note CLAUDE_EFFORT
 cmd=("$CLAUDE_BIN" --tools="$LANES_CLAUDE_REVIEW_TOOLS" --allowedTools="$LANES_CLAUDE_REVIEW_TOOLS" --disallowedTools="$LANES_CLAUDE_REVIEW_DENY" --strict-mcp-config --permission-mode manual)
 if [[ -n "$CLAUDE_MODEL" ]]; then cmd+=(--model "$CLAUDE_MODEL"); fi
 if [[ -n "$CLAUDE_EFFORT" ]]; then cmd+=(--effort "$CLAUDE_EFFORT"); fi

@@ -166,7 +166,7 @@ Because the config file is `source`d directly by `zsh`, every line in it is exec
 | `LANES_SCRATCH_ROOT` | `$LANES_RUNS_ROOT/_scratch` | Per-lane temporary directory (`TMPDIR` / `LANES_SCRATCH`), automatically removed during cleanup |
 | `LANES_CHECK_CMD` | empty | Command run by `chk-run.sh` before PR creation (e.g., `pnpm lint && pnpm typecheck && pnpm build`). If `.lanes/check.sh` exists in the repo, that script takes priority |
 | `CLAUDE_MODEL` / `CODEX_MODEL` / `GEMINI_MODEL` | empty | Leave empty to use each CLI's default model, or set an explicit model name |
-| `CLAUDE_EFFORT` / `CODEX_EFFORT` / `GEMINI_EFFORT` | `xhigh` / `xhigh` / `high` | Reasoning effort passed to each CLI (set to empty `""` to omit `--effort`) |
+| `CLAUDE_EFFORT` / `CODEX_EFFORT` / `GEMINI_EFFORT` | `xhigh` / `xhigh` / `high` | Reasoning effort passed to each CLI (set to empty `""` to omit `--effort`). An environment variable of the same name overrides the config file; the launcher prints a one-line notice when that happens. Write the value literally (`CLAUDE_EFFORT="xhigh"`) to pin it |
 | `LANES_STALL_MINUTES` | `10` | Minutes without output before `lanes-status.sh` reports `STALLED` |
 | `LANES_NOTIFY` | `1` | Show a macOS notification when a lane finishes (`0` to disable) |
 | `LANES_PROMPT_MAX_BYTES` | `200000` | Maximum prompt file size in bytes (prevents pasting huge diffs into prompts) |
@@ -322,7 +322,9 @@ For operational rules, see [docs/operating-rules.md](docs/operating-rules.md) (i
 | Cannot launch with the same `label` (exit 2) | The previous launcher or its child process is still alive. Check `lanes-status.sh`; only run `kill N` if a `FAILED` / `DEAD` line explicitly reports a surviving child `pid=N` |
 | Review ends with `VERDICT: NONE` | Output was truncated or missing the final verdict line. Treated as a failure—re-run the review lane |
 | Stops because the prompt is too large | A diff was pasted into the prompt file. Replace it with instructions to run `git diff` (limit is `LANES_PROMPT_MAX_BYTES`) |
-| `cleanup-after-merge.sh` stops | Uncommitted changes, untracked files, or a running lane exist in the worktree. Check the printed archive path and reason, resolve them, then re-run with `--apply` |
+| `cleanup-after-merge.sh` stops | Uncommitted changes, untracked files, or a running lane exist in the worktree. Check the printed archive path and reason, resolve them, then re-run with `--apply` (git-ignored build outputs such as `dist/`, `build/`, and `out/` are archived and do not stop the cleanup) |
+| The effort from the config file is not used | The launching shell has `CLAUDE_EFFORT` (or `CODEX_EFFORT` / `GEMINI_EFFORT`) set as an environment variable, which is common for shells started from an app. Environment variables take precedence over the config file. The launcher prints a one-line notice at startup ("注意: CLAUDE_EFFORT は環境変数の値「…」で動く …"). To pin the config value, write the value literally in the config file, e.g. `CLAUDE_EFFORT="xhigh"` (see [docs/config.md](docs/config.md)) |
+| Review evidence says "親の chk-run の記録は使わない" (parent check record not reused) | Look at the reason in the evidence. `no-record` means `chk-run.sh` has not passed for this tree yet, or it passed but could not record the result (`chk-run.sh` prints the reason as `record=no reason=…`; `exec <command>` in `.lanes/check.sh` cannot be recorded, so write the command without `exec`). `input-changed` means dependencies, environment variables, or the check command changed after the record (call `chk-run.sh` and the review from the same shell). Launcher records (logs and launch logs directly under `logs/`) never cause this |
 | Auto-merge merges immediately without waiting for CI | The repository has no required status checks (branch protection) configured. Enable branch protection, or wait with `gh pr checks <PR> --watch --fail-fast` before merging manually |
 
 ## Uninstallation

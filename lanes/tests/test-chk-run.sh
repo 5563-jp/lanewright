@@ -77,6 +77,7 @@ has() { if grep -qE "$3" <<< "$2"; then ok "$1"; else ng "$1（'$3' が無い）
 hasnt() { if grep -qE "$3" <<< "$2"; then ng "$1（'$3' がある）"; else ok "$1"; fi; }
 
 o=$(run); rc=$?;     has  "初回は全部回す"            "$o" '^check=0（'; has "初回を記録" "$o" '^recorded=.*full'; [ $rc = 0 ] && ok "初回 exit 0" || ng "初回 exit $rc"
+hasnt "記録したときは「通ったが記録しない」の行を出さない" "$o" '^record=no'
 o=$(run);            has  "同じ tree は飛ばす"        "$o" '^skip=same-tree'; has "check 行は残す" "$o" '^check=0 SKIP\(same-tree\)'
 o=$(run --force);    has  "--force は回す"            "$o" '^check=0（'
 echo d2 >> docs/a.md; mkdir -p src/tests; echo t > src/tests/x.test.ts; git add -A; git commit -qm docs
@@ -86,6 +87,8 @@ echo y >> src/a.ts; git commit -qam code
 o=$(run);            has  "コード変更は全部"          "$o" '^check=0（'; has "smoke も回す" "$o" '^check=0（'
 echo z >> src/a.ts
 o=$(run);            hasnt "未 commit の変更があると飛ばさない" "$o" 'skip='; hasnt "未 commit は記録しない" "$o" '^recorded='
+# 通ったのに記録しないときは、黙らずに理由を出す（次も省かない・レビューが親の記録を使い回せない理由が分かるように）
+has  "未 commit で記録しない理由を出す" "$o" '^record=no reason=uncommitted（.*未 commit の変更か未追跡のファイルがある: src/a\.ts）$'
 git checkout -q -- src/a.ts
 git checkout -q -b release HEAD; git commit -q --allow-empty -m rel
 o=$(run);            has  "release 枝（tree 同じ）は飛ばす" "$o" '^skip=same-tree'
@@ -161,6 +164,7 @@ git commit -qam "tc fail"
 o=$(run); rc=$?
 has "確認失敗時は check=7 を出力" "$o" '^check=7（'
 hasnt "tc 失敗時は recorded しない" "$o" '^recorded='
+hasnt "tc 失敗時は「通ったが記録しない」の行を出さない" "$o" '^record=no'
 [ $rc != 0 ] && ok "tc 失敗時は非 0 終了 (rc=$rc)" || ng "tc 失敗なのに exit 0"
 
 o=$(run --merge non-existent-ref-xyz 2>&1); rc=$?
@@ -191,6 +195,7 @@ echo "untracked" > src/untracked.ts
 o=$(run)
 hasnt "未追跡ファイルがあれば same-tree 省略しない" "$o" '^skip=same-tree'
 hasnt "未追跡ファイルがあれば記録しない" "$o" '^recorded='
+has  "未追跡ファイルで記録しない理由を出す" "$o" '^record=no reason=uncommitted（.*未 commit の変更か未追跡のファイルがある: src/untracked\.ts）$'
 rm -f src/untracked.ts
 
 # ---- 追加テスト 4: 確認コマンドの失敗・裏で立てたプロセスの回収・ポートの受け渡し ----
@@ -301,6 +306,7 @@ rm node_modules/.bin/fake-builder; ln -s "$outside_dir/cli.sh" node_modules/.bin
 o=$(run --force)
 has "外を指すリンクでも確認自体は通る" "$o" '^check=0（'
 hasnt "作業ツリーの外を指すリンクは記録しない" "$o" '^recorded='
+has  "外を指すリンクで記録しない理由を出す" "$o" '^record=no reason=unresolvable（.*作業ツリーの外（か \.git の中）を指すリンク: node_modules/\.bin/fake-builder'
 qo=$(q 2>/dev/null)
 has "外を指すリンクがあれば問い合わせは reuse=no" "$qo" '^reuse=no'
 # 行き先の無いリンクも記録しない
@@ -309,6 +315,7 @@ ln -s ../nowhere/missing node_modules/.bin/dangling
 o=$(run --force)
 has "行き先の無いリンクでも確認自体は通る" "$o" '^check=0（'
 hasnt "行き先の無いリンクがあれば記録しない" "$o" '^recorded='
+has  "行き先の無いリンクで記録しない理由を出す" "$o" '^record=no reason=unresolvable（.*行き先の無いリンク: node_modules/\.bin/dangling'
 rm node_modules/.bin/dangling
 # 中を指すディレクトリリンク（npm workspaces / pnpm の形）は記録して使い回す
 mkdir -p packages/pkg; echo "PKG_V1" > packages/pkg/index.js

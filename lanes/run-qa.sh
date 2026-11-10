@@ -49,6 +49,7 @@ fi
 # 構成（LANES_TOOLS）の点検。誤った構成・claude の無い構成では起動しない（exit 2。排他の後なので .done に残る）
 lanes_require_tool claude run-qa.sh
 mkdir -p "$logdir"
+(( ! dry )) || lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
 # レーン専用の作業場所（TMPDIR / LANES_SCRATCH）。マージ後 cleanup が消す
 (( dry )) || lanes_scratch_prepare "$wt" "$label" qa
 
@@ -81,6 +82,8 @@ PY
 # --strict-mcp-config: ユーザー設定の MCP（外部サービスへの接続）を読み込まない。必要なら --mcp-config=<file> を足す
 # --output-format stream-json: 1 行 1 イベントで進行中も $json が増える（生死監視の「最終出力」に使う）。json だと終了までゼロ出力
 # モデル・effort は設定が空なら付けない（CLI の既定を使う）
+# 環境変数の effort が設定ファイルと違う値で勝っていたら知らせる（渡す値は変えない）
+lanes_effort_override_note CLAUDE_EFFORT
 model_args=()
 [[ -z "${CLAUDE_MODEL:-}" ]] || model_args+=(--model "$CLAUDE_MODEL")
 [[ -z "${CLAUDE_EFFORT:-}" ]] || model_args+=(--effort "$CLAUDE_EFFORT")

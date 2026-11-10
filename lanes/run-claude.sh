@@ -43,6 +43,7 @@ fi
 lanes_require_tool claude run-claude.sh
 lanes_entry_preflight
 mkdir -p "$logdir"
+(( ! dry )) || lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
 # レーン専用の作業場所。一時ファイルは ~/Downloads ではなくここへ。マージ後 cleanup が消す
 if (( dry )); then scratch="$(lanes_scratch_path "$wt" "$label")"; else lanes_scratch_prepare "$wt" "$label" claude; scratch="$LANES_SCRATCH"; fi
 
@@ -82,6 +83,8 @@ fi
 # 非対話の -p では許可の確認を出せない（確認が要る操作は拒否される）ので、許可モードと確認なしで使えるツールを明示する。
 # 可変長オプション（--allowedTools）は `=` 形式にして後続を食わせない。プロンプトは stdin で渡し、-p は最後に置く。
 # 空にした設定は付けない（そのときは利用者の ~/.claude/settings.json 次第）
+# 環境変数の effort が設定ファイルと違う値で勝っていたら知らせる（渡す値は変えない）
+lanes_effort_override_note CLAUDE_EFFORT
 cmd=("$CLAUDE_BIN" --strict-mcp-config)
 if [[ -n "$CLAUDE_IMPL_PERMISSION_MODE" ]]; then cmd+=(--permission-mode="$CLAUDE_IMPL_PERMISSION_MODE"); fi
 if [[ -n "$CLAUDE_IMPL_ALLOWED_TOOLS" ]]; then cmd+=(--allowedTools="$CLAUDE_IMPL_ALLOWED_TOOLS"); fi
