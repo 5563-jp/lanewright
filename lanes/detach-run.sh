@@ -13,17 +13,19 @@
 # （環境変数が入る）が、親が chk-run.sh を回したときと合わなくなる（レビューが確認済みの記録を使い回せない）。
 # そこで、python3 を呼ぶ前のこのシェルの環境変数を fd 3 のパイプで渡し、子にはそれを渡す。値はファイルにも引数にも書かない。
 set -euo pipefail
-log="${1:?launch.log}"; shift
-(( $# >= 1 )) || { print -u2 -- "usage: detach-run.sh <launch.log> <cmd> [args...]"; exit 2; }
-mkdir -p "${log:h}"
+# このスクリプトのシェルの部分では、名前の付いた変数を使わない（位置引数だけを使う）。呼び出し元に同じ名前の環境変数があると、
+# 代入でその値を書き換えたり、local で隠して下の一覧から落としたりして、子へそのまま渡せなくなるため
+: "${1:?launch.log}"
+(( $# >= 2 )) || { print -u2 -- "usage: detach-run.sh <launch.log> <cmd> [args...]"; exit 2; }
+mkdir -p "${1:h}"
 # このシェルが export している変数（= ここから直に起動したコマンドへ渡る環境変数）を「名前=値」の NUL 区切りで出す。
 # 最後に空の 1 件（NUL だけ）を置く。受け取る側は、終わりが NUL 2 つなら最後まで読めたと分かる
 detach_env_dump() {
-  local k
-  for k in "${(@k)parameters[(R)*export*]}"; do print -rn -- "$k=${(P)k}"$'\0'; done
+  set -- "${(@k)parameters[(R)*export*]}"
+  while (( $# )); do print -rn -- "$1=${(P)1}"$'\0'; shift; done
   print -n -- $'\0'
 }
-python3 - "$log" "$@" 3< <(detach_env_dump) <<'PY'
+python3 - "$@" 3< <(detach_env_dump) <<'PY'
 import fcntl, os, re, stat, sys, subprocess
 from pathlib import Path
 log, cmd = Path(sys.argv[1]), sys.argv[2:]

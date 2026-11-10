@@ -510,24 +510,28 @@ reused "$wt" rev-pyshim-r1 "python3 の入口が環境変数を書き換える�
 pass "python3 の入口が通るたびに環境変数を書き換えても（Xcode・pyenv の形）、detach-run.sh 経由で起動したレビューは親の記録を使い回す"
 
 # detach-run.sh は、呼び出し元の環境変数をそのまま子へ渡す（入口が足した・書き換えた分を渡さない）。
-# 直に起動したときと比べる。値は出さず、全体の指紋と名前の一覧で比べる（SHLVL は zsh を 1 つ挟むたびに増えるので除く）
+# 直に起動したときと比べる。値は出さず、全体の指紋と名前の一覧で比べる（SHLVL は zsh を 1 つ挟むたびに増えるので除く）。
+# 指紋を取る側は、名前の付いた変数を使わない（同じ名前の環境変数と取り違えない）
 cat > "$T/envsum.zsh" <<'EOF_ENVSUM'
 #!/bin/zsh -f
-typeset -a names
-names=(${(ko)parameters[(R)*export*]}); names=(${names:#SHLVL})
-print -r -- "指紋 $(for k in $names; do print -rn -- "$k=${(P)k}"$'\0'; done | shasum -a 256 | cut -d' ' -f1)"
+set -- ${${(ko)parameters[(R)*export*]}:#SHLVL}
+print -r -- "指紋 $(while (( $# )); do print -rn -- "$1=${(P)1}"$'\0'; shift; done | shasum -a 256 | cut -d' ' -f1)"
 print -r -- "FAKE_PY_GROW=${FAKE_PY_GROW-（無し）} FAKE_PY_DIR=${FAKE_PY_DIR+（あり）}"
-print -rl -- $names
+print -rl -- "$@"
 EOF_ENVSUM
+# そのまま渡りにくい形の環境変数も置く: detach-run.sh の中の変数と同じ名前になりうるもの（k・log）・空の値・改行や = や日本語を含む値
+export k=呼び出し元の値 log=呼び出し元の値 FAKE_ENV_EMPTY= FAKE_ENV_TEXT=$'1 行目\n2 行目 = 日本語'
 zsh -f "$T/envsum.zsh" > "$T/env-direct.txt" || fail "環境変数の指紋を取れない（用意が誤り）"
 pid="$(zsh -f "$LANES_DIR/detach-run.sh" "$T/env-detached.log" zsh -f "$T/envsum.zsh")" || fail "detach-run.sh で起動できない"
+unset k log FAKE_ENV_EMPTY FAKE_ENV_TEXT
 n=0; while kill -0 "$pid" 2>/dev/null; do n=$(( n + 1 )); (( n <= 100 )) || fail "環境変数の指紋を取るコマンドが 10 秒で終わらない"; sleep 0.1; done
 sed '1,/^=== detach-run ===$/d' "$T/env-detached.log" > "$T/env-detached.txt"
 grep -q '^指紋 [0-9a-f]\{64\}$' "$T/env-direct.txt" && grep -qx 'FAKE_PY_GROW=（無し） FAKE_PY_DIR=' "$T/env-direct.txt" \
+  && grep -qx k "$T/env-direct.txt" && grep -qx log "$T/env-direct.txt" && grep -qx FAKE_ENV_EMPTY "$T/env-direct.txt" \
   || fail "直に起動したときの環境変数の指紋が取れていない（用意が誤り）"
 cmp -s "$T/env-direct.txt" "$T/env-detached.txt" \
-  || { diff "$T/env-direct.txt" "$T/env-detached.txt" >&2 || true; fail "detach-run.sh 経由で起動したコマンドの環境変数が、直に起動したときと違う（python3 の入口が書き換えた分が子に渡っている）"; }
-pass "detach-run.sh は、呼び出し元の環境変数をそのまま子へ渡す（python3 の入口が足した・書き換えた分を渡さない。直に起動したときと同じ）"
+  || { diff "$T/env-direct.txt" "$T/env-detached.txt" >&2 || true; fail "detach-run.sh 経由で起動したコマンドの環境変数が、直に起動したときと違う（python3 の入口が書き換えた分が子に渡っている・呼び出し元の変数が落ちた・値が変わった）"; }
+pass "detach-run.sh は、呼び出し元の環境変数をそのまま子へ渡す（python3 の入口が足した・書き換えた分を渡さない。k・log という名前や空の値・改行を含む値も、直に起動したときと同じ）"
 
 # 同じ確認（--core = 1 の最初の確認だけ）を、そのまま回しても、chk-run.sh の確認コマンドの中から回しても、同じ結果（緑）になる。
 # chk-run.sh は確認コマンドを python3 の監督役の下で起動するので、確認コマンドの中は「入口を一度通った後」の環境になる
