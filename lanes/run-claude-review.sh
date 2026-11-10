@@ -161,6 +161,8 @@ PY
 # --output-format stream-json: 1 行 1 イベントで進行中も $json が増える（生死監視の「最終出力」に使う）。json だと終了までゼロ出力
 # 使えるツールに編集系・サブエージェントがあれば止め、拒否は固定の一覧 + CLAUDE_REVIEW_DENY にする（外から外せない）
 lanes_claude_review_resolve
+# 環境変数の effort が設定ファイルと違う値で勝っていたら知らせる（渡す値は変えない）
+lanes_effort_override_note CLAUDE_EFFORT
 cmd=("$CLAUDE_BIN" --tools="$LANES_CLAUDE_REVIEW_TOOLS" --allowedTools="$LANES_CLAUDE_REVIEW_TOOLS" --disallowedTools="$LANES_CLAUDE_REVIEW_DENY" --strict-mcp-config --permission-mode manual)
 if [[ -n "$CLAUDE_MODEL" ]]; then cmd+=(--model "$CLAUDE_MODEL"); fi
 if [[ -n "$CLAUDE_EFFORT" ]]; then cmd+=(--effort "$CLAUDE_EFFORT"); fi

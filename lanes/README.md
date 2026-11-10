@@ -455,7 +455,7 @@ zsh lanes/prepare-screen-qa.sh <checkout> [label] [--url <preview-url>] [--viewp
 
 Python の部品（`lanes_monitor.py`・`vercel_autoredeploy.py` など）は設定ファイルを直接読まず、環境変数を読みます。`lanes.env` が `LANES_*` を export し、
 `lanes-monitor.sh`（`_common.sh` 経由）と `lanes-watch.sh` が `lanes.env` を読んでから Python を起動するので、設定ファイルの値も届きます。bash の `chk-run.sh` は最初の 1 回だけ zsh で `lanes.env` を読んでから自分を起動し直します。
-CLI のパス・モデル・effort（`CLAUDE_*` / `CODEX_*` / `GEMINI_*`）は export しません（ランチャが引数で渡す）。effort を空にする書き方は `docs/config.md` を見てください（`CLAUDE_EFFORT=""` など）。
+CLI のパス・モデル・effort（`CLAUDE_*` / `CODEX_*` / `GEMINI_*`）は export しません（ランチャが引数で渡す）。effort を空にする書き方は `docs/config.md` を見てください（`CLAUDE_EFFORT=""` など）。アプリから起動したシェルが `CLAUDE_EFFORT` などを環境変数として持っていると、設定ファイルの値より環境変数が勝ちます。そのときランチャは起動時に「注意: CLAUDE_EFFORT は環境変数の値「…」で動く …」を標準エラーに 1 行出します（`lanes-doctor.sh` でも出ます）。設定ファイルの値に固定する書き方は `docs/config.md` の「環境変数に effort を上書きされないようにする」を見てください。
 
 ## 15. テストの回し方
 
@@ -502,6 +502,7 @@ LANES_LINT_STRICT=1 zsh selftest.sh --test tests/test-lint.sh   # shellcheck が
 | `test-prepare-screen-qa.sh` | 画面 QA の準備 |
 | `test-roles.sh` / `test-doctor.sh` | 4 構成の割り振り・入口の振り分け・構成に無い道具での停止・排他前の誤りの記録 / 起動前点検（未導入・未ログイン・API キーでのログイン・Gemini の端末サンドボックス） |
 | `test-config-export.sh` | 設定ファイルの値が Python の部品と `chk-run.sh` まで届くこと・数値のキーの確かめ・Claude レビューのツール集合と固定の拒否の一覧 |
+| `test-effort-override-note.sh` | 環境変数の effort が設定ファイル（無ければ既定）と違う値で勝っているときだけ、ランチャと `lanes-doctor.sh` が注意を出すこと。渡す値・子の環境は変えないこと |
 | `tests/test-install.sh` / `tests/test-no-private.sh` | 導入・アンインストール / 固有名・個人のパス・ID・鍵の形の機械検査（`LANES_PRIVATE_DENYLIST` で禁止語ファイルも指定可） |
 | `tests/test-selftest-guard.sh` | キットのリポを書き換える偽テスト（commit・`GIT_DIR` 付きの `git init`・未保存の変更・中身だけの上書き・索引・枝の切り替え・枝やタグ・stash・worktree・info/exclude・info/attributes・alternates・hooks（下のフォルダも）・リモート追跡の ref・リモートへの push・他の worktree の枝・`logs/`）で `selftest.sh` が赤になること、`TMPDIR` がキットの中なら exit 2 になること、テストに見える `gh` が偽物であること |
 | `tests/test-lint.sh` | 全シェルの構文・bash の shellcheck・Python の pyflakes。shellcheck が未導入なら省略して緑、`LANES_LINT_STRICT=1` で赤 |

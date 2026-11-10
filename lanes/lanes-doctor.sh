@@ -136,6 +136,13 @@ if (( roles_ok )); then
         fi ;;
     esac
   done
+  # 環境変数の effort が、設定ファイル（無ければ既定）と違う値で勝っているときは知らせる（ランチャも起動時に同じ注意を 1 行出す）
+  if (( ${+functions[lanes_effort_override_note]} )); then
+    for tool in ${(s: :)LANES_TOOLS_NORMALIZED}; do
+      effort_note="$(lanes_effort_override_note "${(U)tool}_EFFORT" 2>&1)" || effort_note=""
+      [[ -z "$effort_note" ]] || note "${effort_note#注意: }"
+    done
+  fi
 fi
 
 # ---- 作業ツリー（任意）: ランチャが書く logs/ が git に無視されているか ----

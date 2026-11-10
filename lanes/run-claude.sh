@@ -82,6 +82,8 @@ fi
 # 非対話の -p では許可の確認を出せない（確認が要る操作は拒否される）ので、許可モードと確認なしで使えるツールを明示する。
 # 可変長オプション（--allowedTools）は `=` 形式にして後続を食わせない。プロンプトは stdin で渡し、-p は最後に置く。
 # 空にした設定は付けない（そのときは利用者の ~/.claude/settings.json 次第）
+# 環境変数の effort が設定ファイルと違う値で勝っていたら知らせる（渡す値は変えない）
+lanes_effort_override_note CLAUDE_EFFORT
 cmd=("$CLAUDE_BIN" --strict-mcp-config)
 if [[ -n "$CLAUDE_IMPL_PERMISSION_MODE" ]]; then cmd+=(--permission-mode="$CLAUDE_IMPL_PERMISSION_MODE"); fi
 if [[ -n "$CLAUDE_IMPL_ALLOWED_TOOLS" ]]; then cmd+=(--allowedTools="$CLAUDE_IMPL_ALLOWED_TOOLS"); fi

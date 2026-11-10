@@ -197,6 +197,8 @@ if (( ! dry )); then archive_message; fi
 
 # 設定は起動単位で渡す。利用者の許可設定より deny が優先され、設定ファイルを変更しない。
 gem_settings='{"permissions":{"deny":["mcp(*)"]},"allowNonWorkspaceAccess":false,"enableTerminalSandbox":true,"modelProvider":"","useG1Credits":false}'
+# 環境変数の effort が設定ファイルと違う値で勝っていたら知らせる（渡す値は変えない）
+lanes_effort_override_note GEMINI_EFFORT
 cmd=("$GEMINI_BIN")
 if [[ -n "$GEMINI_MODEL" ]]; then cmd+=(--model "$GEMINI_MODEL"); fi
 if [[ -n "$GEMINI_EFFORT" ]]; then cmd+=(--effort "$GEMINI_EFFORT"); fi

@@ -81,6 +81,8 @@ fi
 cdx_git_fingerprint() { lanes_git_ctl_fingerprint "$wt" "$git_dir" "$git_common"; }
 
 # プロンプトは stdin で渡す（`-` = stdin から読む）。位置引数だと `-` や `---` で始まる md がオプション扱いされて即死する
+# 環境変数の effort が設定ファイルと違う値で勝っていたら知らせる（渡す値は変えない）
+lanes_effort_override_note CODEX_EFFORT
 cmd=("$CODEX_BIN" exec "${LANES_CODEX_NO_MCP_ARGS[@]}" "${sandbox_args[@]}")
 if [[ -n "$CODEX_MODEL" ]]; then cmd+=(-m "$CODEX_MODEL"); fi
 if [[ -n "$CODEX_EFFORT" ]]; then cmd+=(-c "model_reasoning_effort=$CODEX_EFFORT"); fi

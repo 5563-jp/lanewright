@@ -148,6 +148,24 @@ lanes_resolve_bin() {
   fi
 }
 
+# 環境変数の effort が、設定ファイル（無ければ既定）と違う値で勝っているときだけ、注意を 1 行出す（stderr）。
+# <キー> = CLAUDE_EFFORT / CODEX_EFFORT / GEMINI_EFFORT。各ランチャが、自分の使うキーについて起動時に 1 回呼ぶ。
+# 経緯: アプリから起動したシェルが CLAUDE_EFFORT を環境変数として持っていて、設定ファイルに書いた値が黙って負けたことがあった。
+# 勝つ順番（環境変数 > 設定ファイル > 既定）は変えない。知らせるだけで、CLI に渡す値も子の環境も変えない
+lanes_effort_override_note() {
+  local key="$1" now conf_value
+  (( ${+LANES_EFFORT_FROM_ENV[$key]} )) || return 0   # 環境変数で渡されていない（lanes.env が控えを作る）
+  now="${(P)key}"
+  # 環境変数が無かったら何になるか（設定ファイル、無ければ既定）を、子シェルで設定を読み直して確かめる。今のシェルの値は変えない
+  conf_value="$( { unset CLAUDE_EFFORT CODEX_EFFORT GEMINI_EFFORT LANES_DEFER_CONFIG_ERROR
+                   source "$LANES_DIR/lanes.env" && print -r -- "value:${(P)key}" } 2>/dev/null )" || return 0
+  conf_value="${conf_value##*$'\n'}"   # 設定ファイルが何か出力していても、最後の 1 行だけを見る
+  [[ "$conf_value" == value:* ]] || return 0
+  conf_value="${conf_value#value:}"
+  [[ "$now" != "$conf_value" ]] || return 0
+  print -u2 -- "注意: $key は環境変数の値「${now:-（空＝付けない）}」で動く。設定ファイル（無ければ既定）の値「${conf_value:-（空＝付けない）}」は使われない（環境変数が設定ファイルより勝つ）。設定の値に固定するなら、設定ファイルに $key=\"$conf_value\" と値をそのまま書く（docs/config.md）"
+}
+
 # 今の構成（LANES_TOOLS）にこの道具が入っているか。入っていなければ代わりの入口を案内して止める（exit 2）。
 # mark_start の後に呼べば TRAPEXIT が .done（EXIT:2）を残す。<tool>=claude|codex|gemini <launcher>=呼び出し元の名前
 lanes_require_tool() {

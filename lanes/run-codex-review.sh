@@ -186,6 +186,8 @@ lanes_codex_no_mcp_args "$wt"
 CODEX_REVIEW_SANDBOX="${CODEX_REVIEW_SANDBOX:-read-only}"
 [[ "$CODEX_REVIEW_SANDBOX" == read-only || "$CODEX_REVIEW_SANDBOX" == workspace-write ]] \
   || lanes_die "CODEX_REVIEW_SANDBOX は read-only か workspace-write: '$CODEX_REVIEW_SANDBOX'"
+# 環境変数の effort が設定ファイルと違う値で勝っていたら知らせる（渡す値は変えない）
+lanes_effort_override_note CODEX_EFFORT
 cmd=("$CODEX_BIN" exec review --json "${LANES_CODEX_NO_MCP_ARGS[@]}" -c "sandbox_mode=\"$CODEX_REVIEW_SANDBOX\"")
 if [[ -n "$CODEX_MODEL" ]]; then cmd+=(-c "model=$CODEX_MODEL"); fi
 if [[ -n "$CODEX_EFFORT" ]]; then cmd+=(-c "model_reasoning_effort=$CODEX_EFFORT"); fi
