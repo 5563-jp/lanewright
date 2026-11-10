@@ -6,6 +6,8 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+## [0.1.2] - レビューで手元確認の記録を使い回す直し / Reuse check records in reviews
+
 ### 直したこと / Fixed
 - `chk-run.sh` が成功を記録した直後に `detach-run.sh` 経由でレビューを起動すると、証跡が毎回「親の chk-run の記録は使わない: input-changed」になり、
   必須検証の使い回しが効かなかった。`detach-run.sh` が起動ログ（`<worktree>/logs/launch.log`）をランチャの問い合わせより先に書き、
