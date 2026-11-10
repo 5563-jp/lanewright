@@ -106,7 +106,12 @@ lanes_dir, root = sys.argv[1:3]
 chk = os.path.join(lanes_dir, "chk-run.sh")
 with open(chk, "r", encoding="utf-8") as f:
     src = f.read()
-py_code = src.split("python3 - \"$wt\" \"$o\" \"$cache\" \"$lanes_dir\" \"$port\" \"${output_names[@]}\" <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+py_code = src.split("python3 - \"$wt\" \"$o\" \"$cache\" \"$lanes_dir\" \"$port\" \"$generated_def\" \"${output_names[@]}\" <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+# 生成物の定義は chk-run.sh と同じ取り方で _common.sh から受け取る（ここに写しを書かない）
+generated_def = subprocess.check_output(
+    ["zsh", "-fc", 'source "$LANES_DIR/_common.sh"; print -r -- "${LANES_GENERATED_DIRS[*]}"; print -r -- "${LANES_GENERATED_SUFFIXES[*]}"'],
+    env={**os.environ, "LANES_DIR": lanes_dir}, text=True, stderr=subprocess.DEVNULL).rstrip("\n")
+assert generated_def.split("\n")[0].split(), "生成物の定義を _common.sh から読めない"
 
 wt = os.path.join(root, "chk-wt")
 out = os.path.join(root, "chk-out")
@@ -136,7 +141,7 @@ tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=wt, text
 env = {**os.environ, "CHK_CACHE": cache, "LANES_CHECK_CMD": "./node_modules/.bin/cli", "CHK_CHECK_SRC": "LANES_CHECK_CMD", "LANES_CHK_ENV_LOADED": "1"}
 output_names = ["fetch.log", "merge.log", "check.log", "check-state.json"]
 r_fp = subprocess.run(
-    ["python3", "-", wt, out, cache, lanes_dir, "4173", *output_names],
+    ["python3", "-", wt, out, cache, lanes_dir, "4173", generated_def, *output_names],
     input=py_code, text=True, capture_output=True, env=env, errors="replace"
 )
 assert r_fp.returncode == 0, r_fp.stderr
