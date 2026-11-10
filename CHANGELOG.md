@@ -6,6 +6,8 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+## [0.1.3] - detach-run.sh 経由でも記録を使い回す直し / Reuse records through detach-run.sh
+
 ### 直したこと / Fixed
 - `detach-run.sh` 経由で起動したレビューが、`python3` の入口が環境変数を書き換える Mac で、親の `chk-run.sh` の記録を使い回さなかった
   （証跡が毎回 `input-changed`。0.1.2 の直しが、こうした Mac の普段のシェルからの起動では効いていなかった）。
