@@ -18,6 +18,11 @@
 #   （assume-unchanged / skip-worktree）があるときは記録も省略もしない。追跡ファイルは内容も照合する
 #   サブモジュールの中（checkout した commit・追跡・未追跡・無視対象）も入力に含める。共有依存のリンクや
 #   読めないファイルがあると再利用だけ止め、検証前後の入力照合は続ける
+#   ランチャの記録（作業ツリー直下の logs/ の直下に、ランチャと detach-run.sh が書くファイル。名前の一覧は下の LANE_RECORD_RE）は
+#   入力に数えない。レーンを起動・終了するたびに増えるので、数えると「chk-run の直後にレビューを起動する」だけで記録が使えなくなる
+#   （起動ログ logs/launch.log を detach-run.sh が先に書くため）。数えないのは、git が無視している・リンクでもハードリンクでもない
+#   普通のファイルで、名前が一覧に合うものだけ。logs/ の中のフォルダ・ほかの名前のファイル・追跡ファイルは今までどおり入力
+#   生成物（dist/ など）の定義は _common.sh の LANES_GENERATED_DIRS / LANES_GENERATED_SUFFIXES（cleanup-after-merge.sh と同じもの）
 # 確認済みの記録: ${CHK_CACHE:-${LANES_RUNS_ROOT:-~/dev/_runs}/_chk-cache/passed.tsv}
 #   （tree<TAB>head<TAB>full<TAB>日時<TAB>worktree<TAB>input_fp<TAB>port<TAB>outdir）。port と outdir は問い合わせが同じ条件で照合し直すために残す
 # 問い合わせ（--query）: 確認コマンドを一切実行せず、記録も出力先も作らない（fetch もしない）。skip=same-tree になる条件
@@ -145,14 +150,22 @@ head=$(git rev-parse --verify HEAD 2>/dev/null) || { echo "HEAD の取得に失�
 tree=$(git rev-parse --verify 'HEAD^{tree}' 2>/dev/null) || { echo "tree の取得に失敗" >&2; exit 1; }
 [ "$query" = 1 ] || echo "head=${head:0:7}"
 
+# 生成物の定義は _common.sh に 1 か所だけある（cleanup-after-merge.sh と同じものを使う）。
+# 1 行目 = 作業ツリー直下のフォルダ名、2 行目 = ファイルの語尾（どちらもスペース区切り）
+generated_def=$(LANES_DIR="$lanes_dir" zsh -fc 'source "$LANES_DIR/_common.sh"; print -r -- "${LANES_GENERATED_DIRS[*]}"; print -r -- "${LANES_GENERATED_SUFFIXES[*]}"' 2>/dev/null) || generated_def=""
+if [ -z "$generated_def" ]; then
+  if [ "$query" = 1 ]; then echo "reuse=no reason=state-error"; exit 1; fi
+  echo "生成物の定義（_common.sh の LANES_GENERATED_DIRS）を読めない" >&2; exit 2
+fi
+
 # 未追跡ファイルを含む作業ツリー状態と、実行環境・導入済み依存の同一性フィンガープリントを計算する
 read_state() {
-python3 - "$wt" "$o" "$cache" "$lanes_dir" "$port" "${output_names[@]}" <<'PY'
-import hashlib, os, shutil, subprocess, sys
+python3 - "$wt" "$o" "$cache" "$lanes_dir" "$port" "$generated_def" "${output_names[@]}" <<'PY'
+import hashlib, os, shutil, stat, subprocess, sys
 
 wt, outdir, cache_path = [os.path.realpath(x) for x in sys.argv[1:4]]
 top_tracked = set(subprocess.check_output(["git", "ls-files", "-z"], cwd=wt).split(b"\0")) - {b""}
-outputs = {os.path.join(outdir, name) for name in sys.argv[6:]} | {cache_path}
+outputs = {os.path.join(outdir, name) for name in sys.argv[7:]} | {cache_path}
 
 def is_internal_artifact(rel_path):
     return (os.fsencode(rel_path) not in top_tracked
@@ -426,9 +439,46 @@ for bin_name in ("node", "npm", "npx", "pnpm", "yarn", "bun", "bash"):
     else:
         h.update(f"bin:{bin_name}:missing\0".encode("utf-8"))
 
-generated_dirs = ("dist/", "build/", "out/", ".next/", ".turbo/", "coverage/", "test-results/", "playwright-report/")
+# 生成物の定義（_common.sh の LANES_GENERATED_DIRS / LANES_GENERATED_SUFFIXES を呼び出し側が渡す）
+_generated_def = sys.argv[6].split("\n")
+generated_dirs = tuple(name + "/" for name in _generated_def[0].split())
+generated_suffixes = tuple(_generated_def[1].split()) if len(_generated_def) > 1 else ()
+if not generated_dirs:
+    sys.exit(2)
 other_files = []
 generated_files = []
+
+# ランチャの記録の名前（作業ツリー直下の logs/ の直下に、ランチャと detach-run.sh が書くファイル）。入力に数えない。
+#   <label>.pid / .done / .lock / .log（.stderr.log・.verify.log・.launch.log・launch.log・qa-deps-<名前>.log を含む）/
+#   .json（.completion.json・.try1.json を含む）/ .prompt.md（.dry-run.prompt.md を含む）/ .evidence.md / .last.md / .meta.txt、
+#   <系列>.followups.md、qa-case.md、.<系列>.review-state（書きかけの .tmp.<pid> も）、.review-reuse-blocked、
+#   .pid の置き換え用の一時ファイル（.<名前>.<pid>.<16 進 12 桁>.tmp）、回転した前回分（<名前>.prev-<日時>[-<n>].<拡張子>）
+# label は英数で始まり、英数と . _ - だけ（_common.sh の lanes_require_label）。ランチャが書く名前を足したら、ここにも足す
+# （tests/test-review-reuse-launch.sh が、各ランチャを実際に回した後も記録を使い回せることを確かめている）
+LANE_RECORD_RE = re.compile(
+    r"(?:[A-Za-z0-9][A-Za-z0-9._-]*\.(?:pid|done|lock|log|json|prompt\.md|evidence\.md|last\.md|followups\.md|meta\.txt)"
+    r"|qa-case\.md"
+    r"|\.[A-Za-z0-9][A-Za-z0-9._-]*\.review-state(?:\.tmp\.[0-9]+)?"
+    r"|\.review-reuse-blocked"
+    r"|\.[A-Za-z0-9][A-Za-z0-9._-]*\.[0-9]+\.[0-9a-f]{12}\.tmp)")
+LANE_RECORD_PREV_RE = re.compile(r"\.prev-[0-9]{8}-[0-9]{6}(?:-[0-9]+)?(?=\.[A-Za-z0-9-]+$)")
+
+def is_lane_record(rel, is_ignored):
+    # 作業ツリー直下の logs/ の直下にあり、git が無視していて、名前がランチャの記録のもの。
+    # logs/ の中のフォルダ・ほかの名前のファイルは入力のまま（logs/ に置いた入力で照合をすり抜けさせない）。
+    # symlink・ハードリンク・特殊ファイルも入力のまま（ランチャ自身も logs/ にそれらがあると起動しない）
+    if not is_ignored or not rel.startswith("logs/"):
+        return False
+    name = rel[len("logs/"):]
+    if "/" in name or not LANE_RECORD_RE.fullmatch(LANE_RECORD_PREV_RE.sub("", name)):
+        return False
+    try:
+        st = os.lstat(os.path.join(wt, rel))
+    except FileNotFoundError:
+        return True  # 一覧を取った後に消えた記録（書きかけの一時ファイル・回転の途中）
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_nlink == 1
 
 def inside_worktree(real):
     # 作業ツリーの中（.git の中は除く）に収まる実体か。npm の node_modules/.bin/* のように
@@ -621,11 +671,14 @@ def scan_repo(repo_dir, rel_prefix="", visited_repos=None):
         rel = rel_prefix + sub_rel
         if is_internal_artifact(rel):
             continue
+        # ランチャの記録は入力に数えない（最上位のリポの logs/ の直下だけ。サブモジュールの中の logs/ は入力のまま）
+        if not rel_prefix and is_lane_record(rel, raw in ignored):
+            continue
         fp = os.path.join(repo_dir, sub_rel.rstrip("/"))
         if sub_rel.endswith("/") or (not os.path.islink(fp) and os.path.isdir(fp)):
             walk_plain_dir(fp)
             continue
-        if not rel_prefix and raw in ignored and (rel.startswith(generated_dirs) or rel.endswith(".tsbuildinfo")):
+        if not rel_prefix and raw in ignored and (rel.startswith(generated_dirs) or rel.endswith(generated_suffixes)):
             generated_files.append(rel)
         else:
             other_files.append(rel)

@@ -55,8 +55,8 @@ else
     || lanes_die "比較起点 origin/${LANES_BASE_BRANCH:-develop} が無い。その枝の無い repo では --base <sha|branch> を指定する（統合先は LANES_BASE_BRANCH で変えられる）"
 fi
 review_base="$base"
-# 必須検証の使い回しの問い合わせ。指紋に作業ツリー（無視対象の logs/ も含む）と環境変数が入るので、logs/ に .pid を書く前・
-# scratch や git の通信止めを export する前に、親が chk-run.sh を回したのと同じ環境で呼ぶ
+# 必須検証の使い回しの問い合わせ。指紋に環境変数が入るので、scratch や git の通信止めを export する前に、
+# 親が chk-run.sh を回したのと同じ環境で呼ぶ。ランチャの記録（logs/ の直下の .pid・ログ・起動ログなど）は指紋に入らない
 rvd_checks_query "$LANES_DIR" "$wt"
 [[ "$RVD_CHECKS_REUSE" == yes ]] && LANES_REVIEW_CHECKS_REUSED=1 || LANES_REVIEW_CHECKS_REUSED=0
 checks_key="$(rvd_checks_key)"
@@ -114,7 +114,7 @@ if (( skip_same )); then
     print -- "- $prev_v"
     print -- "- 対象: $(lanes_git_summary "$wt")"
     print -- "- モード: skip-same-head（前回 round と同じ head ${prev_head:0:12}。レビューしていない）/ round=$round"
-    rvd_checks_evidence
+    rvd_checks_evidence skip
     print -- "- 実行: $(lanes_now) / 約 0 分 / EXIT:0"
     print -- "- HEAD: ${prev_head:0:12} → ${prev_head:0:12} / 作業ツリー差分行 0"
   } > "$evidence"

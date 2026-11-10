@@ -34,6 +34,13 @@ lanes_with_caller_auth_env() { lanes_restore_caller_auth_env; "$@"; }
 
 lanes_die() { print -u2 -- "ERROR: $*"; lanes_record_early_failure "$*"; exit 2; }
 
+# ---- 生成物（確認コマンドのビルド・テストが作る出力）の定義 ----
+# chk-run.sh（成功の記録の指紋）と cleanup-after-merge.sh（マージ後の後片付け）が同じ定義を使う。直すのはここ 1 か所だけ。
+# 対象は git が無視しているもののうち、作業ツリー直下のこの名前のフォルダの中と、この語尾のファイル（どの深さでも）。
+# 名前に空白を入れない（chk-run.sh へスペース区切りで渡す）
+typeset -ga LANES_GENERATED_DIRS=(dist build out .next .turbo coverage test-results playwright-report)
+typeset -ga LANES_GENERATED_SUFFIXES=(.tsbuildinfo)
+
 # ---- Claude のレビュー・QA の読み取り専用の担保（外から上書きできない部分）----
 # 拒否の固定の一覧。lanes.env の CLAUDE_REVIEW_DENY は「足す」ものだけで、この一覧は環境変数や設定ファイルでは外せない。
 # 編集系ツール・サブエージェント・Bash 経由の履歴操作・別エージェントの起動・秘密の取得・作業ツリーの外への副作用（PR のマージ・

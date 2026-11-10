@@ -44,8 +44,8 @@ lanes_require_worktree "$wt"
 # 起点はレビュー開始前に commit へ固定し、再利用判定にも含める。
 source "$LANES_DIR/review-dedup.zsh"
 [[ "$round" == <-> && ${#round} -le 6 ]] || lanes_die "--round は 0〜999999 の整数"
-# 必須検証の使い回しの問い合わせ。指紋に作業ツリー（無視対象の logs/ も含む）と環境変数が入るので、logs/ に .pid を書く前・
-# scratch や git の通信止めを export する前に、親が chk-run.sh を回したのと同じ環境で呼ぶ
+# 必須検証の使い回しの問い合わせ。指紋に環境変数が入るので、scratch や git の通信止めを export する前に、
+# 親が chk-run.sh を回したのと同じ環境で呼ぶ。ランチャの記録（logs/ の直下の .pid・ログ・起動ログなど）は指紋に入らない
 rvd_checks_query "$LANES_DIR" "$wt"
 [[ "$RVD_CHECKS_REUSE" == yes ]] && LANES_REVIEW_CHECKS_REUSED=1 || LANES_REVIEW_CHECKS_REUSED=0
 checks_key="$(rvd_checks_key)"
@@ -114,7 +114,7 @@ if (( skip_same )); then
     print -- "- $prev_v"
     print -- "- 対象: $(lanes_git_summary "$wt")"
     print -- "- モード: skip-same-head（前回 round と同じ head ${prev_head:0:12}。レビューしていない）/ round=$round"
-    rvd_checks_evidence
+    rvd_checks_evidence skip
     print -- "- 実行: $(lanes_now) / 約 0 分 / EXIT:0"
     print -- "- HEAD: ${prev_head:0:12} → ${prev_head:0:12} / 作業ツリー差分行 0"
   } > "$evidence"
@@ -191,7 +191,7 @@ if [[ -n "$CODEX_MODEL" ]]; then cmd+=(-c "model=$CODEX_MODEL"); fi
 if [[ -n "$CODEX_EFFORT" ]]; then cmd+=(-c "model_reasoning_effort=$CODEX_EFFORT"); fi
 cmd+=(-c "developer_instructions=$devinst" --base "$base")
 if (( dry )); then
-  print -- "[dry-run] series=$series round=$round mode=$mode base=$base prev_head=${prev_head:0:12}（判定 $decided）"
+  print -- "[dry-run] series=$series round=$round mode=$mode base=$base prev_head=${prev_head:0:12}（判定 $decided）/ 必須検証の使い回し: $RVD_CHECKS_REUSE"
   print -- "[dry-run] scratch: $scratch（TMPDIR / LANES_SCRATCH。developer_instructions に置き場所の指示あり）"
   print -- "[dry-run] cd ${(q)wt} && TMPDIR=${(q)scratch}/ LANES_SCRATCH=${(q)scratch} ${(q)cmd[@]} > ${(q)log} 2> ${(q)err}  # prompt archived at ${(q)final}"
   exit 0
