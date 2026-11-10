@@ -500,9 +500,9 @@ rvd_checks_reason_hint() {
     no-check) print -r -- "確認コマンドが未設定" ;;
     no-record) print -r -- "この中身の確認済みの記録が無い。先に chk-run.sh を通す" ;;
     cache-link) print -r -- "記録のファイルがリンクになっている" ;;
-    uncommitted) print -r -- "未 commit の変更がある" ;;
+    uncommitted) print -r -- "未 commit の変更か未追跡のファイルがある（logs/ が git に無視されていなければ .gitignore に足す）" ;;
     unresolvable) print -r -- "確認コマンドか依存を確実に照合できない（外を指すリンク・解決できない書き方など）" ;;
-    input-changed) print -r -- "記録の後で入力が変わった（依存・環境変数・確認コマンド・ランチャの記録でない無視対象のファイル）。chk-run.sh と同じ環境から呼ぶ" ;;
+    input-changed) print -r -- "記録の後で入力が変わった（依存・環境変数・確認コマンド・ランチャの記録でない無視対象のファイル）。chk-run.sh と同じ環境から呼ぶ（起動のときだけ環境変数を足す・外すと合わない）" ;;
     state-error) print -r -- "作業ツリーの状態を読めない" ;;
   esac
   return 0

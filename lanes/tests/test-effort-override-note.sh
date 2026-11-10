@@ -80,7 +80,7 @@ pass "環境変数なし・同じ値・ほかの道具のキーだけが違う�
 
 CLAUDE_EFFORT= run run-claude.sh e5 --dry-run
 one_note "環境変数が空・設定 high" CLAUDE_EFFORT '（空＝付けない）' high
-! grep -q -- '--effort' "$T/out" || fail "空の環境変数なのに --effort が付いた"
+if grep -q -- '--effort' "$T/out"; then fail "空の環境変数なのに --effort が付いた"; fi
 pass "環境変数の空（--effort を付けない）が設定ファイルの値に勝つときも、注意を出す"
 
 # 設定ファイルで固定（値をそのまま書く）すると、設定ファイルが勝ち、注意も出ない

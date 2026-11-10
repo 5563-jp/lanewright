@@ -11,6 +11,8 @@
 #   3. ランチャが logs/ に書く名前（Gemini・QA・回転した前回分を含む）は、どれも入力に数えない
 #   4. logs/ に置いた、ランチャの記録でないもの（ほかの名前・フォルダの中・リンク・ハードリンク・追跡ファイル・
 #      下の階層の logs/）と、依存・生成物の変化では、今までどおり使い回さない（照合をすり抜けない）
+#   5. 環境変数の条件は緩めていない（親のシェルに API キーの環境変数があっても同じ環境から呼べば使い回す。
+#      起動のときだけ外すと使い回さず、証跡に理由と一言が出る）
 # 偽の CLI（tests/stubs）と一時リポだけを使う。本物の CLI・ネットワークには触らない。全データを一時領域に置く。
 set -euo pipefail
 # git の環境変数を外し、一時リポの外へ git が上っていかないようにする（本物のリポを書き換えない）
@@ -86,7 +88,7 @@ reused() {   # <worktree> <label> <説明>: 証跡と指示書の両方が「記
   grep -q '^- 必須検証: 親の chk-run の記録を使用（head ' "$wt/logs/$label.evidence.md" \
     || { grep '必須検証' "$wt/logs/$label.evidence.md" >&2 || true; fail "$3: 証跡が記録の使用になっていない"; }
   grep -q '親が同じ中身で実施済み' "$wt/logs/$label.prompt.md" || fail "$3: 指示書に「回さないこと」が入っていない"
-  ! grep -q '記録は使わない' "$wt/logs/$label.evidence.md" || fail "$3: 証跡に「使わない」が残っている"
+  if grep -q '記録は使わない' "$wt/logs/$label.evidence.md"; then fail "$3: 証跡に「使わない」が残っている"; fi
 }
 
 # ---- 1. chk-run.sh の直後に detach-run.sh 経由で起動したレビューが、記録を使い回す（Codex・Claude とも）----
@@ -144,6 +146,7 @@ records=(
   x.pid x.done x.lock x.log x.json x.stderr.log x.prompt.md x.dry-run.prompt.md x.evidence.md x.last.md x.completion.json
   x.try1.json x.try1.stderr.log x.verify.log x.meta.txt x.launch.log launch.log qa-deps-root.log qa-case.md
   rev-a.followups.md .rev-a.review-state .rev-a.review-state.tmp.12345 .review-reuse-blocked .x.pid.12345.0123456789ab.tmp
+  .x.last.md.12345.1794270246011662000.tmp .x.completion.json.12345.1794270246011662001.tmp
   x.prev-20260101-000000.pid x.prev-20260101-000000-2.done x.stderr.prev-20260101-000000.log x.prompt.prev-20260101-000000.md
   x.evidence.prev-20260101-000000.md x.completion.prev-20260101-000000.json x.last.prev-20260101-000000-3.md rev-1.2_b-r3.json
 )
@@ -198,8 +201,23 @@ print -r -- 'changed' > "$wt/logs/tracked.log"; no_reuse "追跡している log
 git -C "$wt" checkout -q -- logs/tracked.log; yes_again "追跡ファイルを戻す"
 pass "追跡している logs/ のファイルの変更は、記録の名前でも未 commit の変更として止める"
 
-# ---- 5. 対照: 環境変数が違えば、今までどおり使い回さない（起動ログのせいではない違いは残る）----
+# ---- 5. 環境変数の条件は緩めていない（起動ログのせいではない違いは残る）----
 [[ "$(export EXTRA_FOR_REUSE_TEST=1; query "$wt")" == "reuse=no reason=input-changed" ]] || fail "環境変数が違うのに使い回す"
 pass "対照: 環境変数が違えば使い回さない（指紋の条件は緩めていない）"
+# 親のシェルに API キーの環境変数があっても、chk-run.sh とレビューを同じ環境から呼べば使い回す
+# （入口とランチャは CLI の子に渡す前に外し、問い合わせのときだけ元に戻す。値は鍵ではないダミー）
+mkrepo wt-key; wt="$REPLY"
+export ANTHROPIC_API_KEY=dummy
+chk "$wt"; [[ "$REPLY" == *'recorded=tree '* ]] || fail "API キーの環境変数がある状態で記録できない: $REPLY"
+launch "$wt" launch.log run-review.sh rev-key-r1 --base origin/develop --round 1
+reused "$wt" rev-key-r1 "API キーの環境変数があるシェルからの起動"
+pass "親のシェルに API キーの環境変数があっても、同じ環境から呼べば使い回す（detach-run.sh・入口経由）"
+# 起動のときだけ外すと、環境変数の違いとして使い回さない。証跡に理由と、人が読める一言が出る
+unset ANTHROPIC_API_KEY
+launch "$wt" launch.log run-review.sh rev-key-r2 --base origin/develop --round 2 --force
+grep -q '^- 必須検証: レビューの中で回すよう指示（親の chk-run の記録は使わない: input-changed＝記録の後で入力が変わった' "$wt/logs/rev-key-r2.evidence.md" \
+  || { grep '必須検証' "$wt/logs/rev-key-r2.evidence.md" >&2 || true; fail "起動のときだけ環境変数を外したのに、証跡が「使わない: input-changed」と一言になっていない"; }
+if grep -q '親が同じ中身で実施済み' "$wt/logs/rev-key-r2.prompt.md"; then fail "使い回さないのに、指示書に「回さないこと」が入っている"; fi
+pass "起動のときだけ環境変数を外すと使い回さず、証跡に理由（input-changed）と一言が出る（証跡と指示書が食い違わない）"
 
 print -r -- "合格 $count 件"

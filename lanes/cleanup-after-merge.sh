@@ -350,11 +350,10 @@ check_active_lanes || exit $?
 
 if (( ${#archive} )); then
   preview="$(printf '%s ' "${archive[@]:0:6}")"; (( ${#archive} > 6 )) && preview+="…(計 ${#archive})"
-  if (( is_main )); then
-    say "残骸 ${#untracked} 件 + ignore 済み残骸 ${#ignored} 件を退避: $preview"
-  else
-    say "残骸 ${#untracked} 件 + ignore 済み残骸 ${#ignored} 件 + ignore 済みの生成物 ${#generated} 件を退避: $preview"
-  fi
+  # 生成物を一緒に退避するとき（linked worktree で 1 件以上）だけ、件数を足して出す
+  generated_note=""
+  if (( ! is_main && ${#generated} )); then generated_note=" + ignore 済みの生成物 ${#generated} 件"; fi
+  say "残骸 ${#untracked} 件 + ignore 済み残骸 ${#ignored} 件${generated_note}を退避: $preview"
   if (( apply )); then
     # 同じ日・同じ枝で後片付けを繰り返すと退避先が重なり、前回退避した symlink を cp が書き込み先として辿りうる。
     # 既にあるなら番号付きの新しいフォルダにして、退避先は必ず空から作る

@@ -452,7 +452,8 @@ generated_files = []
 #   <label>.pid / .done / .lock / .log（.stderr.log・.verify.log・.launch.log・launch.log・qa-deps-<名前>.log を含む）/
 #   .json（.completion.json・.try1.json を含む）/ .prompt.md（.dry-run.prompt.md を含む）/ .evidence.md / .last.md / .meta.txt、
 #   <系列>.followups.md、qa-case.md、.<系列>.review-state（書きかけの .tmp.<pid> も）、.review-reuse-blocked、
-#   .pid の置き換え用の一時ファイル（.<名前>.<pid>.<16 進 12 桁>.tmp）、回転した前回分（<名前>.prev-<日時>[-<n>].<拡張子>）
+#   置き換え用の一時ファイル（.<名前>.<pid>.<英数字>.tmp。_common.sh の .pid と codex-review-output.py の本文・完了証明）、
+#   回転した前回分（<名前>.prev-<日時>[-<n>].<拡張子>）
 # label は英数で始まり、英数と . _ - だけ（_common.sh の lanes_require_label）。ランチャが書く名前を足したら、ここにも足す
 # （tests/test-review-reuse-launch.sh が、各ランチャを実際に回した後も記録を使い回せることを確かめている）
 LANE_RECORD_RE = re.compile(
@@ -460,7 +461,7 @@ LANE_RECORD_RE = re.compile(
     r"|qa-case\.md"
     r"|\.[A-Za-z0-9][A-Za-z0-9._-]*\.review-state(?:\.tmp\.[0-9]+)?"
     r"|\.review-reuse-blocked"
-    r"|\.[A-Za-z0-9][A-Za-z0-9._-]*\.[0-9]+\.[0-9a-f]{12}\.tmp)")
+    r"|\.[A-Za-z0-9][A-Za-z0-9._-]*\.[0-9]+\.[0-9a-f]+\.tmp)")
 LANE_RECORD_PREV_RE = re.compile(r"\.prev-[0-9]{8}-[0-9]{6}(?:-[0-9]+)?(?=\.[A-Za-z0-9-]+$)")
 
 def is_lane_record(rel, is_ignored):
