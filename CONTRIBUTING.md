@@ -22,6 +22,8 @@ zsh -f selftest.sh --test lanes/tests/test-roles.sh # 1 本を selftest の一�
 zsh -f selftest.sh                                 # 全部（4 構成。15〜20 分）
 ```
 - PR の前に `selftest.sh` を一度全部通してください。キットのリポを書き換えていないかの前後比較も入っています（回している間はキットのファイルを編集しない）。
+- テストの結果は、回す場所（普段のシェル・レーンの中・`chk-run.sh` の確認コマンドの中）で変わらないはずです。レーンの中だけで回して済ませず、普段のシェルからも回してください
+  （`python3` の入口が環境変数を書き換える Mac で、レーンの中だけ緑になった不具合がありました。`lanes/README.md` の 16 章）。変わったら不具合です。
 - 個人の情報や固有名が混ざっていないかは `tests/test-no-private.sh` が見ます。自分用の禁止語ファイルを `LANES_PRIVATE_DENYLIST=<ファイル>` で渡すと、その語も調べます（禁止語ファイルはリポの外に置く）。
 
 ### 書き方の約束
@@ -63,6 +65,8 @@ zsh -f selftest.sh --test lanes/tests/test-roles.sh # run one test inside the se
 zsh -f selftest.sh                                 # everything (4 tool profiles, 15–20 minutes)
 ```
 - Run the full `selftest.sh` once before opening a PR. It also verifies that the tests did not modify the kit's own repository (do not edit kit files while it runs).
+- Test results must not depend on where you run them (a plain shell, inside a lane, or inside the `chk-run.sh` check command). Run them from a plain shell too, not only inside a lane
+  (a bug once passed only inside lanes on Macs whose `python3` launcher rewrites environment variables; see section 16 of `lanes/README.md`). A difference is a bug.
 - `tests/test-no-private.sh` checks for personal information. Pass your own deny-list with `LANES_PRIVATE_DENYLIST=<file>` (keep that file outside the repository).
 
 ### Conventions
