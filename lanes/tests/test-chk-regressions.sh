@@ -136,8 +136,9 @@ print('SMOKE_OK')
     shared=root/'shared'; shared.mkdir(); (shared/'value').write_text('GOOD')
     (repo/'node_modules').symlink_to(shared, target_is_directory=True)
     r=run(); check(r.returncode==0 and 'recorded=' not in r.stdout,'リンクした共有依存は確認結果を再利用しない')
-    check('record=no reason=unresolvable（' in r.stdout and '作業ツリーの外（か .git の中）を指すリンク: node_modules' in r.stdout,
-          '通ったのに記録しないときは理由を出す（外を指すリンク）')
+    # （.gitignore の node_modules/ はフォルダだけに効くので、リンクの node_modules は未追跡のファイルとして数える）
+    check('record=no reason=uncommitted（' in r.stdout and '未 commit の変更か未追跡のファイルがある: node_modules）' in r.stdout,
+          '通ったのに記録しないときは理由を出す（リンクした共有依存）')
     (shared/'value').write_text('BAD')
     r=run(); check(r.returncode==1 and 'check=9' in r.stdout,'共有依存の内容変更で再検証する')
     (shared/'value').write_text('GOOD')

@@ -475,7 +475,8 @@ generated_files = []
 #   label:<label> … <label>.<下の LANE_LABEL_SUFFIXES のどれか>（その label のランチャが書く名前の組）
 #   file:<名前>   … その名前そのもの（detach-run.sh の起動ログ・qa-case.md・qa-deps-<名前>.log・.<系列>.review-state・
 #                   <系列>.followups.md・.review-reuse-blocked）
-# と、その回転した前回分（<名前>.prev-<日時>[-<n>].<拡張子>）・置き換え用の一時ファイル（.<名前>.<pid>.<英数字>.tmp と <名前>.tmp.<pid>）。
+# と、その回転した前回分（<名前>.prev-<日時>[-<n>].<拡張子>）・置き換え用の一時ファイル（.<名前>.<pid>.<英数字>.tmp = _common.sh の
+# .pid と codex-review-output.py の本文・完了証明 / .<系列>.review-state.tmp.<pid> = review-dedup.zsh の再利用の記録）。
 # 台帳そのものも数えない。台帳に無い名前は入力のまま。
 # ランチャが label ごとに書く名前を足したら LANE_LABEL_SUFFIXES にも足し、label で決まらない名前を足したら、書く前に台帳へ載せる
 # （tests/test-review-reuse-launch.sh が、各ランチャを実際に回した後も記録を使い回せることを確かめている）
@@ -485,7 +486,7 @@ LANE_LABEL_SUFFIXES = ("pid", "done", "lock", "log", "stderr.log", "json", "prom
 # label は英数で始まり、英数と . _ - だけ（_common.sh の lanes_require_label）
 LANE_LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 LANE_RECORD_PREV_RE = re.compile(r"\.prev-[0-9]{8}-[0-9]{6}(?:-[0-9]+)?(?=\.[A-Za-z0-9-]+$)")
-LANE_RECORD_TMP_RES = (re.compile(r"\.(.+)\.[0-9]+\.[0-9a-f]+\.tmp"), re.compile(r"(.+)\.tmp\.[0-9]+"))
+LANE_RECORD_TMP_RES = (re.compile(r"\.(.+)\.[0-9]+\.[0-9a-f]+\.tmp"), re.compile(r"(.+\.review-state)\.tmp\.[0-9]+"))
 lane_records = frozenset()   # 台帳から決まる記録の名前（logs/ の直下の名前）。scan_repo が最上位のリポの一覧を取った後で読む
 
 def load_lane_records():

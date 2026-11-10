@@ -307,9 +307,9 @@ zsh lanes/lanes-watch.sh --check
   - 台帳に `file:<名前>` がある名前そのもの（`detach-run.sh` の起動ログ、`.<系列>.review-state`、`<系列>.followups.md`、`.review-reuse-blocked`、`qa-case.md`、`qa-deps-<名前>.log`）
   - 上の名前の回転した前回分（`<名前>.prev-<日時>.<拡張子>`）と、置き換え用の一時ファイル
   - 台帳そのもの
-  台帳に載せるのは、各ランチャ（`_common.sh` の `lanes_records_claim`。起動時・dry-run・起動前の誤りの記録）、`prepare-screen-qa.sh`、`after-develop-merge.sh`、`detach-run.sh`（起動ログが worktree の `logs/` の直下にあるときだけ）です。行は足すだけで、同じ行は足しません。台帳が symlink・ハードリンクのときは、ランチャは書かず、`chk-run.sh` も使いません（何も外さない）。
-  台帳に無い名前のファイル（例 `logs/input.json`・`logs/input.txt`）、`logs/` の中のフォルダ、リンク、追跡しているファイル、下の階層の `logs/`（例 `src/logs/`）は入力です。確認コマンドが `logs/input.json` を読む構成で中身を変えれば、記録と合わなくなり回し直します。**確認コマンドが読む設定やデータを、起動した label の記録と同じ名前（`logs/<起動した label>.json` など）で置かないでください**（変えても気づけません）。
-  この仕組みより前の版のランチャが書いた記録は台帳に無いので、入力として数えます（同じ label を起動し直すと台帳に載ります）。
+- 台帳（`logs/.lanes-records`）に載せるのは、各ランチャ（`_common.sh` の `lanes_records_claim`。起動時・dry-run・起動前の誤りの記録）、`prepare-screen-qa.sh`、`after-develop-merge.sh`、`detach-run.sh`（起動ログが worktree の `logs/` の直下にあるときだけ）です。行は足すだけで、同じ行は足しません。台帳が symlink・ハードリンクのときは、ランチャは書かず、`chk-run.sh` も使いません（何も外さない）。
+- 台帳に無い名前のファイル（例 `logs/input.json`・`logs/input.txt`）、`logs/` の中のフォルダ、リンク、追跡しているファイル、下の階層の `logs/`（例 `src/logs/`）は入力です。確認コマンドが `logs/input.json` を読む構成で中身を変えれば、記録と合わなくなり回し直します。**確認コマンドが読む設定やデータを、起動した label の記録と同じ名前（`logs/<起動した label>.json` など）で置かないでください**（変えても気づけません）。
+- 台帳の仕組みより前の版のランチャが書いた記録は台帳に無いので、入力として数えます（同じ label を起動し直すと台帳に載ります）。
 - 生成物（git が無視している、作業ツリー直下の `dist/` `build/` `out/` `.next/` `.turbo/` `coverage/` `test-results/` `playwright-report/` の中と、`*.tsbuildinfo`）は確認コマンド自身が作り直すので、検証の前後の照合からは外し、使い回すときは今の出力が記録のときと同じであることを求めます。定義は `_common.sh` の `LANES_GENERATED_DIRS` / `LANES_GENERATED_SUFFIXES` の 1 か所で、`cleanup-after-merge.sh` も同じものを使います。
 - 検証の前後で HEAD・tree・作業ツリー・`input_fp` を照合し、変化が無く通ったときだけ記録します。記録先は `CHK_CACHE`（既定 `$LANES_RUNS_ROOT/_chk-cache/passed.tsv`）。1 行は `tree・head・full・日時・worktree・input_fp・port・outdir` のタブ区切りです（port と outdir は問い合わせが同じ条件で照合し直すために残します）。
 - 終了コード: 0 = 通った・省略した / 1 = 確認コマンドの失敗・fetch / merge の失敗・検証中の入力の変化 / 2 = 使い方の誤り・確認コマンドが未設定。
@@ -505,7 +505,7 @@ LANES_LINT_STRICT=1 zsh selftest.sh --test tests/test-lint.sh   # shellcheck が
 | `test-review-dedup.sh` | レビューの省略・delta・未解決指摘の引き継ぎ・後回し票（Codex・Claude のレビューとも）・親の確認結果の使い回し |
 | `test-common-process.sh` / `test-common-security.sh` | 子プロセスの監督と回収、排他、秘密の扱い |
 | `test-gemini-launcher.sh` | Gemini レーンのサンドボックス・監査・救済 commit |
-| `test-chk-run.sh` / `test-chk-regressions.sh` | 最終確認の省略条件と入力照合・問い合わせ（`--query`） |
+| `test-chk-run.sh` / `test-chk-regressions.sh` | 最終確認の省略条件と入力照合・問い合わせ（`--query`）・通ったのに記録しないときの理由の表示（`record=no reason=…`） |
 | `test-review-reuse-launch.sh` | `chk-run.sh` の直後に `detach-run.sh` 経由で本物の起動（dry-run でない）をしたレビューが、親の記録を使い回すこと（`node_modules`・`dist` のある worktree。Codex・Claude のレビューとも）。台帳（`logs/.lanes-records`）に載っている持ち主の記録は入力に数えず、台帳に無い名前（記録に似た名前の `logs/input.json` など）・`logs/` に置いたほかの入力・リンク・依存・生成物の変化では使い回さないこと。確認コマンドが `logs/input.json` を読む構成で中身を変えたら回し直すこと。台帳の書き方（リンクの台帳を辿らない） |
 | `test-cleanup-safety.sh` / `test-cleanup-qa.sh` / `test-scratch-cleanup.sh` / `test-cleanup-pg-failures.sh` | 後片付けの停止条件・QA worktree・scratch・一時 PostgreSQL |
 | `test-lanes-monitor.sh` / `test-lanes-watch.sh` | 巡回とウォッチ |

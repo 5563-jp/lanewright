@@ -9,7 +9,7 @@
 # 確かめること:
 #   1. node_modules と dist のある worktree で、chk-run.sh → detach-run.sh 経由の本物の起動（Codex・Claude のレビューとも）が
 #      記録を使い回す（証跡と指示書の両方）。レビューの後も chk-run.sh は同じ確認を省く（skip=same-tree）
-#   2. dry-run の後・実装レーン・QA レーン・画面 QA の準備の後・同じ worktree の 2 回目以降の起動でも使い回す
+#   2. dry-run の後・実装レーン（Claude・Codex・Gemini）・QA レーン・画面 QA の準備の後・同じ worktree の 2 回目以降の起動でも使い回す
 #   3. ランチャが logs/ に書く名前（Gemini・QA・回転した前回分を含む）でも、台帳に載っていない持ち主のものは入力のまま。
 #      台帳に載せた後は、どれも入力に数えない
 #   4. logs/ に置いた、ランチャの記録でないもの（ほかの名前・フォルダの中・リンク・ハードリンク・追跡ファイル・
@@ -157,6 +157,22 @@ for owner in label:impl-claude label:impl-codex label:rev-impl-r1 label:qa-1 lab
 done
 [[ "$(sort "$wt/logs/.lanes-records" | uniq -d)" == "" ]] || fail "台帳に同じ行が 2 回載っている"
 pass "QA レーン・画面 QA の準備の後でも使い回す。ランチャと detach-run.sh は、書く名前の持ち主を台帳（logs/.lanes-records）に 1 回ずつ載せる"
+# Gemini レーン（run-gemini.sh。.verify.log なども書く）の記録も、台帳に載るので入力に数えない。
+# 構成と Gemini の設定は環境変数（指紋に入る）なので、別の worktree で chk-run.sh から同じ環境で回し、終わったら元に戻す
+wt_impl="$wt"
+export LANES_TOOLS="claude codex gemini" GEMINI_BIN="$STUBS/agy" GEMINI_POLL_SEC=1 GEMINI_IDLE_GRACE=1 GEMINI_IDLE_RESUME_GRACE=1 GEMINI_NOOUTPUT_SEC=20 GEMINI_PRINT_TIMEOUT=20s
+mkdir -p "$H/.gemini/antigravity-cli"   # 偽の agy のログイン情報の置き場所（ランチャはこの有無でログインを判定する）
+mkrepo wt-gem; wt="$REPLY"
+git -C "$wt" config user.name "Test User"; git -C "$wt" config user.email you@example.com   # Gemini レーンは commit の作者設定を確かめる
+chk "$wt"; [[ "$REPLY" == *'recorded=tree '* ]] || fail "Gemini の構成で記録できない: $REPLY"
+launch "$wt" gem.launch.log run-gemini.sh impl-gem --verify true --allow-path src/ --no-push
+[[ -f "$wt/logs/impl-gem.json" && -f "$wt/logs/impl-gem.verify.log" && -f "$wt/logs/impl-gem.evidence.md" ]] || fail "Gemini レーンの記録が logs/ に無い（用意が誤り）"
+[[ "$(git -C "$wt" status --porcelain)" == "" ]] || fail "Gemini レーンの後に未 commit の変更がある（用意が誤り）"
+[[ "$(query "$wt")" == reuse=yes* ]] || fail "Gemini レーンの記録が入力に数えられている: $(query "$wt")"
+unset GEMINI_BIN GEMINI_POLL_SEC GEMINI_IDLE_GRACE GEMINI_IDLE_RESUME_GRACE GEMINI_NOOUTPUT_SEC GEMINI_PRINT_TIMEOUT
+export LANES_TOOLS="claude codex"; wt="$wt_impl"
+[[ "$(query "$wt")" == reuse=yes* ]] || fail "環境を戻したのに、元の worktree の問い合わせが reuse=yes に戻らない（用意が誤り）: $(query "$wt")"
+pass "Gemini レーン（run-gemini.sh）が logs/ に記録を残した後でも使い回す"
 
 # ---- 3. ランチャが logs/ に書く名前でも、台帳に載っていない持ち主のものは入力のまま。台帳に載せた後は数えない ----
 no_reuse() {   # <説明> [期待する理由]: 今の状態で問い合わせが reuse=no（既定の理由は input-changed）
@@ -195,7 +211,7 @@ for f in "${records[@]}" launch.log .review-reuse-blocked; do print -r -- "書�
 [[ "$(query "$wt")" == reuse=yes* ]] || fail "台帳に載せた持ち主の記録の書き換えが入力に数えられている: $(query "$wt")"
 pass "台帳に載せた持ち主の記録（$(( ${#records} + 2 )) 通り。Gemini・QA・回転した前回分・書きかけの一時ファイルを含む）は、置いても書き換えても入力に数えない"
 # 台帳に載っていても、持ち主の決まった名前でないもの（label x の、ランチャが書かない語尾）は入力のまま
-for f in x.txt x.config.json.bak x.pid.txt x-extra.json xx.json; do
+for f in x.txt x.config.json.bak x.pid.txt x-extra.json xx.json x.json.tmp.12345 launch.log.tmp.12345 .x.json.12345.tmp .x.json.abc.0123.tmp; do
   print -r -- "入力" > "$wt/logs/$f"; no_reuse "logs/$f（label x の決まった名前ではない）"; rm -f "$wt/logs/$f"
 done
 yes_again "label x の決まった名前でないファイルを消した後"
