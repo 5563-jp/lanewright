@@ -6,6 +6,39 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+## [0.1.3] - detach-run.sh 経由でも記録を使い回す直し / Reuse records through detach-run.sh
+
+### 直したこと / Fixed
+- `detach-run.sh` 経由で起動したレビューが、`python3` の入口が環境変数を書き換える Mac で、親の `chk-run.sh` の記録を使い回さなかった
+  （証跡が毎回 `input-changed`。0.1.2 の直しが、こうした Mac の普段のシェルからの起動では効いていなかった）。
+  Mac の `python3` は、本物の前に入口を通ることが多い（Xcode の `/usr/bin/python3`・pyenv の shims など）。入口は、本物を起動する前に
+  環境変数を書き換える（Xcode: `MANPATH` の先頭へ通るたびに足す・`SDKROOT` などを足す / pyenv: `PYENV_DIR` に最初に通った場所を入れる・
+  `PATH` の先頭に本物の場所を足す）。`detach-run.sh` は切り離しに `python3` を使い、そこから見えた環境変数をそのまま起動するコマンドへ
+  渡していたので、起動したランチャだけが呼び出し元と違う環境で動き、入力の指紋（環境変数が入る）が `chk-run.sh` を回したときと合わなかった。
+  `detach-run.sh` は、呼び出し元のシェルの環境変数をそのまま起動するコマンドへ渡すようにした（`python3` の入口や `python3` 自身が
+  足した・書き換えた分は渡さない。挟まずに起動したときと同じ環境で動く。値はパイプで渡し、ファイルにも引数にも書かない）。
+  使い回す条件（入力の指紋）は緩めていない。
+  この不具合は、テストの結果も回す場所で変えていた: `lanes/tests/test-review-reuse-launch.sh` は、入口を一度通った後の環境
+  （レーンの中・`chk-run.sh` の確認コマンドの中）から回すと緑、普段のシェルから回すと赤だった（pyenv は一度通ると `PATH` の先頭が
+  本物になり、そこから先は入口を通らないので、赤が隠れた）。テストに、通るたびに環境変数を書き換える偽の `python3` の入口を
+  PATH の先頭に置いた確認（どの Mac でも、直す前は赤・直した後は緑）と、同じ確認をそのまま回しても `chk-run.sh` の確認コマンドの
+  中から回しても同じ結果になる確認を足した。
+  Reviews launched through `detach-run.sh` never reused the parent's `chk-run.sh` record (`input-changed` every time) on Macs whose `python3`
+  launcher rewrites environment variables, so the 0.1.2 fix did not take effect when launching from a plain shell on such Macs.
+  On macOS, `python3` usually goes through a launcher before the real interpreter (Xcode's `/usr/bin/python3`, pyenv shims, and so on), and
+  the launcher rewrites the environment first (Xcode prepends to `MANPATH` on every pass and adds `SDKROOT` and others; pyenv stores the
+  directory of the first pass in `PYENV_DIR` and prepends the real interpreter's directory to `PATH`). `detach-run.sh` detaches with `python3`
+  and passed the environment seen there to the launched command, so only the launched launcher ran in an environment different from its
+  caller, and the input fingerprint (which includes environment variables) no longer matched the one recorded by `chk-run.sh`.
+  `detach-run.sh` now passes the calling shell's environment to the launched command unchanged (nothing added or rewritten by the `python3`
+  launcher or by `python3` itself is passed on; the command runs in the same environment as when launched without `detach-run.sh`; values travel
+  through a pipe and are never written to a file or an argument). The reuse conditions (the input fingerprint) are unchanged.
+  The bug also made a test result depend on where it ran: `lanes/tests/test-review-reuse-launch.sh` passed in an environment that had already
+  gone through the launcher once (inside a lane, or inside the `chk-run.sh` check command) and failed from a plain shell (with pyenv, the first
+  pass puts the real interpreter first in `PATH`, so later calls skip the launcher and hide the failure). The test now puts a fake `python3`
+  launcher that rewrites the environment on every pass first in `PATH` (red before the fix and green after it on any Mac), and verifies that
+  the same check gives the same result when run directly and when run inside the `chk-run.sh` check command.
+
 ## [0.1.2] - レビューで手元確認の記録を使い回す直し / Reuse check records in reviews
 
 ### 直したこと / Fixed

@@ -20,11 +20,24 @@
 #   7. 台帳の書き方（symlink・ハードリンクの台帳は辿らない・使わない。detach-run.sh は worktree の logs/ の直下のときだけ載せる）
 #   8. FIFO（名前付きパイプ）で止まらない・辿らない（台帳が FIFO でも chk-run.sh・問い合わせ・レビューの起動・台帳へ載せる側が待たずに返る。
 #      detach-run.sh は、起動ログが FIFO・ハードリンク・symlink なら、その先へ書かずに起動を断る）
+#   9. python3 の入口が環境変数を書き換える Mac（Xcode の /usr/bin/python3・pyenv の shims など）でも使い回す。
+#      detach-run.sh は、呼び出し元の環境変数をそのまま子へ渡す（入口が足した・書き換えた分を渡さない）。
+#      同じ確認を、そのまま回しても chk-run.sh の確認コマンドの中から回しても、結果は同じ（回す場所で緑と赤が変わらない）
+# 使い方: test-review-reuse-launch.sh [--core]
+#   --core: 1 の最初の確認（Codex のレビューの、chk-run.sh の直後の本物の起動）だけを回して終わる。
+#           9 が、同じ確認を回す場所を変えて回すのに使う（selftest.sh は引数なしで全部を回す）
 # 偽の CLI（tests/stubs）と一時リポだけを使う。本物の CLI・ネットワークには触らない。全データを一時領域に置く。
 set -euo pipefail
+core_only=0
+case "${1:-}" in
+  '') ;;
+  --core) core_only=1 ;;
+  *) print -u2 -- "使い方: test-review-reuse-launch.sh [--core]"; exit 2 ;;
+esac
 # git の環境変数を外し、一時リポの外へ git が上っていかないようにする（本物のリポを書き換えない）
 source "${0:A:h}/_git-isolate.sh"; lanes_test_git_isolate
 LANES_DIR="${0:A:h:h}"
+SELF="${0:A}"   # このテスト自身の場所（9 が --core で呼び直す。作業場所を変える前に絶対パスにしておく）
 scratch_base="${LANES_SCRATCH:-${TMPDIR:-}}"
 [[ -n "$scratch_base" && -d "$scratch_base" ]] || { print -u2 'LANES_SCRATCH か TMPDIR の既存ディレクトリが必要'; exit 2; }
 T="$(mktemp -d "${scratch_base%/}/test-reuse-launch.XXXXXX")"; T="${T:A}"
@@ -110,6 +123,7 @@ for tools in "claude codex" "claude"; do
   [[ -s "$wt/logs/launch.log" ]] || fail "[$kind] 起動ログが worktree の logs/ に無い（用意が誤り）"
   reused "$wt" "rev-$kind-r1" "[$kind] chk-run.sh の直後の本物の起動"
   pass "[$kind] chk-run.sh の直後に detach-run.sh 経由で起動したレビューが、親の記録を使い回す（node_modules・dist あり）"
+  if (( core_only )); then print -r -- "合格 $count 件（--core）"; exit 0; fi
 
   # レビューが logs/ に記録を書いた後も、chk-run.sh は同じ確認を省き、問い合わせも合う
   chk "$wt"; [[ "$REPLY" == *'skip=same-tree'* ]] || fail "[$kind] レビューの後の chk-run.sh が同じ確認を省かない: $REPLY"
@@ -460,5 +474,78 @@ done
 [[ "$(grep -c '^=== detach-run ===$' "$wt/logs/plain.launch.log")" == 2 ]] || fail "普通の起動ログへ 2 回分を追記していない"
 yes_again "起動ログのテストの後"
 pass "対照: 普通のファイルの起動ログ（新規・追記）と /dev/null は、今までどおり起動できる"
+
+# ---- 9. python3 の入口が環境変数を書き換える Mac でも使い回す。結果は、回す場所（普段のシェル・chk-run.sh の中）で変わらない ----
+# 経緯: detach-run.sh は python3 でコマンドを切り離す。Mac の python3 は、本物の前に入口を通ることが多い（Xcode の /usr/bin/python3・
+#       pyenv の shims など）。入口は、本物を起動する前に環境変数を書き換える（Xcode: MANPATH の先頭へ通るたびに足す・SDKROOT などを足す /
+#       pyenv: PYENV_DIR に最初に通った場所を入れる・PATH の先頭に本物の場所を足す）。detach-run.sh が python3 から見えた環境変数を
+#       そのまま子へ渡していたので、起動したランチャだけが呼び出し元と違う環境になり、指紋（環境変数が入る）が合わず、
+#       本物の起動のたびに「使わない: input-changed」になった。
+#       このテストも、回す場所で結果が変わった: 入口を一度通った後の環境（レーンの中・chk-run.sh の確認コマンドの中）から回すと緑、
+#       普段のシェルから回すと赤（pyenv の形は、一度通ると PATH の先頭が本物になり、そこから先は入口を通らないので、赤が隠れた）。
+# どの Mac でも同じ形になるよう、通るたびに環境変数を書き換える偽の入口を PATH の先頭に置いて確かめる。
+# 偽の入口が起動する「本物」は、python3 自身が答える実体（sys.executable）にする。PATH から見つかる python3 が pyenv の shims のような
+# 入口だと、その入口が PATH の先頭に本物の場所を足すので、2 回目から偽の入口を通らなくなる（毎回通る形にならない）
+real_py="$(python3 -I -c 'import sys; print(sys.executable)')" || fail "python3 を起動できない（用意が誤り）"
+[[ -n "$real_py" && -f "$real_py" && -x "$real_py" ]] || fail "本物の python3 の場所が分からない（用意が誤り）"
+mkdir -p "$T/pyshim"
+cat > "$T/pyshim/python3" <<EOF_PYSHIM
+#!/bin/sh
+# 偽の python3 の入口（テスト用）。本物の python3 を起動する前に環境変数を書き換える
+# FAKE_PY_GROW: 通るたびに伸びる（Xcode の入口の MANPATH と同じ形）
+FAKE_PY_GROW="hop:\${FAKE_PY_GROW-}"; export FAKE_PY_GROW
+# FAKE_PY_DIR: 最初に通った場所を覚える（pyenv の入口の PYENV_DIR と同じ形）
+[ -n "\${FAKE_PY_DIR-}" ] || FAKE_PY_DIR="\$PWD"; export FAKE_PY_DIR
+exec ${(qq)real_py} "\$@"
+EOF_PYSHIM
+chmod +x "$T/pyshim/python3"
+unset FAKE_PY_GROW FAKE_PY_DIR
+export PATH="$T/pyshim:$PATH" LANES_TOOLS="claude codex"
+# 用意の確認: 1 回通ると hop:、python3 の中からもう 1 回通ると hop:hop:（通るたびに伸びる）
+[[ "$(python3 -I -c 'import os, subprocess; print(os.environ.get("FAKE_PY_GROW"), flush=True); subprocess.run(["python3", "-I", "-c", "import os; print(os.environ.get(\"FAKE_PY_GROW\"))"])' | tr '\n' ' ')" == "hop: hop:hop: " ]] \
+  || fail "偽の python3 の入口が効いていない（用意が誤り）"
+# 起動する場所を worktree 以外にする（pyenv の形: 入口が覚える「最初に通った場所」が、chk-run.sh のとき（worktree）と違う）
+cd "$T"
+mkrepo wt-pyshim; wt="$REPLY"
+chk "$wt"; [[ "$REPLY" == *'recorded=tree '* ]] || fail "偽の入口を置いた環境で記録できない: $REPLY"
+launch "$wt" launch.log run-review.sh rev-pyshim-r1 --base origin/develop --round 1
+reused "$wt" rev-pyshim-r1 "python3 の入口が環境変数を書き換える環境での起動"
+pass "python3 の入口が通るたびに環境変数を書き換えても（Xcode・pyenv の形）、detach-run.sh 経由で起動したレビューは親の記録を使い回す"
+
+# detach-run.sh は、呼び出し元の環境変数をそのまま子へ渡す（入口が足した・書き換えた分を渡さない）。
+# 直に起動したときと比べる。値は出さず、全体の指紋と名前の一覧で比べる（SHLVL は zsh を 1 つ挟むたびに増えるので除く）。
+# 指紋を取る側は、名前の付いた変数を使わない（同じ名前の環境変数と取り違えない）
+cat > "$T/envsum.zsh" <<'EOF_ENVSUM'
+#!/bin/zsh -f
+set -- ${${(ko)parameters[(R)*export*]}:#SHLVL}
+print -r -- "指紋 $(while (( $# )); do print -rn -- "$1=${(P)1}"$'\0'; shift; done | shasum -a 256 | cut -d' ' -f1)"
+print -r -- "FAKE_PY_GROW=${FAKE_PY_GROW-（無し）} FAKE_PY_DIR=${FAKE_PY_DIR+（あり）}"
+print -rl -- "$@"
+EOF_ENVSUM
+# そのまま渡りにくい形の環境変数も置く: detach-run.sh の中の変数と同じ名前になりうるもの（k・log）・空の値・改行や = や日本語を含む値
+export k=呼び出し元の値 log=呼び出し元の値 FAKE_ENV_EMPTY= FAKE_ENV_TEXT=$'1 行目\n2 行目 = 日本語'
+zsh -f "$T/envsum.zsh" > "$T/env-direct.txt" || fail "環境変数の指紋を取れない（用意が誤り）"
+pid="$(zsh -f "$LANES_DIR/detach-run.sh" "$T/env-detached.log" zsh -f "$T/envsum.zsh")" || fail "detach-run.sh で起動できない"
+unset k log FAKE_ENV_EMPTY FAKE_ENV_TEXT
+n=0; while kill -0 "$pid" 2>/dev/null; do n=$(( n + 1 )); (( n <= 100 )) || fail "環境変数の指紋を取るコマンドが 10 秒で終わらない"; sleep 0.1; done
+sed '1,/^=== detach-run ===$/d' "$T/env-detached.log" > "$T/env-detached.txt"
+grep -q '^指紋 [0-9a-f]\{64\}$' "$T/env-direct.txt" && grep -qx 'FAKE_PY_GROW=（無し） FAKE_PY_DIR=' "$T/env-direct.txt" \
+  && grep -qx k "$T/env-direct.txt" && grep -qx log "$T/env-direct.txt" && grep -qx FAKE_ENV_EMPTY "$T/env-direct.txt" \
+  || fail "直に起動したときの環境変数の指紋が取れていない（用意が誤り）"
+cmp -s "$T/env-direct.txt" "$T/env-detached.txt" \
+  || { diff "$T/env-direct.txt" "$T/env-detached.txt" >&2 || true; fail "detach-run.sh 経由で起動したコマンドの環境変数が、直に起動したときと違う（python3 の入口が書き換えた分が子に渡っている・呼び出し元の変数が落ちた・値が変わった）"; }
+pass "detach-run.sh は、呼び出し元の環境変数をそのまま子へ渡す（python3 の入口が足した・書き換えた分を渡さない。k・log という名前や空の値・改行を含む値も、直に起動したときと同じ）"
+
+# 同じ確認（--core = 1 の最初の確認だけ）を、そのまま回しても、chk-run.sh の確認コマンドの中から回しても、同じ結果（緑）になる。
+# chk-run.sh は確認コマンドを python3 の監督役の下で起動するので、確認コマンドの中は「入口を一度通った後」の環境になる
+# （LANES_CHK_ENV_LOADED・lanes.env が export する設定キー・LANES_CHECK_PORT・LANES_CHECK_OUTDIR も持ち込まれ、作業場所は worktree）
+out="$(zsh -f "$SELF" --core 2>&1)" || { print -u2 -r -- "$out"; fail "そのまま回した --core が赤"; }
+[[ "$out" == *'合格 1 件（--core）'* ]] || { print -u2 -r -- "$out"; fail "そのまま回した --core が、確認を 1 件通していない（用意が誤り）"; }
+mkrepo wt-outer; wt="$REPLY"
+rc=0; out="$(LANES_CHECK_CMD="zsh -f ${(qq)SELF} --core" bash "$LANES_DIR/chk-run.sh" "$wt" 49996 "$T/chk-out-outer" 2>&1)" || rc=$?
+[[ "$rc" == 0 && "$out" == *'check=0（LANES_CHECK_CMD）'* ]] \
+  || { print -u2 -r -- "$out"; tail -5 "$T/chk-out-outer/check.log" >&2 2>/dev/null || true; fail "chk-run.sh の確認コマンドの中から回した --core が赤（回す場所で結果が変わる。rc=$rc）"; }
+grep -qx '合格 1 件（--core）' "$T/chk-out-outer/check.log" || fail "chk-run.sh の中から回した --core が、確認を 1 件通していない（用意が誤り）"
+pass "同じ確認（--core）を、そのまま回しても chk-run.sh の確認コマンドの中から回しても、結果は同じ（緑。回す場所で変わらない）"
 
 print -r -- "合格 $count 件"

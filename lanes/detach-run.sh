@@ -6,15 +6,54 @@
 # worktree の logs/ の直下でない場所（ほかのフォルダ・logs/ の下のフォルダ）に置くときは、台帳を作らない。
 # 起動ログに使えるのは、普通のファイル（無ければ作る。ハードリンクでないもの）と /dev/null のような文字デバイスだけ。
 # symlink・ハードリンク・FIFO（名前付きパイプ）などは、その先へ書かず・待たずに exit 2 で止め、コマンドを起動しない。
+# 起動するコマンドには、呼び出し元の環境変数をそのまま渡す（このスクリプトを挟んでも、挟まずに起動したときと同じ環境で動く）。
+# 切り離しに使う python3 は、Mac では本物の前に入口を通ることが多く（Xcode の /usr/bin/python3・pyenv の shims など）、
+# その入口が環境変数を書き換える（MANPATH の先頭へ通るたびに足す・SDKROOT・PYENV_DIR に通った場所を入れる・PATH に足す など）。
+# python3 から見えた環境変数をそのまま子へ渡すと、起動したランチャだけが呼び出し元と違う環境で動き、chk-run.sh の入力の指紋
+# （環境変数が入る）が、親が chk-run.sh を回したときと合わなくなる（レビューが確認済みの記録を使い回せない）。
+# そこで、python3 を呼ぶ前のこのシェルの環境変数を fd 3 のパイプで渡し、子にはそれを渡す。値はファイルにも引数にも書かない。
 set -euo pipefail
-log="${1:?launch.log}"; shift
-(( $# >= 1 )) || { print -u2 -- "usage: detach-run.sh <launch.log> <cmd> [args...]"; exit 2; }
-mkdir -p "${log:h}"
-python3 - "$log" "$@" <<'PY'
-import fcntl, os, stat, sys, subprocess
+# このスクリプトのシェルの部分では、名前の付いた変数を使わない（位置引数だけを使う）。呼び出し元に同じ名前の環境変数があると、
+# 代入でその値を書き換えたり、local で隠して下の一覧から落としたりして、子へそのまま渡せなくなるため
+: "${1:?launch.log}"
+(( $# >= 2 )) || { print -u2 -- "usage: detach-run.sh <launch.log> <cmd> [args...]"; exit 2; }
+mkdir -p "${1:h}"
+# このシェルが export している変数（= ここから直に起動したコマンドへ渡る環境変数）を「名前=値」の NUL 区切りで出す。
+# 最後に空の 1 件（NUL だけ）を置く。受け取る側は、終わりが NUL 2 つなら最後まで読めたと分かる
+detach_env_dump() {
+  set -- "${(@k)parameters[(R)*export*]}"
+  while (( $# )); do print -rn -- "$1=${(P)1}"$'\0'; shift; done
+  print -n -- $'\0'
+}
+python3 - "$@" 3< <(detach_env_dump) <<'PY'
+import fcntl, os, re, stat, sys, subprocess
 from pathlib import Path
 log, cmd = Path(sys.argv[1]), sys.argv[2:]
 log.parent.mkdir(parents=True, exist_ok=True)
+
+def caller_environ():
+    """呼び出し元のシェルの環境変数（detach-run.sh が fd 3 のパイプで渡す「名前=値」の NUL 区切り）を読む。
+    読めない・途中で切れている・形が違うときは None（呼び出し側は今の環境変数で起動する）。
+    渡された一覧に無い変数（python3 の入口や python3 自身が足したもの）は、子に渡さない。ただし、シェルが変数として持てない名前
+    （英数字と _ 以外を含む名前）は一覧に出ないことがあるので、今の環境変数から引き継ぐ。"""
+    try:
+        with os.fdopen(3, "rb") as stream:
+            data = stream.read()
+    except OSError:
+        return None
+    if not data.endswith(b"\0\0"):
+        return None
+    env = {}
+    for record in data[:-2].split(b"\0"):
+        name, sep, value = record.partition(b"=")
+        if not sep or not name:
+            return None
+        env[name] = value
+    plain_name = re.compile(rb"[A-Za-z_][A-Za-z0-9_]*")
+    for name, value in os.environb.items():
+        if name not in env and not plain_name.fullmatch(name):
+            env[name] = value
+    return env
 
 def claim_launch_log(log):
     """起動ログの名前をランチャの記録の台帳へ載せる。載せられなくても起動は止めない（確認済みの記録を使い回せなくなるだけ）。"""
@@ -65,6 +104,12 @@ def open_launch_log(log):
     return fd
 
 try:
+    # fd 3 は最初に読んで閉じる（下で開くファイルの番号と取り違えない）
+    child_env = caller_environ()
+    if child_env is None:
+        print("NOTE: 呼び出し元の環境変数を受け取れなかったので、python3 から見える環境変数のまま起動する"
+              "（python3 の入口が環境変数を書き換える Mac では、chk-run.sh の確認済みの記録を使い回せないことがある）", file=sys.stderr)
+        child_env = os.environ.copy()
     claim_launch_log(log)
     try:
         fd = open_launch_log(log)
@@ -82,7 +127,7 @@ try:
             stdout=f,
             stderr=subprocess.STDOUT,
             start_new_session=True,
-            env=os.environ.copy(),
+            env=child_env,
         )
 except Exception:
     print("ERROR: 分離起動に失敗（引数・例外本文は非表示）", file=sys.stderr)
