@@ -83,6 +83,12 @@ one_note "環境変数が空・設定 high" CLAUDE_EFFORT '（空＝付けない
 if grep -q -- '--effort' "$T/out"; then fail "空の環境変数なのに --effort が付いた"; fi
 pass "環境変数の空（--effort を付けない）が設定ファイルの値に勝つときも、注意を出す"
 
+# 注意を出せなくても（stderr が閉じている）、起動は止めない
+rc=0; CLAUDE_EFFORT=low zsh -f "$LANES_DIR/run-claude.sh" "$wt" "$T/prompt.md" e5b --dry-run > "$T/out" 2>&- || rc=$?
+(( rc == 0 )) || { cat "$T/out" >&2; fail "stderr が閉じていると、注意のせいで起動が止まる（$rc）"; }
+grep -q -- '--effort low ' "$T/out" || fail "stderr が閉じているとき、渡す値が変わった"
+pass "注意を出せなくても（stderr が閉じている）、起動は止めない"
+
 # 設定ファイルで固定（値をそのまま書く）すると、設定ファイルが勝ち、注意も出ない
 { conf_sample | grep -v '^CLAUDE_EFFORT='; print -r -- 'CLAUDE_EFFORT="high"'; } > "$conf"
 CLAUDE_EFFORT=low run run-claude.sh e6 --dry-run

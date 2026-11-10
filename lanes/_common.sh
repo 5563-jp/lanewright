@@ -163,7 +163,10 @@ lanes_effort_override_note() {
   [[ "$conf_value" == value:* ]] || return 0
   conf_value="${conf_value#value:}"
   [[ "$now" != "$conf_value" ]] || return 0
-  print -u2 -- "注意: $key は環境変数の値「${now:-（空＝付けない）}」で動く。設定ファイル（無ければ既定）の値「${conf_value:-（空＝付けない）}」は使われない（環境変数が設定ファイルより勝つ）。設定の値に固定するなら、設定ファイルに $key=\"$conf_value\" と値をそのまま書く（docs/config.md）"
+  # 子シェルの中で出す。zsh はスクリプトの実行中に、閉じた stderr へ print -u2 するとそのシェルごと止まる（|| true でも続かない）。
+  # 注意を出せなくても起動は止めない
+  ( print -u2 -- "注意: $key は環境変数の値「${now:-（空＝付けない）}」で動く。設定ファイル（無ければ既定）の値「${conf_value:-（空＝付けない）}」は使われない（環境変数が設定ファイルより勝つ）。設定の値に固定するなら、設定ファイルに $key=\"$conf_value\" と値をそのまま書く（docs/config.md）" ) || true
+  return 0
 }
 
 # 今の構成（LANES_TOOLS）にこの道具が入っているか。入っていなければ代わりの入口を案内して止める（exit 2）。

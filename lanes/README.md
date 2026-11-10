@@ -518,4 +518,5 @@ LANES_LINT_STRICT=1 zsh selftest.sh --test tests/test-lint.sh   # shellcheck が
 - `git rev-parse --git-common-dir` は本体 checkout だと相対パス → `--path-format=absolute`
 - `git ls-remote --heads origin <name>` は末尾一致 → `refs/heads/<name>` で完全一致
 - `chk-run.sh` の入力の指紋にランチャの記録（`logs/` の直下）を入れると、`detach-run.sh` が起動ログ（`logs/launch.log`）をランチャより先に書くだけで記録と合わなくなり、本物の起動でだけ「使い回さない」になる（dry-run や手での問い合わせでは再現しない）→ ランチャの記録の名前だけを指紋から外す。起動の経路を変えたら `test-review-reuse-launch.sh` のように本物の起動で確かめる
+- zsh: スクリプトの実行中に、閉じた stderr（`2>&-` で起動されたとき）へ `print -u2` すると、`|| true` を付けていてもそのシェルごと終了コード 1 で止まる（`zsh -c` では止まらない）→ 失敗の経路ではない案内（effort の上書きの注意など）は子シェル `( print -u2 … ) || true` の中で出す
 - zsh: 関数内の `trap ... EXIT` は関数の終わりで発火する / 関数形式の `TRAPEXIT` は `$(...)` の子シェルの終了でも走る（`ZSH_SUBSHELL` で弾く）/ 関数内で `set -e` が発火すると `TRAPEXIT` は走らない（`TRAPZERR` も定義する）。ランチャは `TRAPZERR` と `TRAPEXIT` の 2 段で `.done` を書く
