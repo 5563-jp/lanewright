@@ -166,7 +166,7 @@ Because the config file is `source`d directly by `zsh`, every line in it is exec
 | `LANES_SCRATCH_ROOT` | `$LANES_RUNS_ROOT/_scratch` | Per-lane temporary directory (`TMPDIR` / `LANES_SCRATCH`), automatically removed during cleanup |
 | `LANES_CHECK_CMD` | empty | Command run by `chk-run.sh` before PR creation (e.g., `pnpm lint && pnpm typecheck && pnpm build`). If `.lanes/check.sh` exists in the repo, that script takes priority |
 | `CLAUDE_MODEL` / `CODEX_MODEL` / `GEMINI_MODEL` | empty | Leave empty to use each CLI's default model, or set an explicit model name |
-| `CLAUDE_EFFORT` / `CODEX_EFFORT` / `GEMINI_EFFORT` | `xhigh` / `xhigh` / `high` | Reasoning effort passed to each CLI (set to empty `""` to omit `--effort`). An environment variable of the same name overrides the config file; the launcher prints a one-line notice when that happens. Write the value literally (`CLAUDE_EFFORT="xhigh"`) to pin it |
+| `CLAUDE_EFFORT` / `CODEX_EFFORT` / `GEMINI_EFFORT` | `xhigh` / `xhigh` / `high` | Reasoning effort passed to each CLI (set to empty `""` to omit `--effort`). An environment variable of the same name overrides the config file; the launcher prints a one-line notice when that happens. Write the value literally (`CLAUDE_EFFORT="xhigh"`) to pin it. The model and effort configured for each lane are recorded in `logs/<label>.pid` (`model=` / `effort=`, written at launch) and in the evidence file |
 | `LANES_STALL_MINUTES` | `10` | Minutes without output before `lanes-status.sh` reports `STALLED` |
 | `LANES_NOTIFY` | `1` | Show a macOS notification when a lane finishes (`0` to disable) |
 | `LANES_PROMPT_MAX_BYTES` | `200000` | Maximum prompt file size in bytes (prevents pasting huge diffs into prompts) |

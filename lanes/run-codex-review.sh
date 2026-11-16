@@ -338,6 +338,7 @@ gate="$(rvd_escalate "$round" "$verdict" "$gate")"
   print -- "- $verdict"
   print -- "- 対象: $(lanes_git_summary "$wt")"
   print -- "- モード: $mode / base=$base / round=$round"
+  lanes_model_effort_evidence codex-review
   print -- "- 指摘: $sevsum / GATE: $gate"
   [[ "$gate" != ESCALATE ]] || print -- "- 周回の上限（LANES_REVIEW_MAX_ROUNDS=${LANES_REVIEW_MAX_ROUNDS:-5}）を超えた → ここで止めて人に判断を返す（続ける＝直して上限を上げる / 締める＝残りを .lanes/accepted-limitations.md か後回し票へ）"
   print -- "- 必須検証の成功確認: $checks（仕組みがあると見た項目: ${checks_present:-なし}。その項目の NA は受け付けない）"

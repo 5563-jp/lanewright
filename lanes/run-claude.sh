@@ -142,6 +142,7 @@ untracked="$(git status --porcelain | grep -c '^??' || true)"
 {
   print -- "## Claude 実装証跡（$label）"
   print -- "- 結果: EXIT:$rc"
+  lanes_model_effort_evidence claude
   print -- "- 対象: $(lanes_git_summary "$wt")"
   print -- "- HEAD: $head_before → $head_after / tracked 変更 $changed / 未追跡 $untracked"
   print -- "- 実行: $started 開始 / 約 ${elapsed} 分"

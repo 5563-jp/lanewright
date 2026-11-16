@@ -24,7 +24,7 @@ Mac で Claude / Codex / Gemini（Antigravity CLI `agy`）の CLI（コマンド
 | `<label>.prompt.md` | 実際に渡したプロンプトの全文（前置きテンプレを含む） |
 | `<label>.last.md` / `<label>.completion.json` | Codex レビューの最終本文と、完了イベント・受信時刻・本文の SHA-256（内容から作る指紋）の照合記録 |
 | `<label>.evidence.md` | PR 本文に貼る証跡（実行条件・検証結果・判定） |
-| `<label>.pid` | 起動時に書く。pid・`lstart`（プロセス開始時刻）・開始時刻・レーン種別・worktree・子の pid と開始時刻・scratch のパス |
+| `<label>.pid` | 起動時に書く。pid・`lstart`（プロセス開始時刻）・開始時刻・レーン種別・worktree・CLI に渡す設定のモデルと effort（`model=` / `effort=`。空は CLI の既定。CLI を起動する前に止まったレーンにも残る）・子の pid と開始時刻・scratch のパス |
 | `<label>.done` | 終了時に書く。`EXIT:n`・`VERDICT:`・終了時刻・経過分・補足 |
 | `<label>.lock` | 同じ label の二重起動を防ぐ排他ロック（消さない・回転しない） |
 | `.lanes-records` | ランチャの記録の台帳。ランチャと `detach-run.sh` が、`logs/` に何かを書く前に、書く名前の持ち主を 1 行ずつ載せる（`label:<label>` か `file:<名前>`）。`chk-run.sh` は、ここに載っている持ち主の記録だけを入力の指紋から外す（7 章）。手で書き換えない |
@@ -454,7 +454,7 @@ zsh lanes/prepare-screen-qa.sh <checkout> [label] [--url <preview-url>] [--viewp
 | `LANES_RUNS_ROOT` / `LANES_ARCHIVE_ROOT` / `LANES_SCRATCH_ROOT` | `$HOME/dev/_runs` / 同じ / `$LANES_RUNS_ROOT/_scratch` | worktree・退避先・scratch |
 | `CLAUDE_BIN` `CODEX_BIN` `GEMINI_BIN` | `command -v claude` / `codex` / `agy` | 各 CLI のパス |
 | `CLAUDE_MODEL` `CODEX_MODEL` `GEMINI_MODEL` | 空 | 空なら `--model` を付けず CLI の既定モデル |
-| `CLAUDE_EFFORT` `CODEX_EFFORT` `GEMINI_EFFORT` | `xhigh` / `xhigh` / `high` | effort（考える深さ。空なら付けない。上限はモデルごとに違う） |
+| `CLAUDE_EFFORT` `CODEX_EFFORT` `GEMINI_EFFORT` | `xhigh` / `xhigh` / `high` | effort（考える深さ。空なら付けない。上限はモデルごとに違う）。そのレーンで渡す設定のモデルと effort は `logs/<label>.pid`（`model=` / `effort=`）と証跡に残る。起動ごとに変える書き方は `docs/config.md` |
 | `LANES_CHECK_CMD` | 空 | `chk-run.sh` の確認コマンド（`.lanes/check.sh` が優先。どちらも無ければ `chk-run.sh` は exit 2） |
 | `LANES_SCREEN_QA_MAP` | 空 | 画面 QA の対応表（`--url` / `--viewpoints` が優先） |
 | `LANES_VERCEL_PROJECT` `LANES_VERCEL_SCOPE` | 空 | 自動再デプロイ（`LANES_VERCEL_PROJECT` が空なら無効。`LANES_VERCEL_SCOPE` が空なら `--scope` を付けない） |
@@ -517,6 +517,7 @@ LANES_LINT_STRICT=1 zsh selftest.sh --test tests/test-lint.sh   # shellcheck が
 | `test-roles.sh` / `test-doctor.sh` | 4 構成の割り振り・入口の振り分け・構成に無い道具での停止・排他前の誤りの記録 / 起動前点検（未導入・未ログイン・API キーでのログイン・Gemini の端末サンドボックス） |
 | `test-config-export.sh` | 設定ファイルの値が Python の部品と `chk-run.sh` まで届くこと・数値のキーの確かめ・Claude レビューのツール集合と固定の拒否の一覧 |
 | `test-effort-override-note.sh` | 環境変数の effort が設定ファイル（無ければ既定）と違う値で勝っているときだけ、ランチャと `lanes-doctor.sh` が注意を出すこと。渡す値・子の環境は変えないこと |
+| `test-record-model-effort.sh` | 6 種類のレーンの `.pid` にモデルと effort が残り、子の CLI に実際に渡した引数と同じこと（Gemini 実装は `.pid` だけ）。証跡に「モデル / effort」の行が 1 行あること。起動ごとに変えた値（環境変数・自分用の名前の変数）・空にした設定の書き方。行の増えた `.pid` を `lanes-status.sh` が読めること |
 | `tests/test-install.sh` / `tests/test-no-private.sh` | 導入・アンインストール / 固有名・個人のパス・ID・鍵の形の機械検査（`LANES_PRIVATE_DENYLIST` で禁止語ファイルも指定可） |
 | `tests/test-selftest-guard.sh` | キットのリポを書き換える偽テスト（commit・`GIT_DIR` 付きの `git init`・未保存の変更・中身だけの上書き・索引・枝の切り替え・枝やタグ・stash・worktree・info/exclude・info/attributes・alternates・hooks（下のフォルダも）・リモート追跡の ref・リモートへの push・他の worktree の枝・`logs/`）で `selftest.sh` が赤になること、`TMPDIR` がキットの中なら exit 2 になること、テストに見える `gh` が偽物であること |
 | `tests/test-lint.sh` | 全シェルの構文・bash の shellcheck・Python の pyflakes。shellcheck が未導入なら省略して緑、`LANES_LINT_STRICT=1` で赤 |

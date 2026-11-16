@@ -145,6 +145,7 @@ untracked="$(git -c core.fsmonitor=false status --porcelain | grep -c '^??' || t
 {
   print -- "## Codex 実装証跡（$label）"
   print -- "- 結果: EXIT:$rc / 自己申告 $verdict"
+  lanes_model_effort_evidence codex
   print -- "- 対象: $(lanes_git_summary "$wt")"
   print -- "- HEAD: $head_before → $head_after / 未 commit の tracked 変更 $changed 件 / 未追跡 $untracked 件"
   print -- "- 実行: $started 開始 / 約 ${elapsed} 分"
