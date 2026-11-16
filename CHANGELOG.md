@@ -6,6 +6,22 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+### 直したこと / Fixed
+- `chk-run.sh` が、生成物（`dist/`・`.next/` などの中）にリンクが 1 本でもあると、行き先に関係なく「通ったが記録しない」
+  （`record=no reason=unresolvable（生成物がリンクか、普通のファイルでない）`）にしていた。ビルドが出力の中に依存へのリンクを作る構成
+  （例: `.next/node_modules/<名前>` → `../../node_modules/<名前>`）では、確認が毎回通っても記録が一度も残らず、レビューが親の記録を
+  使い回せなかった（`no-record`）。生成物の中のリンクを、入力のリンクと同じ基準で扱うようにした: 作業ツリーの中を指すなら、
+  向き先と行き先の中身を生成物の指紋に入れて記録する。作業ツリーの外（か `.git` の中）を指す・行き先が無い・行き先が普通のファイルでも
+  フォルダでもないリンクは、今までどおり記録しない（理由にどのリンクかを出す）。使い回す条件は緩めていない。
+  **この版に上げた後は、`chk-run.sh` を 1 回通し直す。** `chk-run.sh` の中身が変わったので（入力の指紋に入る）、前の版で残した
+  確認済みの記録は 1 回だけ使えなくなる（レビューの問い合わせは `input-changed`）。
+  `chk-run.sh` no longer refuses to record a passing check just because a generated directory (`dist/`, `.next/`, ...) contains a
+  symlink. Symlinks inside generated output are now treated like symlinks in inputs: if the target is inside the worktree, the link
+  target and its content go into the generated fingerprint and the result is recorded; links pointing outside the worktree (or into
+  `.git`) and dangling links still prevent recording, and the reason names the link.
+  After upgrading, run `chk-run.sh` once again: records made by the previous version no longer match (`input-changed`) because
+  `chk-run.sh` itself changed.
+
 ## [0.1.5] - 確認の記録を使えないレビューを起動の前に止める / Stop reviews that cannot reuse the check record
 
 ### 足したこと / Added

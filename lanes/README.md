@@ -313,6 +313,7 @@ zsh lanes/lanes-watch.sh --check
 - 台帳の仕組みより前の版のランチャが書いた記録は台帳に無いので、入力として数えます（同じ label を起動し直すと台帳に載ります）。
 - 限界: 台帳は `logs/` の中にあるので、worktree に書ける者（レーンの子・確認コマンド）が行を足せば、外す範囲を広げられます。入力の指紋は「うっかり古い成功を使い回す」のを防ぐ仕組みで、worktree に書ける者の意図的な細工までは防ぎません（確認コマンド自体を書き換えられるのと同じ前提です）。気になるときは `logs/.lanes-records` に起動した覚えの無い label・名前が無いかを見るか、`chk-run.sh --force` で回し直してください。
 - 生成物（git が無視している、作業ツリー直下の `dist/` `build/` `out/` `.next/` `.turbo/` `coverage/` `test-results/` `playwright-report/` の中と、`*.tsbuildinfo`）は確認コマンド自身が作り直すので、検証の前後の照合からは外し、使い回すときは今の出力が記録のときと同じであることを求めます。定義は `_common.sh` の `LANES_GENERATED_DIRS` / `LANES_GENERATED_SUFFIXES` の 1 か所で、`cleanup-after-merge.sh` も同じものを使います。
+- 生成物の中のリンク（ビルドが出力の中に依存へのリンクを作る構成。例: `.next/node_modules/<名前>` → `../../node_modules/<名前>`）は、入力のリンクと同じ基準で扱います。作業ツリーの中を指すなら、向き先と行き先の中身を生成物の指紋に入れて記録します（向き先か行き先の中身が変われば使い回しません）。作業ツリーの外（か `.git` の中）を指すリンク・行き先の無いリンク・行き先が普通のファイルでもフォルダでもないリンク（名前付きパイプなど）があるときは、中身を追い切れないので記録しません（`record=no reason=unresolvable（…リンク: <パス>）` にどのリンクかが出ます）。
 - 検証の前後で HEAD・tree・作業ツリー・`input_fp` を照合し、変化が無く通ったときだけ記録します。記録先は `CHK_CACHE`（既定 `$LANES_RUNS_ROOT/_chk-cache/passed.tsv`）。1 行は `tree・head・full・日時・worktree・input_fp・port・outdir` のタブ区切りです（port と outdir は問い合わせが同じ条件で照合し直すために残します）。
 - 終了コード: 0 = 通った・省略した / 1 = 確認コマンドの失敗・fetch / merge の失敗・検証中の入力の変化 / 2 = 使い方の誤り・確認コマンドが未設定。
 
@@ -510,7 +511,7 @@ LANES_LINT_STRICT=1 zsh selftest.sh --test tests/test-lint.sh   # shellcheck が
 | `test-review-dedup.sh` | レビューの省略・delta・未解決指摘の引き継ぎ・後回し票（Codex・Claude のレビューとも）・親の確認結果の使い回し |
 | `test-common-process.sh` / `test-common-security.sh` | 子プロセスの監督と回収、排他、秘密の扱い |
 | `test-gemini-launcher.sh` | Gemini レーンのサンドボックス・監査・救済 commit |
-| `test-chk-run.sh` / `test-chk-regressions.sh` | 最終確認の省略条件と入力照合・問い合わせ（`--query`）・通ったのに記録しないときの理由の表示（`record=no reason=…`） |
+| `test-chk-run.sh` / `test-chk-regressions.sh` | 最終確認の省略条件と入力照合・問い合わせ（`--query`）・通ったのに記録しないときの理由の表示（`record=no reason=…`）・依存と生成物の中のリンクの扱い（作業ツリーの中を指すなら記録し、外・行き先なしなら記録しない） |
 | `test-review-reuse-launch.sh` | `chk-run.sh` の直後に `detach-run.sh` 経由で本物の起動（dry-run でない）をしたレビューが、親の記録を使い回すこと（`node_modules`・`dist` のある worktree。Codex・Claude のレビューとも）。台帳（`logs/.lanes-records`）に載っている持ち主の記録は入力に数えず、台帳に無い名前（記録に似た名前の `logs/input.json` など）・`logs/` に置いたほかの入力・リンク・依存・生成物の変化では使い回さないこと。確認コマンドが `logs/input.json` を読む構成で中身を変えたら回し直すこと。台帳の書き方（リンクの台帳を辿らない）。台帳が FIFO（名前付きパイプ）でも、`chk-run.sh`・問い合わせ・レビューの起動・台帳へ載せる側が待たずに返ること。起動ログが FIFO・ハードリンク・symlink なら、`detach-run.sh` がその先へ書かずに起動を断ること。`python3` の入口が通るたびに環境変数を書き換える Mac（Xcode・pyenv の形を、偽の入口を PATH の先頭に置いて再現する）でも使い回すこと。`detach-run.sh` が呼び出し元の環境変数をそのまま子へ渡すこと。同じ確認（`--core`）を、そのまま回しても `chk-run.sh` の確認コマンドの中から回しても同じ結果になること（回す場所で緑と赤が変わらない） |
 | `test-review-require-checks.sh` | `LANES_REVIEW_REQUIRE_CHECKS=1` のとき、親の記録を使えない（`no-record` / `uncommitted` / `input-changed`）レビューを子の起動の前に止め、`.done` に理由と直し方を残すこと。既定（0）・記録を使えるとき・確認コマンドが未設定の案件・`LANES_REVIEW_REUSE_CHECKS=0`・`--allow-missing-checks` では起動すること（既定では証跡の文言も変わらない）。値が入力の指紋に入らないこと（起動のときだけ環境変数で渡しても記録が合う）。止まった後に `chk-run.sh` を通せば同じ label でやり直せること。前回 CLEAN の後で記録が合わなくなったら、同じ head でも前回の結果を使わずに止まること。止める・止めないの振り分け（関数単体）。入口経由・Claude のレビューでも同じこと |
 | `test-cleanup-safety.sh` / `test-cleanup-qa.sh` / `test-scratch-cleanup.sh` / `test-cleanup-pg-failures.sh` | 後片付けの停止条件・QA worktree・scratch・一時 PostgreSQL |

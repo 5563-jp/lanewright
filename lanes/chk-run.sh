@@ -569,33 +569,40 @@ def inside_worktree(real):
         cur = parent
     return True
 
-def record_symlink(path, label, visited=None):
-    shown = label.split(":", 1)[1] if label.startswith(("tracked:", "other:")) else label
+def record_symlink(path, label, visited=None, hh=None):
+    # hh: 書き込む先のハッシュ。既定は入力の指紋（h）。生成物の中のリンクは、生成物の指紋（確認の前後の入力の比較には入れない）へ書く
+    if hh is None:
+        hh = h
+    shown = label.split(":", 1)[1] if label.startswith(("tracked:", "other:", "generated:")) else label
     lst = os.lstat(path)
     target = os.readlink(path)
-    h.update(f"symlink:{label}:{lst.st_mode}:".encode("utf-8", errors="surrogateescape") + os.fsencode(target) + b"\0")
+    hh.update(f"symlink:{label}:{lst.st_mode}:".encode("utf-8", errors="surrogateescape") + os.fsencode(target) + b"\0")
     try:
         real = os.path.realpath(path)
         tst = os.stat(path)
     except OSError:
         # 行き先の無いリンクは中身を証明できないので再利用しない
         stop_reuse(f"行き先の無いリンク: {shown}")
-        h.update(f"symlink_target:{label}:missing\0".encode("utf-8", errors="surrogateescape"))
+        hh.update(f"symlink_target:{label}:missing\0".encode("utf-8", errors="surrogateescape"))
         return
     # 作業ツリーの外（共有依存など）を指すリンクは、外側の変化を追い切れないので再利用だけ止める
     if not inside_worktree(real):
         stop_reuse(f"作業ツリーの外（か .git の中）を指すリンク: {shown}")
-    h.update(f"symlink_real:{label}:".encode("utf-8", errors="surrogateescape") + os.fsencode(real) + b"\0")
+        # 生成物の中のリンクは、ここで終える（生成物の指紋は記録を使い回すときにしか使わず、使い回さないと決まった後は捨てる。
+        # 外の行き先を読みに行かない）。入力のリンクは、検証の前後の入力の比較に要るので、今までどおり行き先も読む
+        if hh is not h:
+            return
+    hh.update(f"symlink_real:{label}:".encode("utf-8", errors="surrogateescape") + os.fsencode(real) + b"\0")
     if os.path.isfile(real):
-        h.update(f"symlink_file:{label}:{tst.st_mode}:{file_token(real)}\0".encode("utf-8", errors="surrogateescape"))
+        hh.update(f"symlink_file:{label}:{tst.st_mode}:{file_token(real)}\0".encode("utf-8", errors="surrogateescape"))
     elif os.path.isdir(real):
         if visited is None:
             visited = set()
         if real in visited:
-            h.update(f"symlink_loop:{label}\0".encode("utf-8", errors="surrogateescape"))
+            hh.update(f"symlink_loop:{label}\0".encode("utf-8", errors="surrogateescape"))
             return
         visited = visited | {real}
-        h.update(f"symlink_dir:{label}:{tst.st_mode}\0".encode("utf-8", errors="surrogateescape"))
+        hh.update(f"symlink_dir:{label}:{tst.st_mode}\0".encode("utf-8", errors="surrogateescape"))
         entries = []
         for root_dir, dirs, files in os.walk(real):
             dirs.sort()
@@ -605,20 +612,24 @@ def record_symlink(path, label, visited=None):
             for d in dirs:
                 dp = os.path.join(root_dir, d)
                 if os.path.islink(dp):
-                    record_symlink(dp, f"{label}/{prefix_rel}{d}", visited)
+                    record_symlink(dp, f"{label}/{prefix_rel}{d}", visited, hh)
             for fname in files:
                 entries.append((f"{prefix_rel}{fname}", os.path.join(root_dir, fname)))
         full_hash_target = len(entries) <= 5000
         for sub_rel, fp in entries:
             if os.path.islink(fp):
-                record_symlink(fp, f"{label}/{sub_rel}", visited)
+                record_symlink(fp, f"{label}/{sub_rel}", visited, hh)
             elif os.path.isfile(fp):
                 fst = os.lstat(fp)
                 base = os.path.basename(sub_rel)
                 if full_hash_target or base in ("package.json", ".package-lock.json", ".modules.yaml", ".yarn-integrity"):
-                    h.update(f"symlink_entry:{label}/{sub_rel}:{fst.st_mode}:{file_token(fp)}\0".encode("utf-8", errors="surrogateescape"))
+                    hh.update(f"symlink_entry:{label}/{sub_rel}:{fst.st_mode}:{file_token(fp)}\0".encode("utf-8", errors="surrogateescape"))
                 else:
-                    h.update(f"symlink_stat:{label}/{sub_rel}:{fst.st_mode}:{fst.st_size}:{fst.st_mtime_ns}\0".encode("utf-8", errors="surrogateescape"))
+                    hh.update(f"symlink_stat:{label}/{sub_rel}:{fst.st_mode}:{fst.st_size}:{fst.st_mtime_ns}\0".encode("utf-8", errors="surrogateescape"))
+    elif hh is not h:
+        # 生成物の中のリンクの行き先が、普通のファイルでもフォルダでもない（名前付きパイプなど）。中身を照合できないので記録しない。
+        # 入力のリンクは今までどおり（向き先と実体の場所だけを指紋に入れる）
+        stop_reuse(f"行き先が普通のファイルでもフォルダでもないリンク: {shown}")
 
 def walk_plain_dir(dir_path):
     for root_dir, dirs, files in os.walk(dir_path):
@@ -777,8 +788,18 @@ try:
             generated_hash = hashlib.sha256()
             for rel in sorted(set(generated_files)):
                 path = os.path.join(wt, rel)
-                if os.path.islink(path) or not os.path.isfile(path):
-                    stop_reuse(f"生成物がリンクか、普通のファイルでない: {rel}")
+                if os.path.islink(path):
+                    # 生成物の中のリンク（ビルドが出力の中に依存へのリンクを作る構成。例: .next/node_modules/<名前> → ../../node_modules/<名前>）。
+                    # 入力のリンクと同じ基準で扱う: 作業ツリーの中を指すなら、向き先と行き先の中身を生成物の指紋へ入れて続ける。
+                    # 作業ツリーの外（か .git の中）を指す・行き先が無いなら、中身を追い切れないので記録しない（record_symlink が理由を残す）
+                    record_symlink(path, f"generated:{rel}", None, generated_hash)
+                    if not reusable:
+                        break
+                    continue
+                if not os.path.isfile(path):
+                    # ここへ来るのは、一覧を取った後で消えたか、フォルダなどに置き換わったときだけ
+                    # （git の未追跡の一覧は、名前付きパイプなどの特殊ファイルを出さない）
+                    stop_reuse(f"生成物が消えたか、普通のファイルでない: {rel}")
                     break
                 lst = os.lstat(path)
                 generated_hash.update(os.fsencode(rel) + b"\0" + f"{lst.st_mode}\0".encode("ascii") + bytes.fromhex(hash_file_hex(path)))
