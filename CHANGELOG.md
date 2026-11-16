@@ -6,6 +6,8 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+## [0.1.6] - 生成物の中のリンクがあっても確認の結果を記録する / Record checks when generated output contains symlinks
+
 ### 直したこと / Fixed
 - `chk-run.sh` が、生成物（`dist/`・`.next/` などの中）にリンクが 1 本でもあると、行き先に関係なく「通ったが記録しない」
   （`record=no reason=unresolvable（生成物がリンクか、普通のファイルでない）`）にしていた。ビルドが出力の中に依存へのリンクを作る構成
