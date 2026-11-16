@@ -6,6 +6,8 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+## [0.1.4] - モデルと effort を記録に残す / Record the model and effort of each lane
+
 ### 足したこと / Added
 - ランチャが、そのレーンで CLI に渡す設定のモデルと effort を記録に残すようにした。`logs/<label>.pid` に `model=` / `effort=` の行
   （空は、引数を付けずに CLI の既定に任せるという意味。起動の直後に書くので、CLI を起動する前に止まったレーンにも残る）、証跡 `logs/<label>.evidence.md` に「モデル: … / effort …」の行が入る
