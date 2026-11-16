@@ -6,6 +6,8 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+## [0.1.5] - 確認の記録を使えないレビューを起動の前に止める / Stop reviews that cannot reuse the check record
+
 ### 足したこと / Added
 - 設定キー `LANES_REVIEW_REQUIRE_CHECKS`（既定 `0` = 今までどおり）を足した。`1` にすると、レビューランチャ（`run-review.sh` /
   `run-codex-review.sh` / `run-claude-review.sh`）は、親の `chk-run.sh` の記録を使えないと分かったとき（`no-record` /
