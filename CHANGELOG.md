@@ -6,6 +6,25 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+## [0.1.5] - 確認の記録を使えないレビューを起動の前に止める / Stop reviews that cannot reuse the check record
+
+### 足したこと / Added
+- 設定キー `LANES_REVIEW_REQUIRE_CHECKS`（既定 `0` = 今までどおり）を足した。`1` にすると、レビューランチャ（`run-review.sh` /
+  `run-codex-review.sh` / `run-claude-review.sh`）は、親の `chk-run.sh` の記録を使えないと分かったとき（`no-record` /
+  `uncommitted` / `input-changed`）、レビューの子を起動せずに止める（`EXIT:2`。`.done` に `note=起動前の誤り` として理由と直し方が残る）。
+  確認コマンドが未設定の案件・`LANES_REVIEW_REUSE_CHECKS=0` のときは止めない。`chk-run.sh` が通っても `record=no` になる構成は、
+  記録が無いので `no-record` として止まる（`record=no` の理由を先に直す）。その起動だけ記録なしで回すなら
+  `--allow-missing-checks`（証跡に残る）。この値は `chk-run.sh` の入力の指紋に入らない（起動のときだけ環境変数で渡しても記録は合う）。
+  記録が無いまま起動したレビューは、読み取り専用の閉じ込めの中で必須検証を回せず、「必須検証が未完了」の指摘で終わることが多い。
+  この指摘は直しのレーンでは直せないので、周回だけが増えていた。`chk-run.sh` を必ず通す運用なら `1` を勧める。
+  **この版に上げた後は、`chk-run.sh` を 1 回通し直す。** `chk-run.sh` の中身が変わったので（入力の指紋に入る）、前の版で残した
+  確認済みの記録は 1 回だけ使えなくなる（レビューの問い合わせは `input-changed`。`1` にしていれば、通し直すまで止まる）。
+  New config key `LANES_REVIEW_REQUIRE_CHECKS` (default `0`, unchanged behavior). With `1`, review launchers stop before starting the
+  reviewer (`EXIT:2`, reason and fix recorded in `.done`) when the parent `chk-run.sh` record cannot be reused (`no-record` /
+  `uncommitted` / `input-changed`). Use `--allow-missing-checks` to run a single review without a record.
+  After upgrading, run `chk-run.sh` once again: records made by the previous version no longer match (`input-changed`) because
+  `chk-run.sh` itself changed.
+
 ## [0.1.4] - モデルと effort を記録に残す / Record the model and effort of each lane
 
 ### 足したこと / Added

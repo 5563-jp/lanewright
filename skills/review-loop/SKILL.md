@@ -21,6 +21,7 @@ description: >-
   - label は全構成で `rev-<票>-r<N>` の形で round 番号を入れる。比較の起点は統合先ブランチ（`LANES_BASE_BRANCH`、既定 `develop`）か `--base`。
   - **どの構成でも（Codex レビュー・Claude レビューとも）**: 既定は `--mode auto`。round 1 は `full`（全体差分レビュー）、前回 `CLEAN`（合格）の後は前回レビューした HEAD（現在のブランチ先端のコミット）からの `delta`（増分レビュー）、同一 HEAD は省略（`skip-same-head`）を自動で選ぶ。前回 `NEEDS_FIX` なら `full` に戻して未解決指摘を引き継ぐ。`--round N`・`--force` も使える。仕組みは `<kit>/lanes/review-dedup.zsh` の 1 つ。
   - **必須検証の使い回し**: 最終 HEAD で `<kit>/lanes/chk-run.sh` を通した後にレビューを回すと、ランチャが記録を問い合わせ（`chk-run.sh <worktree> --query`）、同じ中身で通っていればレビュアーに typecheck / lint / unit を回させない（`LANES_REVIEW_REUSE_CHECKS`。既定 1）。`chk-run.sh` とレビューは同じシェルから呼び、間に作業ツリーを変えない。確かめたことになるのは確認コマンドに入れた項目だけ。
+  - **記録が残ったことを確かめてからレビューを起動する**: `chk-run.sh` の出力に `recorded=` が出ていること（`record=no` なら理由を先に解決する）。記録が無いレビューは、読み取り専用の中で検証を回せず「必須検証が未完了」の指摘で終わり、直しのレーンでは直せない。`LANES_REVIEW_REQUIRE_CHECKS=1` の構成では、記録を使えないレビューは起動の前に止まる（`EXIT:2`。理由を解決して `chk-run.sh` からやり直す。回せない事情がある起動だけ `--allow-missing-checks`）
 - **共通ルール**:
   - 全レーンで MCP（AI ツールから外部サービスへ接続する仕組み）は使わない（ランチャが遮断する。プロンプトでも呼ばせない）。
   - 起動は `<kit>/lanes/detach-run.sh` 経由で行う（短いシェル＋`nohup` は使わない）。

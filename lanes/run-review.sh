@@ -16,16 +16,17 @@ LANES_DIR="${0:A:h}"
 typeset +x LANES_DEFER_CONFIG_ERROR=1
 source "$LANES_DIR/_common.sh"
 die() { lanes_die "$@"; }
-usage="使い方: run-review.sh <worktree> <prompt.md> [label] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--dry-run]"
+usage="使い方: run-review.sh <worktree> <prompt.md> [label] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--allow-missing-checks] [--dry-run]"
 (( $# >= 2 )) || die "$usage"
 wt="$1"; prompt="$2"; shift 2
-label=""; mode=""; base=""; round=""; force=0; dry=0
+label=""; mode=""; base=""; round=""; force=0; dry=0; allow_missing=0
 while (( $# )); do
   case "$1" in
     --mode) (( $# >= 2 )) || { lanes_defer_die "--mode に値が無い"; shift; continue; }; mode="$2"; shift 2 ;;
     --base) (( $# >= 2 )) || { lanes_defer_die "--base に値が無い"; shift; continue; }; base="$2"; shift 2 ;;
     --round) (( $# >= 2 )) || { lanes_defer_die "--round に値が無い"; shift; continue; }; round="$2"; shift 2 ;;
     --force) force=1; shift ;;
+    --allow-missing-checks) allow_missing=1; shift ;;
     --dry-run) dry=1; shift ;;
     --*) lanes_defer_die "不明なオプション: $1 / $usage"; lanes_unknown_opt_width "$@"; shift "$REPLY" ;;   # 値らしい次の語も読み捨てる（label と取り違えない）
     *) [[ -z "$label" ]] || die "label が 2 回: '$label' と '$1'"; label="$1"; shift ;;
@@ -45,6 +46,7 @@ args=("$wt" "$prompt")
 [[ -n "$base" ]] && args+=(--base "$base")
 [[ -n "$round" ]] && args+=(--round "$round")
 (( force )) && args+=(--force)
+(( allow_missing )) && args+=(--allow-missing-checks)
 (( dry )) && args+=(--dry-run)
 if [[ "$LANES_ROLE_REVIEW" == codex ]]; then target=run-codex-review.sh; else target=run-claude-review.sh; fi
 # 起動前点検は振り分け先が排他・終了記録（.pid / .done）を取った後に行う（失敗を今回の FAILED として残すため）

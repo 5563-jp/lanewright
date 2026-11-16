@@ -125,9 +125,11 @@ grep -E '^(lane|model|effort)=' <worktree>/logs/*.pid   # ファイル名（labe
 | キー | 既定 | 意味 |
 |---|---|---|
 | `LANES_REVIEW_REUSE_CHECKS` | `1` | `1` なら、レビューランチャ（`run-codex-review.sh` / `run-claude-review.sh`）が子を起動する前に `chk-run.sh <worktree> --query` で問い合わせ、親が同じ中身で確認コマンドを通した記録（`passed.tsv`）があれば、指示書に「必須検証（typecheck / lint / unit）は親が実施済み。回さないこと」と入れ、必須検証は済んだものとして判定する。`0` なら問い合わせず、毎回レビューの中で回させる。`0` か `1` 以外は `lanes.env` が止める（ランチャでは今回の失敗として `.done` に残す） |
+| `LANES_REVIEW_REQUIRE_CHECKS` | `0` | `1` なら、上の問い合わせで親の記録を使えないと分かったとき、レビューの子を起動せずに止める（`EXIT:2`。`.done` に `note=起動前の誤り: …` として理由と直し方が残り、`lanes-status.sh` は `FAILED` を返す）。止めるのは、問い合わせの理由が `no-record`（同じ中身の記録が無い）・`uncommitted`（未 commit の変更か未追跡のファイルがある）・`input-changed`（記録の後で依存・環境変数・確認コマンドなどが変わった）のとき。止まったら、表示された直し方のとおりに理由を解決して `chk-run.sh` を通し（出力に `recorded=` が出ること）、やり直す。**`chk-run.sh` が通っても `record=no` になる構成（確認コマンドを照合できない書き方・確認の途中で入力が変わる、など）は、記録が 1 件も無いので `no-record` として毎回止まる。** 通し直すだけでは直らないので、`record=no` の行に出る理由を先に直す。確認コマンドが未設定の案件（`no-check`）、`LANES_REVIEW_REUSE_CHECKS=0` のときは止めない。`logs/` がまだ無い worktree の初回の起動では `.done` を作らない（標準エラーと終了コード 2 だけ）。この値は `chk-run.sh` の入力の指紋に入らないので、起動のときだけ環境変数で渡しても記録は合う。その起動だけ記録なしで回すなら、ランチャに `--allow-missing-checks` を付ける（証跡に残る）。`0`（既定）なら今までどおり起動し、レビューの中で必須検証を回させる |
 
 - 使い回す条件は `chk-run.sh` が同じ確認を省く条件（`skip=same-tree`）と同じです（tree・入力の指紋・確認コマンドの指紋。緩めません）。入力の指紋には環境変数も入るので、親は `chk-run.sh` とレビューを同じ環境から呼びます。ランチャの記録（`logs/` の直下の `.pid`・ログ・証跡・起動ログなどのうち、ランチャが台帳 `logs/.lanes-records` に載せた持ち主のもの）は指紋に入らないので、`detach-run.sh` の起動ログを `logs/` に置いても、前のレーンの記録が残っていても使い回せます。`detach-run.sh` は呼び出し元の環境変数をそのまま起動するコマンドへ渡すので（`python3` の入口が書き換えた分は渡しません）、`detach-run.sh` を挟んで起動しても同じ環境として照合します。台帳に無い名前のファイル（確認コマンドが読む `logs/input.json` など）は、記録に似た名前でも入力として照合します（`lanes/README.md` の 7 章）。
 - `chk-run.sh` が通ったのに記録できなかったときは、`record=no reason=<uncommitted|unresolvable>（理由）` を出します。このときレビューの証跡は `no-record` になります。よくある原因は、`.lanes/check.sh` の `exec <コマンド>`（`exec` は「引数のコマンドを起動する包み」なので照合できません。`exec` を付けずに書きます）と、`logs/` が git に無視されていないことです。
+- **記録が無いままレビューを起動しても、たいてい「必須検証が未完了」の指摘で終わります。** レビューは既定で読み取り専用の閉じ込めの中で動くので、その中で単体テストなどを回そうとすると、一時ファイルを書けずに失敗します。この指摘は直しのレーンでは直せません（コードの欠陥ではないため）。`chk-run.sh` を必ず通す運用なら、`LANES_REVIEW_REQUIRE_CHECKS=1` にして、記録を使えないレビューを起動の前に止めてください。証跡の「必須検証:」の行が「親の chk-run の記録は使わない: …」なら、指摘を直しに行く前に、理由を解決して `chk-run.sh` とレビューをやり直します。
 - **何を確かめたことになるかは確認コマンドの中身次第です。** 確認コマンドに単体テストを入れていなければ、単体テストを確かめたことにはなりません。型検査・lint・単体テストをすべて `.lanes/check.sh` か `LANES_CHECK_CMD` に入れてください。
 - 使い回しの有無と使った記録（head・日時・確認コマンドの種類）はレビューの再利用の条件に入ります。記録が変わったら同じ HEAD でも前回の結果を使いません。証跡には `- 必須検証: 親の chk-run の記録を使用（head・日時・確認コマンド）` か、`- 必須検証: レビューの中で回すよう指示（親の chk-run の記録は使わない: <理由>）` が出ます。
 
@@ -158,10 +160,10 @@ LANES_SCREEN_QA_MAP="${LANES_SCREEN_QA_MAP:-owner/my-app|https://preview.example
 | `LANES_DOWNLOADS_SCAN` | `0` | `1` にすると、後片付けのときに `~/Downloads` に置き忘れたレビュー出力らしいファイルを一覧で知らせる（消さない） |
 | `LANES_DETACH_QA` | `0` | `1` にすると、`after-develop-merge.sh` が QA を `detach-run.sh` で呼び出し元から切り離して起動する（シェルが終わるとプロセスグループ（まとめて止められるプロセスの束）ごと止める Bot から呼ぶとき用）。`0` なら QA へそのまま切り替わる（exec） |
 
-数値のキー（`LANES_STALL_MINUTES` `LANES_NOTIFY` `LANES_PROMPT_MAX_BYTES` `LANES_DOWNLOADS_SCAN` `LANES_DETACH_QA` `LANES_REVIEW_REUSE_CHECKS` `LANES_CHECK_INTERVAL_MIN` `LANES_REVIEW_MAX_ROUNDS`）は、使う前に `lanes.env` が整数か確かめます。
+数値のキー（`LANES_STALL_MINUTES` `LANES_NOTIFY` `LANES_PROMPT_MAX_BYTES` `LANES_DOWNLOADS_SCAN` `LANES_DETACH_QA` `LANES_REVIEW_REUSE_CHECKS` `LANES_REVIEW_REQUIRE_CHECKS` `LANES_CHECK_INTERVAL_MIN` `LANES_REVIEW_MAX_ROUNDS`）は、使う前に `lanes.env` が整数か確かめます。
 数字以外（`10m`・`-1`・式など）なら、その値を計算に使わずに exit 2 で止まります（zsh の計算は値の中のコマンドを実行してしまうため）。
 ランチャ（`run-*.sh`）から起動したときは、その label の排他（同じ label の二重起動を防ぐ鍵）を取れれば今回の失敗（`EXIT:2`）を `.done` に残してから止まります。前回成功した label に誤った値で起動しても、`lanes-status.sh` は前回の `DONE` ではなく `FAILED` を返します。
-`LANES_NOTIFY` `LANES_DOWNLOADS_SCAN` `LANES_DETACH_QA` `LANES_REVIEW_REUSE_CHECKS` は `0` か `1`、`LANES_STALL_MINUTES` と `LANES_PROMPT_MAX_BYTES` は 1 以上、`LANES_CHECK_INTERVAL_MIN` は 1〜1440、`LANES_REVIEW_MAX_ROUNDS` は 1 以上です。
+`LANES_NOTIFY` `LANES_DOWNLOADS_SCAN` `LANES_DETACH_QA` `LANES_REVIEW_REUSE_CHECKS` `LANES_REVIEW_REQUIRE_CHECKS` は `0` か `1`、`LANES_STALL_MINUTES` と `LANES_PROMPT_MAX_BYTES` は 1 以上、`LANES_CHECK_INTERVAL_MIN` は 1〜1440、`LANES_REVIEW_MAX_ROUNDS` は 1 以上です。
 
 ## 設定の場所そのもの
 

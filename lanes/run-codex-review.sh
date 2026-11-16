@@ -1,6 +1,6 @@
 #!/bin/zsh -f
 # レビューランチャ（Codex の review）。codex のある構成（① full / ② claude-codex）のレビュー役。振り分けの入口は run-review.sh。使い方:
-#   run-codex-review.sh <worktree> <prompt.md> [label] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--dry-run]
+#   run-codex-review.sh <worktree> <prompt.md> [label] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--allow-missing-checks] [--dry-run]
 #   label は指示書の直後に置く（不明なオプションは止めて記録する。その後ろの - で始まらない語は、そのオプションの値として読み捨てる）
 # 同じ確認を繰り返さないため、既定は --mode auto。
 #   前回 CLEAN・条件一致・未保存変更なしの場合だけ delta / 同一結果を再利用。未解決指摘は full で引き継ぐ。
@@ -9,6 +9,8 @@
 # 必須検証の使い回し（LANES_REVIEW_REUSE_CHECKS=1 が既定）: 起動直後に chk-run.sh --query で問い合わせ、親が同じ中身で確認コマンドを
 #   通した記録があれば、指示書に「必須検証は回さない」と入れ、必須検証は済んだもの（成功確認 COMPLETE と同じ）として判定する。
 #   使い回しの有無と記録は再利用条件に入る。記録が無ければ今までどおりレビューの中で回させる
+#   LANES_REVIEW_REQUIRE_CHECKS=1 なら、記録を使えない（no-record / uncommitted / input-changed）ときは子を起動せずに止める（EXIT:2）。
+#   その起動だけ記録なしで回すなら --allow-missing-checks
 # codex の無い構成のレビューは run-claude-review.sh。構成（LANES_TOOLS）に codex が無ければ起動しない（exit 2）。
 # CODEX_MODEL / CODEX_EFFORT が空なら付けない。比較起点の既定は origin/<LANES_BASE_BRANCH>。
 # sandbox は CODEX_REVIEW_SANDBOX（既定 read-only）を明示し、子の git の通信（push・fetch）は止める。
@@ -17,11 +19,11 @@ set -euo pipefail
 typeset +x LANES_DEFER_CONFIG_ERROR=1
 LANES_DIR="${0:A:h}"; source "$LANES_DIR/_common.sh"
 
-usage="使い方: run-codex-review.sh <worktree> <prompt.md> [label] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--dry-run]"
+usage="使い方: run-codex-review.sh <worktree> <prompt.md> [label] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--allow-missing-checks] [--dry-run]"
 wt="${1:-}"; prompt="${2:-}"
 [[ -n "$wt" && -n "$prompt" ]] || lanes_die "$usage"
 shift 2
-label=""; mode="auto"; base=""; dry=0; round=0; force=0
+label=""; mode="auto"; base=""; dry=0; round=0; force=0; allow_missing=0
 while (( $# )); do
   case "$1" in
     --mode) (( $# >= 2 )) || { lanes_defer_die "--mode に値が無い"; shift; continue; }; mode="$2"; shift 2 ;;
@@ -29,6 +31,7 @@ while (( $# )); do
     --round) (( $# >= 2 )) || { lanes_defer_die "--round に値が無い"; shift; continue; }; round="$2"; shift 2 ;;
     --dry-run) dry=1; shift ;;
     --force) force=1; shift ;;
+    --allow-missing-checks) allow_missing=1; shift ;;
     --*) lanes_defer_die "不明なオプション: $1 / $usage"; lanes_unknown_opt_width "$@"; shift "$REPLY" ;;   # 値らしい次の語も読み捨てる（label と取り違えない）
     *) [[ -z "$label" ]] || lanes_die "label 二重: '$label' と '$1'"; label="$1"; shift ;;
   esac
@@ -52,6 +55,10 @@ checks_key="$(rvd_checks_key)"
 logdir="$wt/logs"
 # 系列の記録（再利用の記録・後回し票・「使い回し禁止」の印）は label では名前が決まらないので、ランチャの記録の台帳へ名前で載せる
 series="$(rvd_series "$label")"
+# 親の chk-run の記録を使えないときは、子を起動せずに止める（LANES_REVIEW_REQUIRE_CHECKS=1 のとき。review-dedup.zsh の rvd_checks_block）。
+# 排他を取る前に止め、ほかの起動前の誤りと同じく今回の失敗（EXIT:2・note=起動前の誤り）として .done に残す（lanes_die → lanes_record_early_failure。
+# logs/ がまだ無い初回は .done を作らない）。道具・指示書の点検（下の lanes_require_tool など）より先なので、そちらの誤りは chk-run.sh を通した後に出る
+if rvd_checks_block "$allow_missing"; then lanes_die "$RVD_CHECKS_BLOCK"; fi
 (( dry )) || lanes_mark_start "$logdir" "$label" codex-review "$wt" "file:.$series.review-state" "file:$series.followups.md" "file:.review-reuse-blocked"
 lanes_require_tool codex run-codex-review.sh
 lanes_entry_preflight

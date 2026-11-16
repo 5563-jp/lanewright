@@ -508,6 +508,32 @@ rvd_checks_reason_hint() {
   esac
   return 0
 }
+# 親の記録を使えないときに、レビューの子を起動せずに止めるか（LANES_REVIEW_REQUIRE_CHECKS=1 のとき）。rvd_checks_query の後に呼ぶ。
+# <allow>: 1 = この起動は --allow-missing-checks 付き（記録なしで回す）。
+# 0 を返したら止める（理由と直し方が RVD_CHECKS_BLOCK に入る）。1 を返したら今までどおり起動する。
+# 止めるのは chk-run.sh --query の理由が no-record / uncommitted / input-changed のとき（利用者が直してから chk-run.sh を通せば
+# 記録が残る・合う理由）。確認コマンドが未設定（no-check）・記録の後で照合できなくなった（unresolvable など）・問い合わせの失敗は
+# 止めない（止めない側に倒す）。
+# chk-run.sh が「通ったが記録しない」（record=no。確認コマンドを照合できない書き方・確認の途中で入力が変わる、など）構成は、
+# 記録が 1 件も無いので no-record として止まる。chk-run.sh を通し直すだけでは直らないので、文言で record=no の理由を先に直すよう案内する。
+# 経緯: 記録が無いまま起動したレビューは、読み取り専用の閉じ込めの中で必須検証を回せず、毎回「必須検証が未完了」の指摘で
+# 終わっていた（直しのレーンでは直せない指摘）
+rvd_checks_block() {
+  local allow="${1:-0}" reason="${RVD_CHECKS_REASON:-}" hint fix
+  typeset -g RVD_CHECKS_BLOCK="" RVD_CHECKS_ALLOWED=0
+  [[ "${LANES_REVIEW_REQUIRE_CHECKS:-0}" == 1 ]] || return 1
+  [[ "${RVD_CHECKS_REUSE:-}" == no ]] || return 1   # yes = 記録を使う / off = 問い合わせていない（LANES_REVIEW_REUSE_CHECKS=0）
+  case "$reason" in
+    no-record) fix="先に chk-run.sh <worktree> を通し、出力に recorded= が出たことを確かめてからやり直す（record=no と出るなら、そこに出る理由を先に直す。通し直すだけでは記録されない）" ;;
+    uncommitted) fix="変更を commit してから（ログなどの置き場は .gitignore に足してから）chk-run.sh <worktree> を通し、やり直す" ;;
+    input-changed) fix="chk-run.sh <worktree> を、レビューを起動するのと同じ環境から通し直してからやり直す" ;;
+    *) return 1 ;;
+  esac
+  if [[ "$allow" == 1 ]]; then RVD_CHECKS_ALLOWED=1; return 1; fi
+  hint="$(rvd_checks_reason_hint "$reason")"
+  RVD_CHECKS_BLOCK="親の chk-run の記録を使えないので、レビューを起動しない（${reason}${hint:+＝$hint}）。${fix}。この起動だけ記録なしで回すなら --allow-missing-checks を付ける（LANES_REVIEW_REQUIRE_CHECKS=1）"
+  return 0
+}
 # 証跡に出す 1 行。<skip>: 同じ head の前回の結果を使って、今回はレビューしていないとき
 # 使い回さないときは「回させた」（指示した）事実だけを書く。回せたかどうかは、証跡の「必須検証の成功確認」の行が示す
 rvd_checks_evidence() {
@@ -520,6 +546,7 @@ rvd_checks_evidence() {
   if [[ "${1:-}" == skip ]]; then
     print -r -- "- 必須検証: 今回は回していない（同じ head の前回の結果を使用。親の chk-run の記録は使わない: $reason）"
   else
+    [[ "${RVD_CHECKS_ALLOWED:-0}" != 1 ]] || reason+="。--allow-missing-checks で起動"
     print -r -- "- 必須検証: レビューの中で回すよう指示（親の chk-run の記録は使わない: $reason）。回せたかは「必須検証の成功確認」の行を見る"
   fi
 }

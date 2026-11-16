@@ -67,7 +67,7 @@ while [ $# -gt 0 ]; do
 done
 # レビューの入口・ランチャだけが持つ制御の値は、確認コマンドに渡さない（渡すと結果を変えられるのに、指紋の比較から外しているため）。
 # 回すときも問い合わせ（--query）のときも同じに消すので、指紋の比較から外しても確認の結果とずれない
-unset LANES_ENTRY_PREFLIGHT LANES_REVIEW_REUSE_CHECKS
+unset LANES_ENTRY_PREFLIGHT LANES_REVIEW_REUSE_CHECKS LANES_REVIEW_REQUIRE_CHECKS
 cache=${CHK_CACHE:-${LANES_RUNS_ROOT:-$HOME/dev/_runs}/_chk-cache/passed.tsv}
 lanes_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 2
 if [ "$query" = 1 ]; then
@@ -229,7 +229,7 @@ IGNORE_ENV = {"PWD", "CHK_CHECK_SRC", "OLDPWD", "SHLVL", "_", "RANDOM", "SECONDS
               "LANES_PROCESS_TOKEN", "TERM_SESSION_ID", "ITERM_SESSION_ID", "SECURITYSESSIONID",
               "SSH_AUTH_SOCK", "SSH_AGENT_PID", "SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY", "TMUX_PANE", "WINDOWID",
               # レビューの入口・ランチャだけが持つ制御の値。chk-run.sh の冒頭で消すので確認コマンドには届かない（念のため比較からも外す）
-              "LANES_ENTRY_PREFLIGHT", "LANES_REVIEW_REUSE_CHECKS"}
+              "LANES_ENTRY_PREFLIGHT", "LANES_REVIEW_REUSE_CHECKS", "LANES_REVIEW_REQUIRE_CHECKS"}
 for k in sorted(os.environ.keys()):
     if k in IGNORE_ENV:
         continue

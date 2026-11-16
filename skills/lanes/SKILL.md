@@ -94,6 +94,7 @@ zsh <kit>/lanes/detach-run.sh <launch.log> zsh <kit>/lanes/run-review.sh <worktr
   - round 2 までは P2 も `NEEDS_FIX` にする。round 3 以降は P0/P1 のみ停止とし、P2/P3 は `logs/<series>.followups.md` に保存して `VERDICT: CLEAN`（`GATE: MERGE_WITH_FOLLOWUP`）で通す。残件は後回し票に起票して別レーンで直す。
   - 統合先の枝が無い repo では `--base <sha|branch>` を渡す（commit に解決できるもの）。
 - **必須検証の使い回し（どの構成でも）**: 最終 HEAD で `<kit>/lanes/chk-run.sh` を通した後のレビューは、ランチャが `chk-run.sh <worktree> --query` で記録を問い合わせ、同じ中身（tree・入力の指紋・確認コマンドの指紋）で通っていれば、レビュアーに typecheck / lint / unit を回させず済んだものとして判定する（`LANES_REVIEW_REUSE_CHECKS`。既定 1、0 で問い合わせない）。`chk-run.sh` とレビューは同じシェルから呼び、その間に作業ツリーを変えない。確かめたことになるのは確認コマンドに入れた項目だけ。
+- **記録が残ったことを確かめてからレビューを起動する**: `chk-run.sh` の出力に `recorded=` が出ていること（`record=no` なら理由を先に解決する）。記録が無いレビューは、読み取り専用の中で検証を回せず「必須検証が未完了」の指摘で終わり、直しのレーンでは直せない。`LANES_REVIEW_REQUIRE_CHECKS=1` の構成では、記録を使えないレビューは起動の前に止まる（`EXIT:2`。理由を解決して `chk-run.sh` からやり直す。回せない事情がある起動だけ `--allow-missing-checks`）
 - **検証とビルドの分担**: レビュー段階・修正レーン・マージ後 QA では build を回さず（`CHECKS: typecheck=PASS lint=PASS unit=PASS build=SKIP`。`unit` は単体テスト。親の chk-run の記録を使い回すレビューでは成功行は要らない）、`LANES_BASE_BRANCH` へ入れる直前の最終 HEAD で `<kit>/lanes/chk-run.sh` を 1 回（同一 git tree（ファイル構成と中身の識別子）・同一 `input_fp`（環境や依存の指紋データ）なら自動省略）と CI で担保する。
   - レビューで省略してよいのは build だけ。E2E（画面を通した通しのテスト）は、full ではプロジェクトにあれば `CI=1` で自前のサーバーを立てて完走させ、delta では差分が画面・API に触れたときだけ該当の spec を回す（できなかったときは事実の理由と未実施の範囲を書く）。レビュー用テンプレート `<kit>/lanes/templates/claude-review-{full,delta}.md` と同じ。
 
