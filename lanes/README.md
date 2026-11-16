@@ -322,7 +322,7 @@ zsh lanes/lanes-watch.sh --check
 - 使い回せる: 1 行目 `reuse=yes`、続けて `head=<記録の head 12 桁>` / `recorded=<記録の日時>` / `check=<.lanes/check.sh か LANES_CHECK_CMD>` を出して exit 0。
 - 使えない: `reuse=no reason=<理由>` を出して exit 1。理由は `no-check`（確認コマンドが未設定）/ `no-record`（同じ tree の記録が無い。`chk-run.sh` をまだ通していないか、通ったが記録できなかった。後者は `chk-run.sh` が `record=no reason=…` の行に理由を出している）/ `cache-link`（記録がリンク）/ `uncommitted`（未 commit の変更・変更検知を省く設定）/ `unresolvable`（確認コマンドや依存を確実に解決できない）/ `input-changed`（確認コマンド・環境変数・依存・ランチャの記録でない無視対象のファイルなどが記録と違う）/ `state-error`。
 - 使い方の誤り（worktree が無い・git の作業ツリーでない・余計な引数）は exit 2。
-- 入力の指紋には環境変数が入るので、`chk-run.sh` を回したのと同じ環境から呼びます。レビューの入口・ランチャだけが持つ制御の値（`LANES_ENTRY_PREFLIGHT`・`LANES_REVIEW_REUSE_CHECKS`）は指紋に入れません。
+- 入力の指紋には環境変数が入るので、`chk-run.sh` を回したのと同じ環境から呼びます。レビューの入口・ランチャだけが持つ制御の値（`LANES_ENTRY_PREFLIGHT`・`LANES_REVIEW_REUSE_CHECKS`・`LANES_REVIEW_REQUIRE_CHECKS`）は指紋に入れません。
 
 ## 8. 全レーンで MCP を使わない
 
@@ -464,8 +464,9 @@ zsh lanes/prepare-screen-qa.sh <checkout> [label] [--url <preview-url>] [--viewp
 | `LANES_STALL_MINUTES` | `10` | STALLED とみなす無出力の分数 |
 | `LANES_PROMPT_MAX_BYTES` | `200000` | プロンプトの上限（巨大な diff を埋め込む事故の検出） |
 | `LANES_REVIEW_REUSE_CHECKS` | `1` | 1 ならレビューランチャが `chk-run.sh --query` で問い合わせ、親の確認済みの記録があれば必須検証を回させない（6 章「必須検証の使い回し」）。0 なら問い合わせない |
+| `LANES_REVIEW_REQUIRE_CHECKS` | `0` | 1 なら、親の確認済みの記録を使えない（`no-record` / `uncommitted` / `input-changed`）とき、レビューの子を起動せずに止める（`EXIT:2`・`note=起動前の誤り`）。その起動だけ記録なしで回すなら `--allow-missing-checks`。0 なら今までどおり起動する（`docs/config.md`） |
 
-数値のキー（`LANES_STALL_MINUTES` `LANES_NOTIFY` `LANES_PROMPT_MAX_BYTES` `LANES_DOWNLOADS_SCAN` `LANES_DETACH_QA` `LANES_REVIEW_REUSE_CHECKS`）は `lanes.env` が整数か確かめ、数字以外なら計算に使わずに exit 2 で止まります（0 / 1 のキーと 1 以上のキーの別は `docs/config.md`）。ランチャ（`run-*.sh`）では、その label の排他を取れれば今回の失敗（`EXIT:2`・`note=起動前の誤り: 設定の誤り: ...`）を `.done` に残すので、前回成功した label でも `lanes-status.sh` は `FAILED` を返します。
+数値のキー（`LANES_STALL_MINUTES` `LANES_NOTIFY` `LANES_PROMPT_MAX_BYTES` `LANES_DOWNLOADS_SCAN` `LANES_DETACH_QA` `LANES_REVIEW_REUSE_CHECKS` `LANES_REVIEW_REQUIRE_CHECKS`）は `lanes.env` が整数か確かめ、数字以外なら計算に使わずに exit 2 で止まります（0 / 1 のキーと 1 以上のキーの別は `docs/config.md`）。ランチャ（`run-*.sh`）では、その label の排他を取れれば今回の失敗（`EXIT:2`・`note=起動前の誤り: 設定の誤り: ...`）を `.done` に残すので、前回成功した label でも `lanes-status.sh` は `FAILED` を返します。
 
 Python の部品（`lanes_monitor.py`・`vercel_autoredeploy.py` など）は設定ファイルを直接読まず、環境変数を読みます。`lanes.env` が `LANES_*` を export し、
 `lanes-monitor.sh`（`_common.sh` 経由）と `lanes-watch.sh` が `lanes.env` を読んでから Python を起動するので、設定ファイルの値も届きます。bash の `chk-run.sh` は最初の 1 回だけ zsh で `lanes.env` を読んでから自分を起動し直します。
@@ -511,6 +512,7 @@ LANES_LINT_STRICT=1 zsh selftest.sh --test tests/test-lint.sh   # shellcheck が
 | `test-gemini-launcher.sh` | Gemini レーンのサンドボックス・監査・救済 commit |
 | `test-chk-run.sh` / `test-chk-regressions.sh` | 最終確認の省略条件と入力照合・問い合わせ（`--query`）・通ったのに記録しないときの理由の表示（`record=no reason=…`） |
 | `test-review-reuse-launch.sh` | `chk-run.sh` の直後に `detach-run.sh` 経由で本物の起動（dry-run でない）をしたレビューが、親の記録を使い回すこと（`node_modules`・`dist` のある worktree。Codex・Claude のレビューとも）。台帳（`logs/.lanes-records`）に載っている持ち主の記録は入力に数えず、台帳に無い名前（記録に似た名前の `logs/input.json` など）・`logs/` に置いたほかの入力・リンク・依存・生成物の変化では使い回さないこと。確認コマンドが `logs/input.json` を読む構成で中身を変えたら回し直すこと。台帳の書き方（リンクの台帳を辿らない）。台帳が FIFO（名前付きパイプ）でも、`chk-run.sh`・問い合わせ・レビューの起動・台帳へ載せる側が待たずに返ること。起動ログが FIFO・ハードリンク・symlink なら、`detach-run.sh` がその先へ書かずに起動を断ること。`python3` の入口が通るたびに環境変数を書き換える Mac（Xcode・pyenv の形を、偽の入口を PATH の先頭に置いて再現する）でも使い回すこと。`detach-run.sh` が呼び出し元の環境変数をそのまま子へ渡すこと。同じ確認（`--core`）を、そのまま回しても `chk-run.sh` の確認コマンドの中から回しても同じ結果になること（回す場所で緑と赤が変わらない） |
+| `test-review-require-checks.sh` | `LANES_REVIEW_REQUIRE_CHECKS=1` のとき、親の記録を使えない（`no-record` / `uncommitted` / `input-changed`）レビューを子の起動の前に止め、`.done` に理由と直し方を残すこと。既定（0）・記録を使えるとき・確認コマンドが未設定の案件・`LANES_REVIEW_REUSE_CHECKS=0`・`--allow-missing-checks` では起動すること（既定では証跡の文言も変わらない）。値が入力の指紋に入らないこと（起動のときだけ環境変数で渡しても記録が合う）。止まった後に `chk-run.sh` を通せば同じ label でやり直せること。前回 CLEAN の後で記録が合わなくなったら、同じ head でも前回の結果を使わずに止まること。止める・止めないの振り分け（関数単体）。入口経由・Claude のレビューでも同じこと |
 | `test-cleanup-safety.sh` / `test-cleanup-qa.sh` / `test-scratch-cleanup.sh` / `test-cleanup-pg-failures.sh` | 後片付けの停止条件・QA worktree・scratch・一時 PostgreSQL |
 | `test-lanes-monitor.sh` / `test-lanes-watch.sh` | 巡回とウォッチ |
 | `test-prepare-screen-qa.sh` | 画面 QA の準備 |

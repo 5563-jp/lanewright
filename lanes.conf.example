@@ -90,6 +90,12 @@ LANES_VERCEL_SCOPE="${LANES_VERCEL_SCOPE:-}"
 # 1 なら、レビューの前に chk-run.sh の確認済みの記録を問い合わせ、親が同じ中身で確認コマンドを通していれば
 # レビューの中で typecheck / lint / unit を回させない（確認コマンドに入れた項目だけが確かめたことになる）。0 なら毎回レビューの中で回させる
 # LANES_REVIEW_REUSE_CHECKS="${LANES_REVIEW_REUSE_CHECKS:-1}"
+# 1 なら、上の問い合わせで記録を使えないと分かったとき（まだ通していない・未 commit の変更がある・記録の後で入力が変わった）、
+# レビューを起動せずに止める（先に chk-run.sh を通す。chk-run.sh が通っても record=no で記録されない構成は毎回止まるので、
+# その行に出る理由を先に直す。その起動だけ記録なしで回すなら --allow-missing-checks）。
+# 0（既定）なら今までどおり、レビューの中で必須検証を回させる。レビューを読み取り専用で回す構成（既定）では回せないことが多いので、
+# chk-run.sh を必ず通す運用なら 1 を勧める
+# LANES_REVIEW_REQUIRE_CHECKS="${LANES_REVIEW_REQUIRE_CHECKS:-0}"
 
 # ---- そのほか ----
 # 1 なら後片付けのとき ~/Downloads に置き忘れたレビュー出力を警告する

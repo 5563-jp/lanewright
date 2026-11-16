@@ -109,11 +109,11 @@ has  "問い合わせ: 確認コマンドの種類"    "$o" '^check=LANES_CHECK_
 [ ! -e "$qmark" ] && ok "問い合わせ: 確認コマンドを実行しない" || ng "問い合わせ: 確認コマンドを実行した"
 [ "$(wc -l < "$CHK_CACHE")" = "$lines_before" ] && ok "問い合わせ: 記録を書かない" || ng "問い合わせ: 記録を書いた"
 [ "$(ls -la "$real_root/out")" = "$out_before" ] && ok "問い合わせ: 出力先を書き換えない" || ng "問い合わせ: 出力先を書き換えた"
-o=$(LANES_ENTRY_PREFLIGHT=1 LANES_REVIEW_REUSE_CHECKS=1 q); has "問い合わせ: 入口・ランチャの制御の値は指紋に入れない" "$o" '^reuse=yes$'
+o=$(LANES_ENTRY_PREFLIGHT=1 LANES_REVIEW_REUSE_CHECKS=1 LANES_REVIEW_REQUIRE_CHECKS=1 q); has "問い合わせ: 入口・ランチャの制御の値は指紋に入れない" "$o" '^reuse=yes$'
 has  "問い合わせ: 照合した入力の指紋を出す" "$o" '^fp=.+'
 # 指紋から外す制御の値は、確認コマンドにも届かない（届くと、値で結果を変えられるのに「同じ」と扱ってしまう）
-o=$(LANES_REVIEW_REUSE_CHECKS=1 LANES_ENTRY_PREFLIGHT=1 LANES_CHECK_CMD='test -z "${LANES_REVIEW_REUSE_CHECKS:-}${LANES_ENTRY_PREFLIGHT:-}"' run --force); rc=$?
-[ $rc = 0 ] && ok "制御の値（LANES_REVIEW_REUSE_CHECKS・LANES_ENTRY_PREFLIGHT）は確認コマンドに渡さない" || ng "制御の値が確認コマンドに届いた（exit $rc）"
+o=$(LANES_REVIEW_REUSE_CHECKS=1 LANES_REVIEW_REQUIRE_CHECKS=1 LANES_ENTRY_PREFLIGHT=1 LANES_CHECK_CMD='test -z "${LANES_REVIEW_REUSE_CHECKS:-}${LANES_REVIEW_REQUIRE_CHECKS:-}${LANES_ENTRY_PREFLIGHT:-}"' run --force); rc=$?
+[ $rc = 0 ] && ok "制御の値（LANES_REVIEW_REUSE_CHECKS・LANES_REVIEW_REQUIRE_CHECKS・LANES_ENTRY_PREFLIGHT）は確認コマンドに渡さない" || ng "制御の値が確認コマンドに届いた（exit $rc）"
 o=$(LANES_CHECK_CMD="touch $qmark.b" q); rc=$?
 has  "問い合わせ: 確認コマンドの変更で no" "$o" '^reuse=no reason=input-changed$'; [ $rc = 1 ] && ok "問い合わせ: no は exit 1" || ng "問い合わせ: no なのに exit $rc"
 o=$(EXTRA_FOR_TEST=1 q); has "問い合わせ: 環境変数の違いで no" "$o" '^reuse=no reason=input-changed$'
