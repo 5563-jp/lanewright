@@ -347,6 +347,116 @@ if [ -e .GIT ]; then
   hasnt "大文字違いの .GIT を指すリンクも記録しない" "$o" '^recorded='
   rm node_modules/.bin/githead
 fi
+# ---- 追加テスト 5d: 生成物の中のリンク（ビルドが出力の中に依存へのリンクを作る構成。例: .next/node_modules/<名前> → ../../node_modules/<名前>）----
+# 経緯: 生成物の中にリンクが 1 本でもあると、行き先に関係なく「通ったが記録しない」になり、レビューが親の記録を一度も使えなかった。
+# 入力のリンク（5c）と同じ基準にする: 作業ツリーの中を指すなら記録して使い回す。外を指す・行き先が無いなら記録しない
+echo "dist/" >> .git/info/exclude
+mkdir -p dist/node_modules
+echo built > dist/a.js
+ln -s ../../node_modules/fake-builder dist/node_modules/fake-builder-0a1b2c   # 中を指すフォルダのリンク（依存へ）
+ln -s a.js dist/b.js                                                          # 中を指すファイルのリンク（生成物どうし）
+o=$(run --force)
+has "生成物の中のリンクが作業ツリーの中を指すなら記録する" "$o" '^recorded=.*full'
+hasnt "生成物の中のリンクが中を指すなら「通ったが記録しない」を出さない" "$o" '^record=no'
+o=$(run)
+has "生成物の中のリンクがあっても同じ tree で使い回す" "$o" '^skip=same-tree'
+qo=$(q 2>/dev/null)
+has "生成物の中のリンクがあっても問い合わせで使い回せる" "$qo" '^reuse=yes'
+# リンクの向き先が変わったら、前の記録は使わない（生成物の指紋に向き先が入っている）
+rm dist/node_modules/fake-builder-0a1b2c; ln -s ../../node_modules/pkg dist/node_modules/fake-builder-0a1b2c
+o=$(run)
+hasnt "生成物の中のリンクの向き先が変わったら省略しない" "$o" '^skip=same-tree'
+qo=$(q 2>/dev/null)
+has "向き先を変えた後の中身で記録し直せば、問い合わせで使い回せる" "$qo" '^reuse=yes'
+o=$(run)
+has "向き先を変えた後の中身で記録し直せば、また使い回す" "$o" '^skip=same-tree'
+# リンクの行き先の中身が変わったら使い回さない（行き先は入力でもある）
+echo "PKG_V3" > packages/pkg/index.js
+qo=$(q 2>/dev/null)
+has "生成物の中のリンクの行き先の中身が変わったら、問い合わせは reuse=no" "$qo" '^reuse=no'
+o=$(run)
+hasnt "生成物の中のリンクの行き先の中身が変わったら省略しない" "$o" '^skip=same-tree'
+# 作業ツリーの外を指すリンクは記録しない（理由にどのリンクかを出す）
+ln -s "$outside_dir/cli.sh" dist/outside-link
+o=$(run --force)
+has "生成物の中に外を指すリンクがあっても確認自体は通る" "$o" '^check=0（'
+hasnt "生成物の中に外を指すリンクがあれば記録しない" "$o" '^recorded='
+has  "生成物の中の外を指すリンクで記録しない理由を出す" "$o" '^record=no reason=unresolvable（.*作業ツリーの外（か \.git の中）を指すリンク: dist/outside-link'
+qo=$(q 2>/dev/null)
+has "生成物の中に外を指すリンクがあれば問い合わせは reuse=no" "$qo" '^reuse=no'
+rm dist/outside-link
+# 行き先の無いリンクも記録しない
+ln -s ./nowhere/missing dist/dangling
+o=$(run --force)
+has "生成物の中に行き先の無いリンクがあっても確認自体は通る" "$o" '^check=0（'
+hasnt "生成物の中に行き先の無いリンクがあれば記録しない" "$o" '^recorded='
+has  "生成物の中の行き先の無いリンクで記録しない理由を出す" "$o" '^record=no reason=unresolvable（.*行き先の無いリンク: dist/dangling'
+rm dist/dangling
+# .git の中を指すリンクも記録しない
+ln -s ../.git/HEAD dist/githead
+o=$(run --force)
+has "生成物の中に .git の中を指すリンクがあっても確認自体は通る" "$o" '^check=0（'
+hasnt "生成物の中に .git の中を指すリンクがあれば記録しない" "$o" '^recorded='
+has  "生成物の中の .git を指すリンクで記録しない理由を出す" "$o" '^record=no reason=unresolvable（.*作業ツリーの外（か \.git の中）を指すリンク: dist/githead'
+rm dist/githead
+# 作業ツリーそのもの（親）を指すリンクは「外」の扱いで記録しない（作業ツリー全体を読みに行かずに終わる）
+ln -s .. dist/self
+o=$(run --force)
+has "生成物の中に作業ツリー自身を指すリンクがあっても確認自体は通る" "$o" '^check=0（'
+hasnt "生成物の中に作業ツリー自身を指すリンクがあれば記録しない" "$o" '^recorded='
+has  "作業ツリー自身を指すリンクで記録しない理由を出す" "$o" '^record=no reason=unresolvable（.*作業ツリーの外（か \.git の中）を指すリンク: dist/self'
+rm dist/self
+# 自分のフォルダを指すリンク（輪になる形）は、辿り続けずに記録する
+ln -s . dist/loop
+o=$(run --force)
+has "生成物の中に自分のフォルダを指すリンクがあっても止まらずに記録する" "$o" '^recorded=.*full'
+o=$(run)
+has "自分のフォルダを指すリンクがあっても同じ tree で使い回す" "$o" '^skip=same-tree'
+rm dist/loop
+# スコープ付きの依存の深さ（例: .next/node_modules/@scope/<名前> → ../../../node_modules/@scope/<名前>）
+mkdir -p node_modules/@scope/dep dist/node_modules/@scope
+echo '{"name":"@scope/dep","version":"1.0.0"}' > node_modules/@scope/dep/package.json
+ln -s ../../../node_modules/@scope/dep dist/node_modules/@scope/dep-9f8e7d
+o=$(run --force)
+has "スコープ付きの依存を指す生成物の中のリンクでも記録する" "$o" '^recorded=.*full'
+# 行き先が、入力の指紋にも普通の生成物にも入らない場所（台帳に載ったランチャの記録）のとき: 行き先の中身は生成物の指紋に入る
+# （入っていないと、行き先の中身が変わっても前の記録を使い回してしまう）
+echo "logs/" >> .git/info/exclude
+mkdir -p logs
+printf 'label:lane5d\n' > logs/.lanes-records
+echo "LOG_V1" > logs/lane5d.log
+# 先に、リンクが無ければこの記録は入力に数えないことを確かめる（ここが崩れると、下の確認は入力の指紋の変化で通ってしまい、
+# 行き先の中身が生成物の指紋に入っていることを確かめたことにならない）
+o=$(run --force)
+has "台帳に載ったランチャの記録があっても記録する" "$o" '^recorded=.*full'
+echo "LOG_V0" > logs/lane5d.log
+qo=$(q 2>/dev/null)
+has "リンクが無ければ、ランチャの記録の中身が変わっても使い回せる（入力に数えない）" "$qo" '^reuse=yes'
+echo "LOG_V1" > logs/lane5d.log
+ln -s ../logs/lane5d.log dist/loglink
+o=$(run --force)
+has "ランチャの記録を指す生成物の中のリンクでも記録する" "$o" '^recorded=.*full'
+qo=$(q 2>/dev/null)
+has "ランチャの記録を指すリンクがあっても、中身が同じなら使い回せる" "$qo" '^reuse=yes'
+echo "LOG_V2" > logs/lane5d.log
+qo=$(q 2>/dev/null)
+has "リンクの行き先（入力にも生成物にも入らない場所）の中身が変わったら、問い合わせは reuse=no" "$qo" '^reuse=no'
+o=$(run)
+hasnt "リンクの行き先（入力にも生成物にも入らない場所）の中身が変わったら省略しない" "$o" '^skip=same-tree'
+rm dist/loglink; rm -rf logs
+# 行き先が普通のファイルでもフォルダでもないリンク（名前付きパイプなど）は記録しない
+if mkfifo packages/pkg/pipe 2>/dev/null; then
+  ln -s ../packages/pkg/pipe dist/pipelink
+  o=$(run --force)
+  has "生成物の中のリンクの行き先が名前付きパイプでも確認自体は通る" "$o" '^check=0（'
+  hasnt "生成物の中のリンクの行き先が普通のファイルでもフォルダでもなければ記録しない" "$o" '^recorded='
+  has  "行き先が普通のファイルでもフォルダでもないリンクで記録しない理由を出す" "$o" '^record=no reason=unresolvable（.*行き先が普通のファイルでもフォルダでもないリンク: dist/pipelink'
+  rm -f dist/pipelink packages/pkg/pipe
+fi
+# 片付けた後は、また記録できる
+o=$(run --force)
+has "駄目なリンクを消したら、また記録できる" "$o" '^recorded=.*full'
+rm -rf dist
 rm -rf node_modules packages "$outside_dir"
 
 # ---- 追加テスト 6: prepare-screen-qa.sh の URL 認証情報秘匿・IPv6 角括弧保持・ラベル検証 ----
