@@ -6,6 +6,17 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+### 足したこと / Added
+- ランチャが、そのレーンで CLI に渡す設定のモデルと effort を記録に残すようにした。`logs/<label>.pid` に `model=` / `effort=` の行
+  （空は、引数を付けずに CLI の既定に任せるという意味。起動の直後に書くので、CLI を起動する前に止まったレーンにも残る）、証跡 `logs/<label>.evidence.md` に「モデル: … / effort …」の行が入る
+  （Gemini 実装の証跡には前からあり、Claude 実装・Codex 実装・Codex レビュー・Claude レビュー・QA を同じ形に揃えた）。
+  起動ごとに effort やモデルを変えて試したとき、どの設定で回したレーンかを後から集計して比べられる。
+  `.pid` を読む側（`lanes-status.sh`・監視）は行の名前で拾うので、動きは変わらない。
+  起動ごとに effort を変える設定の書き方を `docs/config.md` に足した。
+  Launchers now record the model and effort configured for the lane: `model=` / `effort=` lines in `logs/<label>.pid`
+  (empty means the flag is omitted and the CLI default is used; written at launch, so it is also present for lanes that stopped before starting the CLI) and a "モデル: … / effort …" line in `logs/<label>.evidence.md`.
+  This lets you compare lanes run with different settings afterwards. Readers of `.pid` look fields up by name, so behavior is unchanged.
+
 ## [0.1.3] - detach-run.sh 経由でも記録を使い回す直し / Reuse records through detach-run.sh
 
 ### 直したこと / Fixed

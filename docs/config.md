@@ -71,8 +71,34 @@ CLAUDE_EFFORT= zsh <kit>/lanes/run-impl.sh <worktree> <prompt.md> my-label
   ```
   固定すると、その場だけの上書き（`CLAUDE_EFFORT=low zsh run-impl.sh ...`）は効かなくなります。その場だけ変えたいときは、別の設定ファイルを
   `LANES_CONF=<ファイル>` で指してください。
+- 固定したまま、起動ごとに変えられるようにもできます。アプリが持ち込まない自分用の名前の変数だけを受ける書き方にします
+  （設定ファイルはシェルとして読まれるので、変数の名前は自由です。キットが使う名前と重ならないものにしてください）:
+  ```sh
+  CLAUDE_EFFORT="${MY_CLAUDE_EFFORT:-xhigh}"   # 渡さなければ xhigh。CLAUDE_EFFORT という名前の環境変数は受けない
+  ```
+  ```sh
+  MY_CLAUDE_EFFORT=high zsh <kit>/lanes/run-impl.sh <worktree> <プロンプト> <label>   # この起動だけ high
+  ```
+  軽い修正の回だけ effort を下げる、といった使い分けができます。
+  レビュー（`run-review.sh`）に付けるときは、`chk-run.sh` にも同じ値を付けてください（入力の指紋に環境変数が入るので、
+  片方だけに付けると、レビューが `chk-run.sh` の記録を使い回さずに必須検証を回し直します）。実装（`run-impl.sh`）だけに付ける分には関係ありません。
 - 固定せずにその起動だけ環境変数を外すなら、`env -u CLAUDE_EFFORT zsh <kit>/lanes/run-impl.sh ...` のように起動します。
   `chk-run.sh` とレビューは同じ環境から呼ぶ必要があるので（入力の指紋に環境変数が入る）、外すなら両方とも同じように外します。
+
+### どの設定で回したかを後から確かめる
+
+ランチャは、そのレーンで CLI に渡す設定のモデルと effort を記録に残します。起動ごとに変えたときも、後から集計して比べられます。
+
+- `logs/<label>.pid` の `model=` と `effort=`（空は、引数を付けずに CLI の既定に任せるという意味）
+- 証跡 `logs/<label>.evidence.md` の「モデル: … / effort …」の行（空は「(CLI の既定)」と書く）
+
+```sh
+grep -E '^(lane|model|effort)=' <worktree>/logs/*.pid   # ファイル名（label）付きで出る。回転済みの <label>.prev-<日時>.pid も入る
+```
+
+- `.pid` は起動の直後に書くので、CLI を起動する前に止まったレーン（起動前点検の失敗、同じ head でのレビューの省略など）にも値が残ります。
+  実際に回したかどうかは、`logs/<label>.done` の `EXIT:` と `note=` を合わせて見てください（省略したレビューの証跡には「モデル」の行を出しません）。
+- モデルを空（CLI の既定に任せる。キットの既定）にしていると、`model=` はいつも空です。モデルで比べたいときは、設定ファイルに `*_MODEL` を明示してください。
 
 ## 実装・レビューの許可
 

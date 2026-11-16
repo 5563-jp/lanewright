@@ -262,6 +262,7 @@ scope="full"; [[ "$mode" == "delta" ]] && scope="delta（起点 $base）"
   print -- "- $verdict"
   print -- "- 対象: $(lanes_git_summary "$wt")"
   print -- "- モード: $scope"
+  lanes_model_effort_evidence qa
   print -- "- 実行: $started 開始 / 約 ${elapsed} 分 / EXIT:$rc"
   print -- "- レビュー中の HEAD 変化: $head → $head_after / 作業ツリー・git 管理フォルダの変更 $dirty 件（内容・索引・履歴・設定・hooks・タグ・stash の比較。変更ありは不合格）"
   [[ -n "$touched" ]] && print -r -- "$touched"

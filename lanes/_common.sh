@@ -638,7 +638,7 @@ except OSError:
 }
 
 # ---- 起動の事実と生死をファイルで残す（lanes-status.sh が読む）----
-# <label>.pid  : 起動時。pid= / lstart=（プロセス開始時刻。pid 再利用の誤判定防止）/ started= / started_epoch= / lane= / worktree= / child_pid=
+# <label>.pid  : 起動時。pid= / lstart=（プロセス開始時刻。pid 再利用の誤判定防止）/ started= / started_epoch= / lane= / worktree= / model= / effort=（空＝CLI の既定）/ child_pid=
 # <label>.done : 終了時。EXIT:n / VERDICT: ... / finished= / elapsed_min= / note=
 # ランチャは worktree 確認の直後（プロンプト・サブスク等の前提チェックより前）に mark_start する。
 # 以後どこで落ちても TRAPEXIT が .done を書くので、同じ label の古い DONE が status に残らない
@@ -956,6 +956,27 @@ lanes_start_child() {
   lanes_record_child "$LANES_CHILD"
 }
 
+# 記録用: このレーンが CLI に渡す設定のモデルと effort（考える深さ）を LANES_REC_MODEL / LANES_REC_EFFORT に入れる。
+# <lane> = lanes_mark_start に渡す名前（claude / claude-review / qa / codex / codex-review / gemini）。知らない名前は 1 を返す。
+# 空（引数を付けない＝CLI の既定に任せる）は空のまま。後から「どの設定で回したか」を集計できるように .pid と証跡に残す。
+# 値は設定を読み終えた時点のもの（ランチャが CLI に渡す値と同じ変数）。改行は 1 行の記録を壊すので空白にする
+lanes_lane_model_effort() {
+  local m e
+  case "$1" in
+    claude|claude-review|qa) m="${CLAUDE_MODEL:-}"; e="${CLAUDE_EFFORT:-}" ;;
+    codex|codex-review)      m="${CODEX_MODEL:-}";  e="${CODEX_EFFORT:-}" ;;
+    gemini)                  m="${GEMINI_MODEL:-}"; e="${GEMINI_EFFORT:-}" ;;
+    *) return 1 ;;
+  esac
+  typeset -g LANES_REC_MODEL="${${m//$'\n'/ }//$'\r'/ }" LANES_REC_EFFORT="${${e//$'\n'/ }//$'\r'/ }"
+}
+
+# 証跡（<label>.evidence.md）に足す 1 行。<lane> は上と同じ。知らない名前なら何も出さない
+lanes_model_effort_evidence() {
+  lanes_lane_model_effort "$1" || return 0
+  print -r -- "- モデル: ${LANES_REC_MODEL:-(CLI の既定)} / effort ${LANES_REC_EFFORT:-(CLI の既定)}"
+}
+
 # 同じ label が実行中なら起動しない（ログとマーカーが混ざる）。前回の .pid / .done は .prev-<日時> に回転
 # <logdir> <label> <lane> <worktree> [台帳に一緒に載せる名前（file:<名前>）...]
 # この label を、何かを書く前にランチャの記録の台帳へ載せる。5 つ目以降は、label では決まらない記録の名前（レビューの系列の記録など）
@@ -996,6 +1017,10 @@ started=$(lanes_now)
 started_epoch=$LANES_T0
 lane=$lane
 worktree=$wt"
+  # このレーンが使うモデルと effort（空＝CLI の既定）。読む側は行の名前で拾うので、行が増えても影響しない
+  if lanes_lane_model_effort "$lane"; then
+    LANES_PIDFILE_BASE+=$'\n'"model=$LANES_REC_MODEL"$'\n'"effort=$LANES_REC_EFFORT"
+  fi
   print -r -- "$LANES_PIDFILE_BASE" > "$pidfile"
 }
 
