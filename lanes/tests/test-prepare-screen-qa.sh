@@ -1,5 +1,5 @@
 #!/bin/zsh -f
-# prepare-screen-qa.sh の対応表・引数での決定、IPv6 接続先保持・認証情報除去と chk-run.sh の実行権限変更検知の自己テスト
+# prepare-screen-qa.sh の対応表・引数での決定、IPv6 接続先保持・認証情報除去と、chk-run.sh の実行権限変更検知・生成物の定義の分け方の自己テスト
 set -euo pipefail
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR LANES_SCREEN_QA_MAP LANES_CHECK_CMD
 
@@ -107,9 +107,9 @@ chk = os.path.join(lanes_dir, "chk-run.sh")
 with open(chk, "r", encoding="utf-8") as f:
     src = f.read()
 py_code = src.split("python3 - \"$wt\" \"$o\" \"$cache\" \"$lanes_dir\" \"$port\" \"$generated_def\" \"${output_names[@]}\" <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
-# 生成物の定義は chk-run.sh と同じ取り方で _common.sh から受け取る（ここに写しを書かない）
+# 生成物の定義は chk-run.sh と同じ取り方（_common.sh の lanes_generated_def）で受け取る（ここに写しを書かない）
 generated_def = subprocess.check_output(
-    ["zsh", "-fc", 'source "$LANES_DIR/_common.sh"; print -r -- "${LANES_GENERATED_DIRS[*]}"; print -r -- "${LANES_GENERATED_SUFFIXES[*]}"'],
+    ["zsh", "-fc", 'source "$LANES_DIR/_common.sh"; lanes_generated_def'],
     env={**os.environ, "LANES_DIR": lanes_dir}, text=True, stderr=subprocess.DEVNULL).rstrip("\n")
 assert generated_def.split("\n")[0].split(), "生成物の定義を _common.sh から読めない"
 
@@ -156,9 +156,54 @@ os.chmod(tool, 0o644)
 r_noskip = subprocess.run(["bash", chk, wt, "4173", out], env=env, text=True, capture_output=True, errors="replace")
 assert r_noskip.returncode == 1 and "skip=same-tree" not in r_noskip.stdout and "check=126" in r_noskip.stdout, f"expected check=126: {r_noskip.stdout} {r_noskip.stderr}"
 print("CHK_MODE_INVALIDATION_OK")
+
+# 3. 生成物の定義（_common.sh）の分け方: 生成物の中身の変化は生成物の指紋（cache_fp の後半）だけを変え、入力の指紋（fp）は変えない。
+#    定義の外（node_modules の中のパッケージ・下の階層の next-env.d.ts・パッケージ配下の node_modules/.vite）の変化は入力の指紋を変える
+gwt = os.path.join(root, "gen-wt")
+os.makedirs(gwt)
+subprocess.run(["git", "init", "-q"], cwd=gwt, check=True)
+assert os.path.realpath(subprocess.check_output(['git', '-C', gwt, 'rev-parse', '--show-toplevel'], text=True).strip()) == os.path.realpath(gwt), '一時リポの外の git に届いている: ' + gwt
+subprocess.run(["git", "config", "user.email", "t@t"], cwd=gwt, check=True)
+subprocess.run(["git", "config", "user.name", "t"], cwd=gwt, check=True)
+with open(os.path.join(gwt, ".gitignore"), "w") as f:
+    f.write("node_modules/\n.cloudflare/\n.vinext/\nnext-env.d.ts\n")
+subprocess.run(["git", "add", ".gitignore"], cwd=gwt, check=True)
+subprocess.run(["git", "commit", "-qm", "init"], cwd=gwt, check=True)
+generated = [".cloudflare/types/index.d.ts", ".cloudflare/output/server/index.js", ".vinext/cache/.rscinfo", "next-env.d.ts",
+             "node_modules/.vitest-cache/vitest/results.json", "node_modules/.mf/cf.json", "node_modules/.vite/deps/_metadata.json",
+             "node_modules/.cache/tool/data"]
+inputs = ["node_modules/some-pkg/index.js", "node_modules/some-pkg/package.json", "sub/next-env.d.ts", "apps/web/node_modules/.vite/deps/x.js"]
+for rel in generated + inputs:
+    os.makedirs(os.path.dirname(os.path.join(gwt, rel)), exist_ok=True)
+    with open(os.path.join(gwt, rel), "w") as f:
+        f.write("v1\n")
+genv = {**env, "LANES_CHECK_CMD": "true"}
+def gstate():
+    r = subprocess.run(["python3", "-", gwt, out, cache, lanes_dir, "4173", generated_def, *output_names],
+                       input=py_code, text=True, capture_output=True, env=genv, errors="replace")
+    assert r.returncode == 0, r.stderr
+    st = dict(line.split("=", 1) for line in r.stdout.strip().splitlines())
+    assert st["dirty"] == "0" and st["cache_fp"], f"生成物の確認の前提が崩れた: {st}"
+    return st
+base = gstate()
+for rel in generated:
+    with open(os.path.join(gwt, rel), "a") as f:
+        f.write("changed\n")
+    now = gstate()
+    assert now["fp"] == base["fp"], f"生成物 {rel} の変化で入力の指紋が変わった（生成物として扱っていない）"
+    assert now["cache_fp"] != base["cache_fp"], f"生成物 {rel} の変化で生成物の指紋が変わらない（使い回しで中身を比べていない）"
+    base = now
+for rel in inputs:
+    with open(os.path.join(gwt, rel), "a") as f:
+        f.write("changed\n")
+    now = gstate()
+    assert now["fp"] != base["fp"], f"定義の外の {rel} の変化で入力の指紋が変わらない（生成物として扱った）"
+    base = now
+print("CHK_GENERATED_DEF_OK")
 PY
 )"
 has "node_modules 内実行ファイルの chmod -x で skip=same-tree を無効化し check=126 で失敗する" "$chk_out" '^CHK_MODE_INVALIDATION_OK$'
+has "生成物の定義（.cloudflare/・.vinext/・next-env.d.ts・node_modules の道具のキャッシュ）の変化は入力の指紋を変えず、定義の外の変化は変える" "$chk_out" '^CHK_GENERATED_DEF_OK$'
 
 print -- "---- $pass passed, $fail failed"
 [[ $fail -eq 0 ]]

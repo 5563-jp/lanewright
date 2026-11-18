@@ -6,8 +6,9 @@
 #   1. HEAD が origin/<統合先>（設定キー LANES_BASE_BRANCH。既定 develop）に含まれている（＝マージ済み）ことを確認。未マージなら何もしない（squash / rebase マージは祖先にならないので「未マージ」扱い＝安全側）
 #   2. tracked の未 commit 変更（staged 含む）があれば patch を退避先に保存して停止。残骸パターン外の未追跡（git add 忘れ）があっても停止。勝手に捨てない
 #   3. 残骸（run-*.sh / prompts/ / logs/ / *.log / review 出力 等。ignore 済みも含む）を $LANES_ARCHIVE_ROOT/<repo>/<日付>-<枝>/ へ退避
-#      ignore 済みの生成物（確認コマンドのビルドが残した dist/ など。定義は _common.sh の LANES_GENERATED_DIRS / LANES_GENERATED_SUFFIXES で
-#      chk-run.sh と同じ）も、残骸と同じく退避して続ける。依存とキャッシュ（node_modules/ .next/ など）は退避せず worktree ごと消す
+#      ignore 済みの生成物（確認コマンドのビルドが残した dist/ .cloudflare/ next-env.d.ts など。定義は _common.sh の LANES_GENERATED_DIRS /
+#      LANES_GENERATED_SUFFIXES / LANES_GENERATED_FILES で chk-run.sh と同じ）も、残骸と同じく退避して続ける。
+#      依存とキャッシュ（node_modules/ .next/ .vinext/ など）は退避せず worktree ごと消す
 #   4. worktree 削除 → ローカル枝削除 → リモート枝はリモート先端も origin/<統合先> 済みのときだけ削除
 #   5. main / master / 統合先は永久枝。ローカルもリモートも絶対に消さない
 #   .env* は退避しない。linked worktree の .env* は本体 checkout と同一でなければ停止（worktree 削除で消えるため）
@@ -288,15 +289,24 @@ fi
 # 「知らない物」として後片付けを止める
 residue_re='^(logs/|prompts/|run-[^/]*\.sh$|[^/]*\.log$|IMPLEMENTATION_DONE|review[^/]*\.md$|[^/]*\.prompt\.md$|[^/]*\.patch$|\.claude-task-[^/]*\.md$|\.check-[^/]*\.sh$|\.launch-[^/]*\.sh$|\.ci-fix-[^/]*\.md$|\.login-[^/]*\.md$)'
 # 退避せずに worktree ごと消してよいもの（依存とフレームワークのキャッシュ。大きく、作り直せる）。
-# モノレポの各パッケージ配下（apps/web/node_modules/ 等）にもできる
-disposable_re='^(node_modules/|\.next/|\.turbo/|\.cache/|coverage/|test-results/|playwright-report/|[^/]*\.tsbuildinfo$)|^([^/]+/)+(node_modules|\.next|\.turbo)/|^([^/]+/)+[^/]*\.tsbuildinfo$'
-# 生成物（確認コマンドのビルド・テストが作る出力）か。定義は _common.sh の LANES_GENERATED_DIRS / LANES_GENERATED_SUFFIXES の 1 か所で、
-# chk-run.sh と同じ（作業ツリー直下のその名前のフォルダの中と、その語尾のファイル）。git が無視しているものだけに使う。
-# 上の「消してよいもの」に当たらない生成物（dist/ build/ out/ など。名前が一般的で、手で置いたものが混ざりうる）は、残骸と同じく退避する
+# モノレポの各パッケージ配下（apps/web/node_modules/ 等）にもできる。
+# .vinext/（Next.js 互換の Vite の枠組みのキャッシュ）は .next/ と同じ扱い。中身は枠組みが毎回作り直すキャッシュだけで、手で置くものが
+# 混ざらないので、千件単位の退避で退避先を膨らませずに消す。
+# node_modules の中の道具のキャッシュ（node_modules/.vitest-cache/ など。生成物の定義にもある）は、先頭の node_modules/ に当たって
+# 生成物の判定より先にここで「消してよいもの」になる（生成物の定義に足す前と同じ動き）
+disposable_re='^(node_modules/|\.next/|\.vinext/|\.turbo/|\.cache/|coverage/|test-results/|playwright-report/|[^/]*\.tsbuildinfo$)|^([^/]+/)+(node_modules|\.next|\.vinext|\.turbo)/|^([^/]+/)+[^/]*\.tsbuildinfo$'
+# 生成物（確認コマンドの型の生成・ビルド・テストが作る出力）か。定義は _common.sh の LANES_GENERATED_DIRS / LANES_GENERATED_SUFFIXES /
+# LANES_GENERATED_FILES の 1 か所で、chk-run.sh と同じ（作業ツリー直下から見たそのフォルダの中・その語尾のファイル・作業ツリー直下の
+# その名前のファイル）。git が無視しているものだけに使う。
+# 上の「消してよいもの」に当たらない生成物（dist/ build/ out/ など。名前が一般的で、手で置いたものが混ざりうる）は、残骸と同じく退避する。
+# .cloudflare/（Cloudflare Workers 向けのビルドの出力と型の生成）も dist/ と同じく退避する: キャッシュではなく配る物そのもの（ビルドの
+# 出力）なので、ほかのビルドの出力と同じく消す側に倒さない。next-env.d.ts（作業ツリー直下の 1 件）も退避する（1 件だけで小さく、
+# 退避しても退避先はほとんど増えない）。本体 checkout ではどれも触らない（退避も削除もしない）
 is_generated() {   # <作業ツリーからの相対パス>
   local f="$1" d sfx
   for d in "${LANES_GENERATED_DIRS[@]}"; do [[ "$f" == "$d"/* ]] && return 0; done
   for sfx in "${LANES_GENERATED_SUFFIXES[@]}"; do [[ "$f" == *"$sfx" ]] && return 0; done
+  (( ${LANES_GENERATED_FILES[(Ie)$f]} )) && return 0
   return 1
 }
 untracked=(); ignored=(); generated=(); others=()

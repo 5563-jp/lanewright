@@ -459,6 +459,84 @@ has "駄目なリンクを消したら、また記録できる" "$o" '^recorded=
 rm -rf dist
 rm -rf node_modules packages "$outside_dir"
 
+# ---- 追加テスト 5e: Cloudflare Workers + vinext の構成の標準の生成物 ----
+# 経緯: 確認コマンド（型の生成・テスト・ビルド）が全部通ったのに、検証中に書いた次のもの（どれも git が無視している）を入力と数えて
+# 「検証中に入力が変化したため記録しない」になり、記録が一度も残らなかった:
+#   型の生成 = .cloudflare/types/index.d.ts・作業ツリー直下の next-env.d.ts・node_modules/.mf/（実行環境のまねをする道具のキャッシュ）
+#   テスト = node_modules/.vitest-cache/（キャッシュを切っても書く）  ビルド = .cloudflare/output/・.vinext/cache/
+# これらを生成物として扱う（検証の前後の照合から外し、使い回すときは今の中身が記録のときと同じであることを求める）。
+# git が無視していないもの・追跡しているもの・node_modules のほかの中身・下の階層の next-env.d.ts は今までどおり入力
+cat > .gitignore <<'G'
+node_modules/
+.cloudflare/*
+!.cloudflare/keep.json
+!.cloudflare/local.json
+.vinext/
+next-env.d.ts
+G
+mkdir -p .cloudflare scripts sub
+echo '{"keep":1}' > .cloudflare/keep.json
+cat > scripts/gen5e.sh <<'SH'
+#!/bin/sh
+# 確認コマンドが書く生成物をまねる（中身は回すたびに変わる）
+set -e
+v="$$-$(date +%s)"
+mkdir -p .cloudflare/types .cloudflare/output/server/assets .vinext/cache node_modules/.vitest-cache/vitest node_modules/.mf \
+  node_modules/.vite/deps node_modules/.cache/tool
+echo "// $v" > .cloudflare/types/index.d.ts
+echo "export default {} // $v" > .cloudflare/output/server/index.js
+echo "/* $v */" > .cloudflare/output/server/assets/app.css
+echo "$v" > .vinext/cache/.rscinfo
+echo "/// <reference types=\"next\" /> // $v" > next-env.d.ts
+echo "{\"v\":\"$v\"}" > node_modules/.vitest-cache/vitest/results.json
+echo "{\"v\":\"$v\"}" > node_modules/.mf/cf.json
+echo "{\"v\":\"$v\"}" > node_modules/.vite/deps/_metadata.json
+echo "$v" > node_modules/.cache/tool/data
+# 安全の確認用: GEN5E_TOUCH に書いた作業ツリーからの相対パスにも書く（入力を書き換えてしまう確認コマンドをまねる）
+if [ -n "${GEN5E_TOUCH:-}" ]; then echo "$v" >> "$GEN5E_TOUCH"; fi
+SH
+cat > package.json <<'J'
+{"name":"t","private":true,"scripts":{"typecheck":"sh scripts/gen5e.sh","test":"echo 3 件 OK","build":"echo build","smoke:iphone":"echo SMOKE_OK"}}
+J
+git add .gitignore .cloudflare/keep.json scripts/gen5e.sh package.json && git commit -qm "5e: Cloudflare Workers + vinext の構成"
+# 入力のまま残るもの（git が無視しているが、生成物の定義の外）
+mkdir -p node_modules/some-pkg; echo 'module.exports = 1' > node_modules/some-pkg/index.js
+echo '/// <reference types="next" />' > sub/next-env.d.ts
+o=$(run 2>&1)
+has "Cloudflare Workers + vinext の生成物を書く確認でも記録する" "$o" '^recorded=.*full'
+hasnt "生成物を書くだけなら「検証中に入力が変化」にしない" "$o" '検証中に入力が変化'
+[ -f .cloudflare/output/server/index.js ] && [ -f node_modules/.vitest-cache/vitest/results.json ] && [ -f next-env.d.ts ] \
+  && ok "確認コマンドが生成物を書いた（テストの前提）" || ng "確認コマンドが生成物を書いていない（テストの前提が崩れた）"
+o=$(run)
+has "生成物が記録のときと同じなら、同じ tree で使い回す" "$o" '^check=0 SKIP\(same-tree\)'
+qo=$(q 2>/dev/null)
+has "生成物が記録のときと同じなら、問い合わせで使い回せる" "$qo" '^reuse=yes$'
+# 記録の後で生成物の中身が変わったら使い回さない（生成物の指紋に入っている）。回し直せば、また記録する
+for f in .cloudflare/types/index.d.ts .cloudflare/output/server/assets/app.css .vinext/cache/.rscinfo next-env.d.ts \
+  node_modules/.vitest-cache/vitest/results.json node_modules/.mf/cf.json node_modules/.vite/deps/_metadata.json node_modules/.cache/tool/data; do
+  echo tampered >> "$f"
+  qo=$(q 2>/dev/null)
+  has "生成物 $f の中身が変わったら、問い合わせは reuse=no" "$qo" '^reuse=no reason=input-changed$'
+  o=$(run 2>&1)
+  hasnt "生成物 $f の中身が変わったら省略しない" "$o" '^skip=same-tree'
+  has "生成物 $f が変わった後に回し直したら、また記録する" "$o" '^recorded=.*full'
+done
+# 確認コマンドが入力（追跡ファイル・.gitignore の例外で追跡している .cloudflare/ のファイル・git が無視していない .cloudflare/ のファイル・
+# node_modules の中のパッケージの中身・下の階層の next-env.d.ts）を書き換えたら、今までどおり記録しない
+for t in docs/a.md .cloudflare/keep.json .cloudflare/local.json node_modules/some-pkg/index.js sub/next-env.d.ts; do
+  o=$(GEN5E_TOUCH="$t" run --force 2>&1)
+  has "確認コマンドが $t を書き換えても確認自体は通る" "$o" '^check=0（'
+  hasnt "確認コマンドが $t を書き換えたら記録しない" "$o" '^recorded='
+  has "確認コマンドが $t を書き換えたら、検証中の入力の変化として記録しない" "$o" '検証中に入力が変化したため記録しない'
+  case "$t" in
+    docs/a.md|.cloudflare/keep.json) git checkout -q -- "$t" ;;
+    .cloudflare/local.json) rm -f "$t" ;;
+  esac
+done
+o=$(run --force)
+has "入力を書き換えない確認に戻せば、また記録する" "$o" '^recorded=.*full'
+rm -rf node_modules .vinext sub next-env.d.ts .cloudflare/types .cloudflare/output
+
 # ---- 追加テスト 6: prepare-screen-qa.sh の URL 認証情報秘匿・IPv6 角括弧保持・ラベル検証 ----
 qa_repo="$real_root/qa-repo"
 mkdir -p "$qa_repo"

@@ -172,7 +172,7 @@ cleanup || fail 'パッケージ配下の依存があると後片付けできな
 ok 'パッケージ配下の node_modules も生成物として削除し、任意の除外物では止める'
 
 # 確認コマンド（chk-run.sh）のビルドが残した ignore 済みの生成物（dist/ build/ out/）は、残骸と同じく退避して後片付けを続ける。
-# 生成物の定義は _common.sh の LANES_GENERATED_DIRS / LANES_GENERATED_SUFFIXES の 1 か所で、chk-run.sh と同じものを使う。
+# 生成物の定義は _common.sh の LANES_GENERATED_DIRS / LANES_GENERATED_SUFFIXES / LANES_GENERATED_FILES の 1 か所で、chk-run.sh と同じものを使う。
 # 依存・キャッシュ（*.tsbuildinfo など）は今までどおり退避せずに消す。symlink は辿らずリンクのまま退避する
 new_case generated_dist
 mkdir -p "$repo/.git/info"; print -- 'dist/\nbuild/\nout/\n*.tsbuildinfo' >> "$repo/.git/info/exclude"
@@ -228,6 +228,64 @@ grep -q 'ignore 済みの生成物 1 件は触らない' "$T/out" || fail '本�
 [[ -z "$(print -l "$LANES_ARCHIVE_ROOT"/**/dist/gen-main.js(N))" && -n "$(print -l "$LANES_ARCHIVE_ROOT"/**/logs/gen-main.log(N.))" ]] \
   || fail '本体 checkout の生成物を退避した・残骸を退避していない'
 ok '本体 checkout の生成物は退避も削除もしない（残骸だけ退避して消す）'
+
+# Cloudflare Workers + vinext の構成で確認コマンドが残すもの（生成物の定義は chk-run.sh と同じ）:
+#   .cloudflare/（ビルドの出力と型の生成）と作業ツリー直下の next-env.d.ts は、dist/ と同じく退避して続ける。ビルドの出力は千件を超えるので、件数が多くても止まらないこと
+#   .vinext/（フレームワークのキャッシュ）は、.next/ と同じく退避せずに worktree ごと消す（パッケージ配下の apps/web/.vinext/ も）
+#   node_modules/.vitest-cache/ などの道具のキャッシュは、もともと依存（node_modules/）として退避せずに消すもので、動きは変わらない
+new_case generated_cloudflare
+mkdir -p "$repo/.git/info"; print -- '.cloudflare/\n.vinext/\nnext-env.d.ts' >> "$repo/.git/info/exclude"
+mkdir -p "$wt/.cloudflare/types" "$wt/.vinext/cache" "$wt/apps/web/.vinext/cache" "$wt/node_modules/.vitest-cache/vitest" "$wt/node_modules/.mf" \
+  "$wt/node_modules/.vite/deps" "$wt/node_modules/.cache/tool"
+print types > "$wt/.cloudflare/types/index.d.ts"
+for i in {0..13}; do
+  mkdir -p "$wt/.cloudflare/output/assets-$i"
+  for j in {1..100}; do print -r -- "chunk $i-$j" > "$wt/.cloudflare/output/assets-$i/chunk-$j.js"; done
+done
+print '/// <reference types="next" />' > "$wt/next-env.d.ts"
+print rsc > "$wt/.vinext/cache/.rscinfo"; print rsc > "$wt/apps/web/.vinext/cache/.rscinfo"
+print '{}' > "$wt/node_modules/.vitest-cache/vitest/results.json"; print '{}' > "$wt/node_modules/.mf/cf.json"
+print '{}' > "$wt/node_modules/.vite/deps/_metadata.json"; print x > "$wt/node_modules/.cache/tool/data"
+rc=0; zsh "$T/lanes/cleanup-after-merge.sh" "$wt" > "$T/out" 2>&1 || rc=$?
+[[ "$rc" == 0 && -f "$wt/next-env.d.ts" ]] && grep -q 'ignore 済みの生成物 1402 件を退避' "$T/out" \
+  || fail "dry-run が .cloudflare/ と next-env.d.ts を生成物として数えない（rc=$rc）"
+rc=0; cleanup || rc=$?
+[[ "$rc" == 0 && ! -d "$wt" ]] || fail "Cloudflare Workers + vinext の構成の生成物で後片付けが止まった（rc=$rc）"
+archived=("$LANES_ARCHIVE_ROOT"/**/.cloudflare/**/*(N.D))
+(( ${#archived} == 1401 )) || fail ".cloudflare/ の生成物を全部は退避していない（${#archived} 件）"
+[[ -n "$(print -l "$LANES_ARCHIVE_ROOT"/**/.cloudflare/output/assets-13/chunk-100.js(N.))" && -n "$(print -l "$LANES_ARCHIVE_ROOT"/**/next-env.d.ts(N.))" ]] \
+  || fail '.cloudflare/ の出力・next-env.d.ts を退避していない'
+[[ -z "$(print -l "$LANES_ARCHIVE_ROOT"/**/.vinext(DN) "$LANES_ARCHIVE_ROOT"/**/node_modules(DN))" ]] || fail 'キャッシュ（.vinext/・node_modules/ の中）まで退避した'
+ok 'Cloudflare Workers + vinext の構成の生成物: .cloudflare/ と next-env.d.ts は退避（千件超でも）、.vinext/ と node_modules の中のキャッシュは消す'
+
+# 定義の外は今までどおり止まる: git が無視していない .cloudflare/ と next-env.d.ts
+new_case generated_cloudflare_untracked
+mkdir -p "$wt/.cloudflare"; print wip > "$wt/.cloudflare/wip.json"; print wip > "$wt/next-env.d.ts"
+rc=0; cleanup || rc=$?
+[[ "$rc" == 4 && -f "$wt/.cloudflare/wip.json" ]] && grep -q '\.cloudflare/wip\.json' "$T/out" && grep -q 'next-env\.d\.ts' "$T/out" \
+  || fail "git が無視していない .cloudflare/・next-env.d.ts の未追跡ファイルで止まらない（rc=$rc）"
+ok 'git が無視していない .cloudflare/・next-env.d.ts の未追跡ファイルでは、今までどおり止まる'
+
+# 定義の外は今までどおり止まる: 下の階層の next-env.d.ts と、パッケージ配下の .cloudflare/（どちらも git は無視している）
+new_case generated_cloudflare_nested
+mkdir -p "$repo/.git/info"; print -- '.cloudflare/\nnext-env.d.ts' >> "$repo/.git/info/exclude"
+mkdir -p "$wt/apps/web/.cloudflare/output"; print built > "$wt/apps/web/.cloudflare/output/x.js"; print ref > "$wt/apps/web/next-env.d.ts"
+rc=0; cleanup || rc=$?
+[[ "$rc" == 4 && -f "$wt/apps/web/next-env.d.ts" ]] && grep -q 'apps/web/\.cloudflare/output/x\.js' "$T/out" && grep -q 'apps/web/next-env\.d\.ts' "$T/out" \
+  || fail "下の階層の next-env.d.ts・パッケージ配下の .cloudflare/ を生成物として扱った（rc=$rc）"
+ok '下の階層の next-env.d.ts・パッケージ配下の .cloudflare/ は生成物の定義の外で、今までどおり止まる'
+
+# 本体 checkout の .cloudflare/・next-env.d.ts・.vinext/ は退避も削除もしない
+new_case generated_cloudflare_main
+mkdir -p "$repo/.git/info"; print -- '.cloudflare/\n.vinext/\nnext-env.d.ts' >> "$repo/.git/info/exclude"
+mkdir -p "$repo/.cloudflare/output" "$repo/.vinext/cache"
+print built > "$repo/.cloudflare/output/index.js"; print rsc > "$repo/.vinext/cache/.rscinfo"; print ref > "$repo/next-env.d.ts"
+rc=0; zsh "$T/lanes/cleanup-after-merge.sh" "$repo" --apply > "$T/out" 2>&1 || rc=$?
+[[ "$rc" == 0 && -f "$repo/.cloudflare/output/index.js" && -f "$repo/.vinext/cache/.rscinfo" && -f "$repo/next-env.d.ts" ]] \
+  || fail "本体 checkout の .cloudflare/・.vinext/・next-env.d.ts を消した（rc=$rc）"
+grep -q 'ignore 済みの生成物 2 件は触らない' "$T/out" || fail '本体 checkout の .cloudflare/・next-env.d.ts を触らない旨を出さない'
+[[ -z "$(print -l "$LANES_ARCHIVE_ROOT"/**/.cloudflare/output/index.js(N))" ]] || fail '本体 checkout の生成物を退避した'
+ok '本体 checkout の .cloudflare/・.vinext/・next-env.d.ts は退避も削除もしない'
 
 new_case pg_identity
 sleep 600 & sleeper=$!

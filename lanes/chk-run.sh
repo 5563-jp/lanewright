@@ -24,7 +24,7 @@
 #   （起動ログ logs/launch.log を detach-run.sh が先に書くため）。名前が記録に似ているだけでは外さない。数えないのは、
 #   ランチャが書く前に台帳（logs/.lanes-records）へ載せた持ち主の、決まった名前のファイルだけ（下の「ランチャの記録」の説明）。
 #   台帳に無い名前（確認コマンドが読む logs/input.json など）・logs/ の中のフォルダ・リンク・追跡ファイルは今までどおり入力
-#   生成物（dist/ など）の定義は _common.sh の LANES_GENERATED_DIRS / LANES_GENERATED_SUFFIXES（cleanup-after-merge.sh と同じもの）
+#   生成物（dist/ など）の定義は _common.sh の LANES_GENERATED_DIRS / LANES_GENERATED_SUFFIXES / LANES_GENERATED_FILES（cleanup-after-merge.sh と同じもの）
 # 確認済みの記録: ${CHK_CACHE:-${LANES_RUNS_ROOT:-~/dev/_runs}/_chk-cache/passed.tsv}
 #   （tree<TAB>head<TAB>full<TAB>日時<TAB>worktree<TAB>input_fp<TAB>port<TAB>outdir）。port と outdir は問い合わせが同じ条件で照合し直すために残す
 # 問い合わせ（--query）: 確認コマンドを一切実行せず、記録も出力先も作らない（fetch もしない）。skip=same-tree になる条件
@@ -152,9 +152,9 @@ head=$(git rev-parse --verify HEAD 2>/dev/null) || { echo "HEAD の取得に失�
 tree=$(git rev-parse --verify 'HEAD^{tree}' 2>/dev/null) || { echo "tree の取得に失敗" >&2; exit 1; }
 [ "$query" = 1 ] || echo "head=${head:0:7}"
 
-# 生成物の定義は _common.sh に 1 か所だけある（cleanup-after-merge.sh と同じものを使う）。
-# 1 行目 = 作業ツリー直下のフォルダ名、2 行目 = ファイルの語尾（どちらもスペース区切り）
-generated_def=$(LANES_DIR="$lanes_dir" zsh -fc 'source "$LANES_DIR/_common.sh"; print -r -- "${LANES_GENERATED_DIRS[*]}"; print -r -- "${LANES_GENERATED_SUFFIXES[*]}"' 2>/dev/null) || generated_def=""
+# 生成物の定義は _common.sh に 1 か所だけある（cleanup-after-merge.sh と同じものを使う）。渡し方も _common.sh の lanes_generated_def:
+# 1 行目 = 作業ツリー直下から見たフォルダ、2 行目 = ファイルの語尾、3 行目 = 作業ツリー直下のファイル名そのもの（どれもスペース区切り）
+generated_def=$(LANES_DIR="$lanes_dir" zsh -fc 'source "$LANES_DIR/_common.sh"; lanes_generated_def' 2>/dev/null) || generated_def=""
 if [ -z "$generated_def" ]; then
   if [ "$query" = 1 ]; then echo "reuse=no reason=state-error"; exit 1; fi
   echo "生成物の定義（_common.sh の LANES_GENERATED_DIRS）を読めない" >&2; exit 2
@@ -459,12 +459,19 @@ for bin_name in ("node", "npm", "npx", "pnpm", "yarn", "bun", "bash"):
     else:
         h.update(f"bin:{bin_name}:missing\0".encode("utf-8"))
 
-# 生成物の定義（_common.sh の LANES_GENERATED_DIRS / LANES_GENERATED_SUFFIXES を呼び出し側が渡す）
+# 生成物の定義（_common.sh の lanes_generated_def の出力を呼び出し側が渡す）。どれも作業ツリー直下から見たもの:
+#   generated_dirs     … フォルダ（末尾に / を付けて前方一致。node_modules/.vite のように / を含むものも作業ツリー直下からのパス）
+#   generated_suffixes … ファイルの語尾（どの深さでも）
+#   generated_names    … 作業ツリー直下のファイル名そのもの（完全一致。下の階層の同じ名前は入力のまま）
 _generated_def = sys.argv[6].split("\n")
 generated_dirs = tuple(name + "/" for name in _generated_def[0].split())
 generated_suffixes = tuple(_generated_def[1].split()) if len(_generated_def) > 1 else ()
+generated_names = frozenset(_generated_def[2].split()) if len(_generated_def) > 2 else frozenset()
 if not generated_dirs:
     sys.exit(2)
+
+def is_generated(rel):
+    return rel.startswith(generated_dirs) or rel.endswith(generated_suffixes) or rel in generated_names
 other_files = []
 generated_files = []
 
@@ -753,7 +760,8 @@ def scan_repo(repo_dir, rel_prefix="", visited_repos=None):
         if sub_rel.endswith("/") or (not os.path.islink(fp) and os.path.isdir(fp)):
             walk_plain_dir(fp)
             continue
-        if not rel_prefix and raw in ignored and (rel.startswith(generated_dirs) or rel.endswith(generated_suffixes)):
+        # 生成物として外すのは、最上位のリポで git が無視しているものだけ（追跡・無視されていない未追跡・サブモジュールの中は入力のまま）
+        if not rel_prefix and raw in ignored and is_generated(rel):
             generated_files.append(rel)
         else:
             other_files.append(rel)
