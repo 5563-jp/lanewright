@@ -6,6 +6,8 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+## [0.1.7] - Cloudflare Workers + vinext の構成の生成物があっても確認の結果を記録する / Record checks with Cloudflare Workers + vinext generated output
+
 ### 直したこと / Fixed
 - `chk-run.sh` が、Cloudflare Workers + vinext（Next.js 互換の Vite の枠組み）の構成で、確認コマンド（型の生成・lint・テスト・ビルド）が
   全部通っても記録を残さなかった（標準エラーに「検証中に入力が変化したため記録しない」と出て終了コード 1。レビューは親の記録を使い回せず
