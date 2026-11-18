@@ -254,7 +254,7 @@ zsh "$L/cleanup-after-merge.sh" ~/dev/_runs/my-app/hello --apply
 | 同じ label で起動できない（exit 2） | 前回のランチャか子がまだ生きている。`lanes-status.sh` で確かめ、FAILED / DEAD の行に「子 pid=N 生存」と出たときだけ `kill N` |
 | レビューが `VERDICT: NONE` | 出力が途中で切れた・判定行が無い。失敗扱いなので、もう一度レビューを回す |
 | プロンプトが大きすぎると止まる | 指示書に diff を貼っている。「自分で読め」と書き換える（上限は `LANES_PROMPT_MAX_BYTES`） |
-| cleanup が止まる | 未保存の変更・未追跡のファイル・実行中のレーンがある。表示された退避先と理由を見て片付けてから `--apply`（git が無視している `dist/` `build/` `out/` などの生成物は、退避してそのまま続ける） |
+| cleanup が止まる | 未保存の変更・未追跡のファイル・実行中のレーンがある。表示された退避先と理由を見て片付けてから `--apply`（git が無視している `dist/` `build/` `out/` `.cloudflare/` などの生成物は、退避してそのまま続ける） |
 | 設定ファイルに書いた effort で動かない | 起動元のシェルが `CLAUDE_EFFORT` などを環境変数として持っている（アプリから起動したシェルに多い）。環境変数が設定ファイルより勝つ。ランチャは起動時に「注意: CLAUDE_EFFORT は環境変数の値「…」で動く …」を 1 行出す。設定の値に固定するなら、設定ファイルに `CLAUDE_EFFORT="xhigh"` と値をそのまま書く（[docs/config.md](docs/config.md)） |
 | レビューの証跡が「親の chk-run の記録は使わない」になる | 証跡の理由を見る。`no-record` は `chk-run.sh` をまだ通していないか、通ったが記録できなかった（`chk-run.sh` の出力の `record=no reason=…` に理由が出る。`.lanes/check.sh` の `exec <コマンド>` は記録できないので、`exec` を付けずに書く）。`input-changed` は記録の後で依存・環境変数・確認コマンドなどが変わった（`chk-run.sh` とレビューは同じシェルから呼ぶ）。ランチャの記録（`logs/` の直下のログや起動ログ）と、`detach-run.sh` を挟んで起動することは理由にならない |
 | レビューが「親の chk-run の記録を使えないので、レビューを起動しない」で止まる | `LANES_REVIEW_REQUIRE_CHECKS=1` のときの歯止め。表示された理由（`no-record` / `uncommitted` / `input-changed`）を解決して `chk-run.sh <worktree>` を通し（出力に `recorded=` が出ること。`record=no` と出るなら、通し直しても記録されないので、その行の理由を先に直す）、レビューをやり直す。確認を回せない事情がある起動だけ、`--allow-missing-checks` を付ける（[docs/config.md](docs/config.md)） |

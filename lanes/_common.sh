@@ -34,13 +34,31 @@ lanes_with_caller_auth_env() { lanes_restore_caller_auth_env; "$@"; }
 
 lanes_die() { print -u2 -- "ERROR: $*"; lanes_record_early_failure "$*"; exit 2; }
 
-# ---- 生成物（確認コマンドのビルド・テストが作る出力）の定義 ----
+# ---- 生成物（確認コマンドの型の生成・ビルド・テストが作る出力）の定義 ----
 # chk-run.sh（成功の記録の指紋）と cleanup-after-merge.sh（マージ後の後片付け）が同じ定義を使う。直すのはここ 1 か所だけ。
-# 対象は git が無視しているもののうち、作業ツリー直下のこの名前のフォルダの中と、この語尾のファイル（どの深さでも）。
+# 対象は git が無視しているもの（追跡しているもの・無視されていない未追跡のものは、ここに当たっても入力のまま）のうち:
+#   LANES_GENERATED_DIRS     … 作業ツリー直下から見たこのフォルダの中（どの深さのファイルも）。/ を含むものは作業ツリー直下からのパス
+#                              （node_modules/.vite なら作業ツリー直下の node_modules の中のそのフォルダだけ。apps/web/node_modules/.vite は外）
+#   LANES_GENERATED_SUFFIXES … この語尾のファイル（どの深さでも）
+#   LANES_GENERATED_FILES    … 作業ツリー直下のこの名前のファイルそのもの（語尾の一致ではない。sub/next-env.d.ts は外）
+# node_modules の中は、道具が自分のキャッシュを書くフォルダだけを並べる（パッケージの中身・package.json・.package-lock.json は入力のまま。
+# node_modules 全体を生成物にはしない）: .vitest-cache（テストがキャッシュを切っても書く）・.mf（Workers の実行環境のまねをする道具の
+# キャッシュ）・.vite（Vite の依存の事前変換）・.cache（いろいろな道具のキャッシュの置き場）。
+# .cloudflare（Cloudflare Workers 向けのビルドの出力と型の生成）・.vinext（Next.js 互換の Vite の枠組みのキャッシュ）・next-env.d.ts
+# （Next.js 互換の枠組みが型の生成のたびに書き直す）は、Cloudflare Workers + vinext の構成の確認コマンドが毎回書くもの。
 # 名前に空白を入れない（chk-run.sh へスペース区切りで渡す）。設定キーではない（同じ名前の環境変数が持ち込まれても使わず、子にも渡さない）
-unset LANES_GENERATED_DIRS LANES_GENERATED_SUFFIXES
-typeset -ga LANES_GENERATED_DIRS=(dist build out .next .turbo coverage test-results playwright-report)
+unset LANES_GENERATED_DIRS LANES_GENERATED_SUFFIXES LANES_GENERATED_FILES
+typeset -ga LANES_GENERATED_DIRS=(dist build out .next .turbo coverage test-results playwright-report .cloudflare .vinext
+  node_modules/.vitest-cache node_modules/.mf node_modules/.vite node_modules/.cache)
 typeset -ga LANES_GENERATED_SUFFIXES=(.tsbuildinfo)
+typeset -ga LANES_GENERATED_FILES=(next-env.d.ts)
+# 定義を chk-run.sh（bash と Python）へ渡す形で出す。1 行目 = LANES_GENERATED_DIRS、2 行目 = LANES_GENERATED_SUFFIXES、
+# 3 行目 = LANES_GENERATED_FILES（どれもスペース区切り）。渡し方もここ 1 か所（chk-run.sh とテストはこれを呼ぶ）
+lanes_generated_def() {
+  print -r -- "${LANES_GENERATED_DIRS[*]}"
+  print -r -- "${LANES_GENERATED_SUFFIXES[*]}"
+  print -r -- "${LANES_GENERATED_FILES[*]}"
+}
 
 # ---- Claude のレビュー・QA の読み取り専用の担保（外から上書きできない部分）----
 # 拒否の固定の一覧。lanes.env の CLAUDE_REVIEW_DENY は「足す」ものだけで、この一覧は環境変数や設定ファイルでは外せない。

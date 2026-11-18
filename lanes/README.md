@@ -312,7 +312,13 @@ zsh lanes/lanes-watch.sh --check
 - 台帳に無い名前のファイル（例 `logs/input.json`・`logs/input.txt`）、`logs/` の中のフォルダ、リンク、追跡しているファイル、下の階層の `logs/`（例 `src/logs/`）は入力です。確認コマンドが `logs/input.json` を読む構成で中身を変えれば、記録と合わなくなり回し直します。**確認コマンドが読む設定やデータを、起動した label の記録と同じ名前（`logs/<起動した label>.json` など）で置かないでください**（変えても気づけません）。
 - 台帳の仕組みより前の版のランチャが書いた記録は台帳に無いので、入力として数えます（同じ label を起動し直すと台帳に載ります）。
 - 限界: 台帳は `logs/` の中にあるので、worktree に書ける者（レーンの子・確認コマンド）が行を足せば、外す範囲を広げられます。入力の指紋は「うっかり古い成功を使い回す」のを防ぐ仕組みで、worktree に書ける者の意図的な細工までは防ぎません（確認コマンド自体を書き換えられるのと同じ前提です）。気になるときは `logs/.lanes-records` に起動した覚えの無い label・名前が無いかを見るか、`chk-run.sh --force` で回し直してください。
-- 生成物（git が無視している、作業ツリー直下の `dist/` `build/` `out/` `.next/` `.turbo/` `coverage/` `test-results/` `playwright-report/` の中と、`*.tsbuildinfo`）は確認コマンド自身が作り直すので、検証の前後の照合からは外し、使い回すときは今の出力が記録のときと同じであることを求めます。定義は `_common.sh` の `LANES_GENERATED_DIRS` / `LANES_GENERATED_SUFFIXES` の 1 か所で、`cleanup-after-merge.sh` も同じものを使います。
+- 生成物は確認コマンド自身が作り直すので、検証の前後の照合からは外し、使い回すときは今の出力が記録のときと同じであることを求めます。生成物として扱うのは、git が無視している次のものです。定義は `_common.sh` の `LANES_GENERATED_DIRS` / `LANES_GENERATED_SUFFIXES` / `LANES_GENERATED_FILES` の 1 か所で、`cleanup-after-merge.sh` も同じものを使います。
+  - 作業ツリー直下の `dist/` `build/` `out/` `.next/` `.turbo/` `coverage/` `test-results/` `playwright-report/` `.cloudflare/` `.vinext/` の中
+  - 作業ツリー直下の `node_modules/` の中の、道具が自分のキャッシュを書くフォルダ `node_modules/.vitest-cache/` `node_modules/.mf/` `node_modules/.vite/` `node_modules/.cache/` の中（`node_modules/` のほかの中身、たとえばパッケージの中身・`package.json`・`.package-lock.json` は入力のまま）
+  - 作業ツリー直下の `next-env.d.ts`（名前そのものの一致。下の階層の `apps/web/next-env.d.ts` などは入力のまま）
+  - どの深さでも `*.tsbuildinfo`
+- 上の場所にあっても、git が追跡しているファイルと、git が無視していない未追跡のファイルは入力です（変われば記録せず、未追跡は未 commit の変更として扱います）。パッケージ配下（例 `apps/web/node_modules/.vite/`・`apps/web/.cloudflare/`）とサブモジュールの中も入力のままです。
+  たとえば Cloudflare Workers + vinext の構成で、確認コマンドが型の生成（`.cloudflare/types/`・`next-env.d.ts`・`node_modules/.mf/`）・テスト（`node_modules/.vitest-cache/`）・ビルド（`.cloudflare/output/`・`.vinext/`）でこれらを書き直しても、git が無視していれば記録します。
 - 生成物の中のリンク（ビルドが出力の中に依存へのリンクを作る構成。例: `.next/node_modules/<名前>` → `../../node_modules/<名前>`）は、入力のリンクと同じ基準で扱います。作業ツリーの中を指すなら、向き先と行き先の中身を生成物の指紋に入れて記録します（向き先か行き先の中身が変われば使い回しません）。作業ツリーの外（か `.git` の中）を指すリンク・行き先の無いリンク・行き先が普通のファイルでもフォルダでもないリンク（名前付きパイプなど）があるときは、中身を追い切れないので記録しません（`record=no reason=unresolvable（…リンク: <パス>）` にどのリンクかが出ます）。
 - 検証の前後で HEAD・tree・作業ツリー・`input_fp` を照合し、変化が無く通ったときだけ記録します。記録先は `CHK_CACHE`（既定 `$LANES_RUNS_ROOT/_chk-cache/passed.tsv`）。1 行は `tree・head・full・日時・worktree・input_fp・port・outdir` のタブ区切りです（port と outdir は問い合わせが同じ条件で照合し直すために残します）。
 - 終了コード: 0 = 通った・省略した / 1 = 確認コマンドの失敗・fetch / merge の失敗・検証中の入力の変化 / 2 = 使い方の誤り・確認コマンドが未設定。
@@ -346,7 +352,7 @@ zsh lanes/lanes-watch.sh --check
 1. HEAD が `origin/$LANES_BASE_BRANCH` に含まれる（マージ済み）ことを確かめる。含まれなければ何もしない（`EXIT:5`）。**squash / rebase でマージした枝は祖先にならないので「未マージ」扱い**（安全側）。その場合は手で `git worktree remove` と `git branch -D`
 2. 追跡ファイルの未 commit 変更（staged を含む）があれば `uncommitted.patch` を退避先に保存して停止（`EXIT:4`）
 3. 残骸（`run-*.sh` / `prompts/` / `logs/` / `*.log` / レビュー出力など。ignore 済みも含む）を `$LANES_ARCHIVE_ROOT/<repo>/<日付>-<枝>/` へ退避（消さない・GitHub にも上げない）。
-   ignore 済みの生成物（確認コマンドのビルドが残した、作業ツリー直下の `dist/` `build/` `out/` の中など）も、残骸と同じく退避してから続けます。生成物の定義は `chk-run.sh` と同じ（`_common.sh` の `LANES_GENERATED_DIRS` / `LANES_GENERATED_SUFFIXES`。7 章）。依存とキャッシュ（下の表の「削除してよいもの」）は退避せず worktree ごと消します
+   ignore 済みの生成物（確認コマンドのビルドが残した、作業ツリー直下の `dist/` `build/` `out/` `.cloudflare/` の中と `next-env.d.ts` など）も、残骸と同じく退避してから続けます（ビルドの出力が千件を超えても止まりません）。生成物の定義は `chk-run.sh` と同じ（`_common.sh` の `LANES_GENERATED_DIRS` / `LANES_GENERATED_SUFFIXES` / `LANES_GENERATED_FILES`。7 章）。依存とキャッシュ（下の表の「削除してよいもの」。`.vinext/` と、`node_modules/.vite/` などの `node_modules/` の中の道具のキャッシュもここ）は退避せず worktree ごと消します
 4. worktree を削除 → ローカル枝を削除 → リモート枝は先端も統合済みのときだけ削除。`main` / `master` / 統合先の枝は永久枝として、ローカルもリモートも絶対に消さない
 5. そのレーンの scratch を削除（中の一時 PostgreSQL は実体を照合して `pg_ctl stop`）
 6. `LANES_DOWNLOADS_SCAN=1` のときだけ、`~/Downloads` に直近 3 日で置き忘れたレビュー出力らしいもの（`*review*` / `*.diff` / `*.patch` / `*.prompt.md` / `*.log` など）を報告だけする（消さない。既定 `0` では見ない）
@@ -356,7 +362,7 @@ zsh lanes/lanes-watch.sh --check
 止まる条件（安全側）:
 | 終了コード | 条件 |
 |---|---|
-| 4 | 追跡ファイルの未 commit 変更、または退避対象（残骸と、ignore 済みの生成物 `dist/` `build/` `out/` など）・削除してよいもの（依存とキャッシュ: `node_modules/` `.next/` `.turbo/` `.cache/` `coverage/` `test-results/` `playwright-report/` `*.tsbuildinfo`）・`.env*` 以外の未追跡・除外ファイル（手書きのメモなど）がある。git が無視していない `dist/` などの未追跡ファイルと、パッケージ配下の `dist/`（例 `apps/web/dist/`。生成物の定義は作業ツリー直下だけ）もここで止まる |
+| 4 | 追跡ファイルの未 commit 変更、または退避対象（残骸と、ignore 済みの生成物 `dist/` `build/` `out/` `.cloudflare/` `next-env.d.ts` など）・削除してよいもの（依存とキャッシュ: `node_modules/` `.next/` `.vinext/` `.turbo/` `.cache/` `coverage/` `test-results/` `playwright-report/` `*.tsbuildinfo`）・`.env*` 以外の未追跡・除外ファイル（手書きのメモなど）がある。git が無視していない `dist/` `.cloudflare/` などの未追跡ファイルと、パッケージ配下の `dist/` `.cloudflare/` と下の階層の `next-env.d.ts`（例 `apps/web/dist/`・`apps/web/next-env.d.ts`。生成物の定義は作業ツリー直下だけ）もここで止まる |
 | 5 | 未マージ |
 | 6 | linked worktree の `.env*` が本体 checkout と一致しない（worktree を消すと一緒に消えるため。一致していれば worktree ごと消えてよい） |
 | 7 | 実行中・同一性不明のレーンがある（生存情報は `$LANES_SCRATCH_ROOT/.cleanup-guards/` に保全）、一時 PostgreSQL を照合・停止できない、枝の先端が確認後に変わった |

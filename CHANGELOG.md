@@ -6,6 +6,39 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+### 直したこと / Fixed
+- `chk-run.sh` が、Cloudflare Workers + vinext（Next.js 互換の Vite の枠組み）の構成で、確認コマンド（型の生成・lint・テスト・ビルド）が
+  全部通っても記録を残さなかった（標準エラーに「検証中に入力が変化したため記録しない」と出て終了コード 1。レビューは親の記録を使い回せず
+  `no-record`）。確認コマンドが回すたびに書き直す次のもの（どれも git が無視している）を、入力と数えていたため:
+  `.cloudflare/`（Workers 向けのビルドの出力と型の生成）・`.vinext/`（枠組みのキャッシュ）・作業ツリー直下の `next-env.d.ts`・
+  `node_modules/.vitest-cache/`（テストのキャッシュ。キャッシュを切っても書く）・`node_modules/.mf/`（Workers の実行環境のまねをする道具のキャッシュ）。
+  これらと `node_modules/.vite/`・`node_modules/.cache/` を、生成物の定義（`lanes/_common.sh`。`chk-run.sh` と `cleanup-after-merge.sh` が使う 1 か所）に足した。
+  `node_modules/` の中は道具のキャッシュのフォルダだけで、パッケージの中身・`package.json`・`.package-lock.json` などは今までどおり入力。
+  `next-env.d.ts` は作業ツリー直下のその名前だけ（語尾の一致ではない。下の階層の `next-env.d.ts` やほかの `*.d.ts` は入力のまま。
+  定義に作業ツリー直下のファイル名そのものの一覧 `LANES_GENERATED_FILES` を足した）。どれも作業ツリー直下だけで、パッケージ配下
+  （`apps/web/node_modules/.vite/` など）とサブモジュールの中は入力のまま。
+  使い回す条件は緩めていない: 生成物として外すのは git が無視しているものだけで（追跡しているもの・無視されていない未追跡のものは、
+  この場所にあっても入力）、生成物の中身は今までどおり生成物の指紋に入り、使い回すとき（`skip=same-tree`・`--query` の `reuse=yes`）は
+  記録のときと同じであることを求める。
+  `cleanup-after-merge.sh` も同じ定義を使う。今までは `.cloudflare/`・`.vinext/`・`next-env.d.ts` を知らない物として後片付けを止めていた（exit 4）。
+  `.cloudflare/` と作業ツリー直下の `next-env.d.ts` は、`dist/` と同じく linked worktree では退避して続け（ビルドの出力が千件を超えても止まらない）、
+  本体 checkout では触らない。`.vinext/` は `.next/` と同じく退避せずに worktree ごと消す（パッケージ配下も）。`node_modules/` の中のキャッシュは
+  今までどおり退避せずに消す。
+  **上げた後は、`chk-run.sh` を 1 回通し直す。** `chk-run.sh` と `_common.sh` の中身が変わったので（どちらも入力の指紋に入る）、前の版で残した
+  確認済みの記録は 1 回だけ使えなくなる（レビューの問い合わせは `input-changed`）。
+  With a Cloudflare Workers + vinext (a Vite-based, Next.js-compatible framework) setup, `chk-run.sh` refused to record a passing check
+  ("inputs changed during the check", exit 1) because the check command rewrites git-ignored files on every run: `.cloudflare/`
+  (Workers build output and generated types), `.vinext/` (framework cache), `next-env.d.ts` at the worktree root,
+  `node_modules/.vitest-cache/` (written even with `--no-cache`) and `node_modules/.mf/`. These, plus `node_modules/.vite/` and
+  `node_modules/.cache/`, are now part of the shared generated-output definition in `lanes/_common.sh` (new list `LANES_GENERATED_FILES`
+  for exact file names at the worktree root). Other `node_modules/` content, nested `next-env.d.ts` files, package-level directories
+  (such as `apps/web/node_modules/.vite/`) and submodules are still inputs. Reuse is not relaxed: only git-ignored files are treated as
+  generated (tracked and non-ignored untracked files stay inputs), and their content must still match the record.
+  `cleanup-after-merge.sh` uses the same definition: `.cloudflare/` and the root `next-env.d.ts` are archived like `dist/` in linked
+  worktrees (left untouched in the main checkout), and `.vinext/` is deleted with the worktree like `.next/`, instead of stopping the cleanup (exit 4).
+  After upgrading, run `chk-run.sh` once again: records made by the previous version no longer match (`input-changed`) because
+  `chk-run.sh` and `_common.sh` changed.
+
 ## [0.1.6] - 生成物の中のリンクがあっても確認の結果を記録する / Record checks when generated output contains symlinks
 
 ### 直したこと / Fixed
