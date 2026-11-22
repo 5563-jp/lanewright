@@ -68,6 +68,13 @@ while (( $# )); do
 done
 wt="${wt:A}"; prompt="${prompt:A}"
 [[ -n "$label" ]] || label="${prompt:t:r}"
+# 親（このランチャ）は、引数のパスを絶対パスに決めた直後に / へ移る。対象の worktree の中から呼ばれても、親が動かす python
+# （_common.sh・review-dedup.zsh の判定や記録）が作業場所の中の同じ名前のモジュール（json.py など）を読まないようにする。
+# 子（agy）だけを worktree で起動する（gemini-agy.zsh の run_agy_once）。以後の git は必ず -C "$wt" で呼ぶ。
+# 今の場所からの相対パスで書いた設定（LANES_CONF・パスで書いた GEMINI_BIN）は、移る前に絶対パスに直す（PATH で探す名前だけの値はそのまま）
+[[ -z "${LANES_CONF:-}" || "$LANES_CONF" == /* ]] || LANES_CONF="${LANES_CONF:a}"
+[[ -z "${GEMINI_BIN:-}" || "$GEMINI_BIN" == /* || "$GEMINI_BIN" != */* ]] || GEMINI_BIN="${GEMINI_BIN:a}"
+builtin cd -q /
 # ここから排他を取るまでの誤り（--mode・--round・--base の値など）は、取れれば今回の .done に残す（前回の DONE を残したまま止まらない）
 lanes_early_target "$wt" "$label" "$dry"
 lanes_require_label "$label"
@@ -268,9 +275,8 @@ lanes_fresh_file "$scratch/gitconfig"
   print -- "[core]"; print -- "\tpager = cat"; print -- "[safe]"; print -- "\tdirectory = *"
 } > "$scratch/gitconfig"
 
-# 親は対象の worktree へ移らない（子だけを worktree で起動する。gemini-agy.zsh の run_agy_once が lanes_start_child_in で起動する）。
-# 以後の git は必ず -C "$wt" で呼ぶ
-cd /
+# 親は対象の worktree へ移らない（起動の最初に / へ移ってある。子だけを worktree で起動する。gemini-agy.zsh の run_agy_once が
+# lanes_start_child_in で起動する）。git は必ず -C "$wt" で呼ぶ
 snapshot_before="$(rvd_snapshot "$wt")" || lanes_die "レビュー前の内容確認に失敗"
 [[ "$snapshot_before" == "$tree" && "$(review_context)" == "$context" ]] || lanes_die "起動準備中に内容・指示が変化した。再実行する"
 guard_before="$(rvd_git_guard "$wt")" || lanes_die "レビュー前の git 管理フォルダの確認に失敗"

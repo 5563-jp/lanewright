@@ -6,6 +6,8 @@
 #  - 必須検証の使い回し: 親が同じ中身で chk-run.sh を通した記録があれば、レビューの中で回させない（rvd_checks_query）
 #  - 確認中の印（Gemini レビュー）: 子を起動する直前に記録を IN_PROGRESS にし、全部の記録を書けたときだけ CLEAN / NEEDS_FIX で確定する。
 #    途中で失敗・中断・強制終了したら IN_PROGRESS のまま残り、次の起動は前回の結果（古い CLEAN を含む）を使わない（rvd_prev_record）
+#  - ここの python はすべて -I（分離モード）で起動する。呼び出し元が対象の worktree の中にいても、そこにある同じ名前のモジュール
+#    （json.py など）や PYTHONPATH を読まない（レビュー対象のコードを親が動かさない）
 # 依存なし（_common.sh を読まなくても使える。tests/test-review-dedup.sh が単体で試す）
 
 rvd_series() { if [[ "$1" =~ '^(.+)-r([0-9]+)$' ]]; then print -- "${match[1]}"; else print -- "$1"; fi; }
@@ -13,7 +15,7 @@ rvd_label_round() { if [[ "$1" =~ '-r([0-9]+)$' ]]; then print -- "${match[1]}";
 rvd_state_file() { print -- "$1/.$2.review-state"; }   # <logdir> <series>
 # 本文も同じ JSON 記録に格納する。旧 key=value 形式は読み取りだけ互換にする。
 rvd_state_get() {
-  python3 - "$1" "$2" <<'PY_STATE'
+  python3 -I - "$1" "$2" <<'PY_STATE'
 import json, pathlib, sys
 p, key = pathlib.Path(sys.argv[1]), sys.argv[2]
 if p.is_file():
@@ -74,7 +76,7 @@ rvd_prev_verdict() { rvd_record_get "$(rvd_prev_record "$1" "$2" "$3")" verdict;
 # 無視対象のファイル（.env.local・手元の設定やメモなど）も中身まで比べる（QA の写しと同じ考え方）。
 # 既知の生成物（依存・ビルドとテストの出力・キャッシュ）は、どの深さにあっても比べない。レビューがテストを回すと書き換わるため。
 rvd_snapshot() {
-  python3 - "$1" <<'PY_SNAPSHOT'
+  python3 -I - "$1" <<'PY_SNAPSHOT'
 import hashlib, os, pathlib, stat, subprocess, sys
 GENERATED_DIRS = {"node_modules", ".next", ".turbo", ".cache", "coverage", "test-results", "playwright-report",
                   "dist", "build", "out", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
@@ -151,7 +153,7 @@ PY_SNAPSHOT
 # 枝（refs/heads）と origin の追跡枝は入れない。worktree 同士で共有され、並行する他のレーンの commit や fetch で変わるため（誤検出になる）。
 # ここで見ていない書き換え（他の枝の作成など）が前後の比較に出ないことは docs/roles.md に書いてある。
 rvd_git_guard() {
-  python3 - "$1" <<'PY_GUARD'
+  python3 -I - "$1" <<'PY_GUARD'
 import hashlib, os, pathlib, subprocess, sys
 wt = sys.argv[1]
 def git(*args):
@@ -190,7 +192,7 @@ PY_GUARD
 # 記録が変わった（使い回しが無くなった・親が回し直した）ら、同じ HEAD でも前回の結果を使わない。
 # <root> <prompt> <base> <mode> <policy> <model> <effort> [worktree] [使い回しの鍵] [レビュー役]
 rvd_context() {
-  python3 - "$@" <<'PY_CONTEXT'
+  python3 -I - "$@" <<'PY_CONTEXT'
 import hashlib, json, os, pathlib, sys
 root, prompt, base, mode, policy, model, effort = sys.argv[1:8]
 wt = sys.argv[8] if len(sys.argv) > 8 else ''
@@ -307,7 +309,7 @@ rvd_previous_followups() {
 # 記録（logs/.<系列>.review-state）の書き込みはこの 1 つだけ。標準入力の JSON（1 つのオブジェクト）を、同じフォルダの一時ファイルに
 # 書いてから名前を付け替える（os.replace）。途中で止まっても、前の記録か新しい記録のどちらかが丸ごと残る（書きかけは残らない）
 rvd_state_write() {   # <記録のファイル>
-  python3 -c '
+  python3 -I -c '
 import json, os, sys
 f = sys.argv[1]
 record = json.loads(sys.stdin.read())
@@ -331,7 +333,7 @@ except BaseException:
 rvd_save_state() {
   [[ "$5" == 'VERDICT: CLEAN' || "$5" == 'VERDICT: NEEDS_FIX' ]] || return 1
   local f; f="$(rvd_state_file "$1" "$2")"
-  python3 - "$3" "$4" "$5" "$6" "$7" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" "${13:-0}" <<'PY_SAVE' | rvd_state_write "$f"
+  python3 -I - "$3" "$4" "$5" "$6" "$7" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" "${13:-0}" <<'PY_SAVE' | rvd_state_write "$f"
 import json, pathlib, sys
 rnd, head, verdict, gate, label, context, tree, base, report, pending, blocking = sys.argv[1:]
 body = pathlib.Path(report).read_text(encoding='utf-8') if report else ''

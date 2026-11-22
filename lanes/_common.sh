@@ -232,7 +232,7 @@ lanes_entry_preflight() {
 # 共通の config / config.worktree・hooks の中身（下のフォルダも）。git は呼ばない（呼ぶ前に比べるため）。値は出さず指紋だけ出す。
 # gitdir と共通の管理フォルダは、子を起動する前に git で確かめた値を渡す（子の後で git に聞き直さない）
 lanes_git_ctl_fingerprint() {
-  python3 - "$1/.git" "$2" "$3" <<'PY_GIT_CTL_FP'
+  python3 -I - "$1/.git" "$2" "$3" <<'PY_GIT_CTL_FP'
 import hashlib, os, pathlib, sys
 dotgit, gitdir, common = (pathlib.Path(a) for a in sys.argv[1:4])
 h = hashlib.sha256()
@@ -327,7 +327,7 @@ lanes_codex_auth_state() {
 lanes_claude_auth_state() {
   local s rc=0; s="$("$CLAUDE_BIN" auth status < /dev/null 2>/dev/null)" || rc=$?
   # JSON 本文をプロセス引数へ渡さず、標準入力だけで検査する。
-  print -r -- "$s" | python3 -c '
+  print -r -- "$s" | python3 -I -c '
 import json, sys
 rc = int(sys.argv[1])
 try:
@@ -373,7 +373,7 @@ lanes_codex_no_mcp_args() {
   (( $# == 1 )) && [[ -d "$1" ]] || lanes_die "MCP の確認対象 worktree を 1 つ指定すること"
   lanes_resolve_bin CODEX_BIN codex
   local overrides item
-  overrides="$(python3 - "$CODEX_BIN" "$1" <<'PY'
+  overrides="$(python3 -I - "$CODEX_BIN" "$1" <<'PY'
 import json, re, subprocess, sys
 def servers(args):
     p = subprocess.run([sys.argv[1], *args, "mcp", "list", "--json"],
@@ -545,7 +545,7 @@ PYCHECKS
 
 LANES_FINDING_RE='^[[:space:]]*(([-*+]|[0-9]+[.)])[[:space:]]+)?(\*\*)?\[P'
 lanes_parse_review() {   # <log> <extract|infer|codex|checks|resolved|followups|P0|P1|P2|P3> [完了証明]
-  python3 - "$1" "$2" "${3:-}" "${LANES_REVIEW_CHECKS_REUSED:-0}" <<'PYREVIEW'
+  python3 -I - "$1" "$2" "${3:-}" "${LANES_REVIEW_CHECKS_REUSED:-0}" <<'PYREVIEW'
 import hashlib, json, os, pathlib, re, sys
 mode = sys.argv[2]
 # 必須検証を親の chk-run.sh の記録で済ませたレビュー。未実施・省略の報告は不足に数えず、失敗の報告だけ不足にする
@@ -786,7 +786,7 @@ lanes_ps_lstart() { LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | sed 's/^
 
 # 同一性不明は終了済みと区別する。削除・再起動は止め、停止信号は送らない。
 lanes_process_state() {
-  python3 - "$1" "$2" <<'PY'
+  python3 -I - "$1" "$2" <<'PY'
 import os, subprocess, sys
 try:
     pid = int(sys.argv[1])
@@ -1083,7 +1083,7 @@ except Exception:
 
 # 呼び出し元の標準入出力を保って背景起動する。LANES_CHILD を wait すれば孫の回収まで完了する。
 lanes_start_child() {
-  python3 -c "$LANES_PROCESS_GUARD" supervise "$@" <&0 &
+  python3 -I -c "$LANES_PROCESS_GUARD" supervise "$@" <&0 &
   typeset -g LANES_CHILD=$!
   typeset -g LANES_MANAGED_CHILD_PID="$LANES_CHILD"
   lanes_record_child "$LANES_CHILD"
@@ -1253,7 +1253,7 @@ lanes_kill_child() {
   [[ -n "$started" ]] || { [[ "$(lanes_process_state "$LANES_CHILD" "")" == dead ]]; return $?; }
   local mode=stop
   [[ "${LANES_MANAGED_CHILD_PID:-}" == "$LANES_CHILD" ]] && mode=stop-supervisor
-  python3 -c "$LANES_PROCESS_GUARD" "$mode" "$LANES_CHILD" "$started" || return $?
+  python3 -I -c "$LANES_PROCESS_GUARD" "$mode" "$LANES_CHILD" "$started" || return $?
 }
 
 lanes_finish_after_stop() {

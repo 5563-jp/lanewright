@@ -54,7 +54,7 @@ lanes_require_worktree "$wt"
 # 保存範囲は文章から推測しない。末尾 / はディレクトリ全体、それ以外は完全一致。
 # 起動前の変更、範囲外の変更、リンクで外へ向く変更は保存しない。Git のパスは NUL 区切りで扱う。
 gem_changes() {   # initial / check / stage。stage も保存直前に同じ検査を行う
-  python3 - "$wt" "$1" "${allowed_paths[@]}" <<'PY'
+  python3 -I - "$wt" "$1" "${allowed_paths[@]}" <<'PY'
 import os, subprocess, sys
 from pathlib import Path
 wt, mode, *scopes = sys.argv[1:]
@@ -257,7 +257,7 @@ audit="$scratch/gemini-audit.txt"; body_file="$scratch/gemini-response.txt"
 run_audit() {   # 引数: 検査する json（1 回目と再実行の両方）
   # scratch は agy が書ける場所。子の回収後に、前からある物（symlink など）を消してから新しく作る
   lanes_fresh_file "$audit"; lanes_fresh_file "$body_file"
-  python3 - "$audit" "$wt" "$scratch" "$body_file" "$GEM_IDLE_KILLED" "$@" <<'PY' || print -u2 -- "[run-gemini] 書き込み検査（python）が失敗"
+  python3 -I - "$audit" "$wt" "$scratch" "$body_file" "$GEM_IDLE_KILLED" "$@" <<'PY' || print -u2 -- "[run-gemini] 書き込み検査（python）が失敗"
 import json, os, re, sys
 out, wt, scr, body_out = sys.argv[1:5]
 allow_incomplete = sys.argv[5] == '1'
