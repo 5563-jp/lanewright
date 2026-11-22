@@ -90,6 +90,11 @@ elif case == 'gitlink':
     Path('.git').write_text('gitdir: ' + os.environ['GEM_TEST_OUTSIDE'] + '.gitdir\n'); change(); message()
 elif case == 'head_changed':
     subprocess.run(['git','commit','--allow-empty','-qm','test: 禁止操作の模擬'],check=True)
+elif case == 'u2028':
+    # 応答の本文の中の行区切りの文字（U+2028）を、エスケープせずにそのまま出す（stream-json の 1 行を割らないことの確認）
+    change(); message()
+    print(json.dumps({'event':'result', 'result':{'status':'SUCCESS', 'response':'検証用の応答\u2028続き'}}, ensure_ascii=False), flush=True)
+    sys.exit(0)
 elif case == 'tracked_log':
     Path('logs/tracked.txt').write_text('更新\n'); message()
 elif case == 'symlink_change':
@@ -265,6 +270,8 @@ setup literal_paths; scope=(--allow-path :literal.txt --allow-path 'space name.t
 setup directory_scope; scope=(--allow-path src/); run 0; committed
 setup rename; scope=(--allow-path owned.txt --allow-path renamed.txt); run 0; committed
 setup plain_path; run 0; committed
+# 監査は stream-json を \n だけで割って 1 行ずつ読む（本文の中の U+2028 で正しい JSON の行を不正な行にしない）
+setup u2028; run 0; committed
 for kind in bad_json bad_json_change blank empty missing_log invalid_utf8 scalar malformed_result missing_result bad_tool missing_tool_name audit_injection alias outside_missing move_source; do
   setup "$kind"; run 4; unchanged; [[ ! -e "$scratch/verified" ]] || fail '監査失敗後に検証へ進んだ'
 done

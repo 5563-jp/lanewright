@@ -22,6 +22,10 @@
 #  15. 記録の確定と安全の直し（round 1 の指摘）: 今回の NEEDS_FIX を前回分の後回しで上書きしない・確定に失敗したら合格の証跡を残さない・
 #      dry-run の書き込み先・前回の本文を読み切ってから IN_PROGRESS・親の python を worktree から切り離す・失格の回の後回し票・
 #      壊れた行の前の書き込みの記録・HEAD を読めない・.done を書けない・点検の codex・GNU の stat
+#  16. 記録の確定と排他の直し（round 2 の指摘）: 使い回しを有効にした問い合わせの python も worktree のモジュールを読まない・
+#      再利用の記録は証跡・後回し票・.done の後に確定（最後の確定に失敗したら全部取り下げる）・同じ logs/ のレビューは label・
+#      エンジンを問わず 1 本ずつ・skip-same-head も全部書けてから合格・.done は一時ファイルから置き換える（書きかけを残さない）・
+#      旧形式の本文の読み取りの失敗・相対パスの LANES_CONF / CHK_CACHE / LANES_SCRATCH_ROOT・stream-json を 1 行ずつ読む
 set -euo pipefail
 # git の環境変数を外し、一時リポの外へ git が上っていかないようにする（本物のリポを書き換えない）
 source "${0:A:h}/_git-isolate.sh"; lanes_test_git_isolate
@@ -93,6 +97,9 @@ if mut == 'hold':
 def ev(d): print(json.dumps(d, ensure_ascii=False), flush=True)
 body = os.environ.get('GT_BODY', '問題なし\nVERDICT: CLEAN')
 rc = int(os.environ.get('GT_RC', '0'))
+if os.environ.get('GT_RAW'):
+    # 用意したバイト列をそのまま出す（行の区切り・最後の改行の有無を変えない）
+    sys.stdout.buffer.write(pathlib.Path(os.environ['GT_RAW']).read_bytes()); sys.stdout.flush(); sys.exit(rc)
 events = os.environ.get('GT_EVENTS', '')
 if os.environ.get('GT_REPLAY'):
     for line in open(os.environ['GT_REPLAY'], encoding='utf-8'):
@@ -167,10 +174,11 @@ def repo(name, gitignore='logs/\n'):
     (wt / 'b.txt').write_text('足した'); git(wt, 'add', 'b.txt'); git(wt, 'commit', '-qm', 'feat: b を足す')
     return wt, first
 
-def make_env(body='問題なし\nVERDICT: CLEAN', mutation='', events='', rc=0, replay=None, help='full', env=None):
+def make_env(body='問題なし\nVERDICT: CLEAN', mutation='', events='', rc=0, replay=None, help='full', env=None, raw=None):
     e = dict(BASE, GT_CAPTURE=str(capture), GT_BODY=body, GT_MUTATION=mutation, GT_EVENTS=events, GT_RC=str(rc), GT_HELP=help,
              STUB_CLAUDE_RESULT=body)
     if replay: e['GT_REPLAY'] = str(replay)
+    if raw: e['GT_RAW'] = str(raw)
     e.update(env or {})
     return e
 def run(script, wt, label, *args, timeout=120, cwd=None, **kw):
@@ -732,6 +740,221 @@ gnu = T / 'gnu-stat-bin'; gnu.mkdir()
 wt, first = repo('gnu-stat')
 r, cap, done = gem(wt, 'gs', events='drip', env={'PATH': f'{gnu}{os.pathsep}{BASE["PATH"]}', 'GEMINI_REVIEW_NOOUTPUT_SEC': '3', 'GT_SLEEP': '7'})
 check('GNU 風の stat が先にあっても、出力が続く間は止めない（CLEAN・EXIT:0）', r.returncode == 0 and 'VERDICT: CLEAN' in done and '更新なし' not in (wt / 'logs/gs.log').read_text(), out(r) + done)
+
+# ---- 16. 記録の確定と排他の直し（round 2 の指摘）----
+# 16-1. 必須検証の使い回しを有効にして（LANES_REVIEW_REUSE_CHECKS=1・実際の記録と照合する）も、問い合わせ（chk-run.sh --query）の
+#       python（read_state。shutil を読み込む）が worktree の同じ名前のモジュール（shutil.py）を読まない。
+#       json.py は置かない（記録を作る chk-run.sh 本体は確認コマンドを worktree で回す役で、その監督役が json を読み込むため。ここでは見ない）
+wt, first = repo('isolate-reuse')
+marker = T / 'planted-import-marker-reuse'
+(wt / 'shutil.py').write_text(f'open({str(marker)!r}, "a").write("shutil\\n")\n')
+git(wt, 'add', 'shutil.py'); git(wt, 'commit', '-qm', 'test: 標準の部品と同じ名前のモジュールを置く')
+chk_env = make_env(env={'LANES_CHECK_CMD': '/usr/bin/true'})
+chk = subprocess.run(['bash', str(lanes / 'chk-run.sh'), str(wt), '49996', str(T / 'chk-out-iso')], env=chk_env, capture_output=True, text=True, timeout=120, cwd=wt)
+check('用意: worktree の中から chk-run.sh が記録を残す', chk.returncode == 0 and 'recorded=' in chk.stdout + chk.stderr, chk.stdout[-800:] + chk.stderr[-800:])
+marker.unlink(missing_ok=True)   # 記録を作る側（確認コマンドを worktree で回す chk-run.sh 本体）は対象外。ここからはレビューの起動だけを見る
+for how, script, extra in (('直接', 'run-gemini-review.sh', ()), ('入口（--engine gemini）', 'run-review.sh', ('--engine', 'gemini'))):
+    r, cap, done = run(script, wt, 'isr-' + script[4:8], *extra, cwd=wt, env={'LANES_CHECK_CMD': '/usr/bin/true', 'LANES_REVIEW_REUSE_CHECKS': '1'})
+    check(f'{how}: 使い回しを有効にしても、問い合わせの python が worktree の shutil.py を読まない（記録は使い回す）',
+          r.returncode == 0 and '親の chk-run の記録を使用' in evidence(wt, 'isr-' + script[4:8]) and not marker.exists(),
+          out(r) + done + (marker.read_text() if marker.exists() else ''))
+
+# 16-2. 再利用の記録は、証跡・後回し票・終了記録（.done）を全部置いた後に確定する。通知（lanes_notify）の偽の osascript で、
+#       .done を置いた瞬間の状態（証跡・後回し票は公開済み・再利用の記録はまだ確認中）を記録して確かめる
+notes = T / 'notify.jsonl'
+(bindir / 'osascript').write_text(r'''#!/usr/bin/env python3
+import json, os, pathlib, sys
+wt, label, series = os.environ['GT_WT'], os.environ['GT_LABEL'], os.environ['GT_SERIES']
+logs = pathlib.Path(wt) / 'logs'
+def read(name):
+    p = logs / name
+    return p.read_text(encoding='utf-8') if p.is_file() else None
+st = read('.' + series + '.review-state')
+rec = {'msg': sys.argv[-1], 'done': read(label + '.done'), 'evidence': read(label + '.evidence.md'), 'followups': read(series + '.followups.md'),
+       'state': json.loads(st)['last_verdict'] if st else None}
+with open(os.environ['GT_NOTES'], 'a', encoding='utf-8') as f:
+    f.write(json.dumps(rec, ensure_ascii=False) + '\n')
+''')
+(bindir / 'osascript').chmod(0o755)
+def notified():
+    seen = [json.loads(l) for l in notes.read_text().splitlines()] if notes.exists() else []
+    notes.unlink(missing_ok=True); return seen
+def note_env(wt, label, series, **extra):
+    return dict(LANES_NOTIFY='1', GT_NOTES=str(notes), GT_WT=str(wt), GT_LABEL=label, GT_SERIES=series, **extra)
+wt, first = repo('fin-order')
+body3 = '- [P2] 今回の残件\n' + skip_line + '\nVERDICT: NEEDS_FIX'
+r, cap, done = gem(wt, 'fo-r3', body=body3, env=note_env(wt, 'fo-r3', 'fo'))
+seen = notified()
+check('確定の順番: .done（合格）を置いた時点で、証跡・後回し票は公開済み・再利用の記録はまだ確認中（IN_PROGRESS）。最後に記録を確定する',
+      r.returncode == 0 and len(seen) == 1 and seen[0]['done'].startswith('EXIT:0\nVERDICT: CLEAN') and '- VERDICT: CLEAN' in (seen[0]['evidence'] or '')
+      and '今回の残件' in (seen[0]['followups'] or '') and seen[0]['state'] == 'IN_PROGRESS' and state(wt, 'fo')['last_verdict'] == 'VERDICT: CLEAN',
+      out(r) + json.dumps(seen, ensure_ascii=False))
+# 最後の確定（再利用の記録）に失敗したら、置いた分を全部取り下げる。後回し票は公開前の中身へ戻す
+wt, first = repo('fin-rollback')
+(wt / 'logs').mkdir()
+fu = wt / 'logs/fr.followups.md'; fu_before = '## round 1\n- 前からある票\n'; fu.write_text(fu_before)
+r, cap, done = gem(wt, 'fr-r3', mutation='log-unreadable', body=body3, env=note_env(wt, 'fr-r3', 'fr'))
+(wt / 'logs/fr-r3.log').chmod(0o644)
+seen = notified(); ev_text = evidence(wt, 'fr-r3'); log_text = (wt / 'logs/fr-r3.log').read_text()
+check('再利用の記録の確定（最後）に失敗したら、合格で置いた .done を EXIT:3・VERDICT: NONE へ書き直す（通知は完了 → 失敗の 2 回）',
+      r.returncode == 3 and done.startswith('EXIT:3\nVERDICT: NONE') and '再利用の記録' in done and len(seen) == 2
+      and seen[0]['done'].startswith('EXIT:0\nVERDICT: CLEAN') and seen[1]['done'].startswith('EXIT:3\nVERDICT: NONE'),
+      out(r) + done + json.dumps(seen, ensure_ascii=False))
+check('…証跡・ログの末尾も NONE / EXIT:3、後回し票は公開前の中身、再利用の記録は確認中のまま、標準出力に合格を出さない',
+      '- VERDICT: NONE' in ev_text and '- VERDICT: CLEAN' not in ev_text and '（確定しなかったので保存していない）' in ev_text
+      and log_text.rstrip().endswith('EXIT:3\nVERDICT: NONE') and fu.read_text() == fu_before and state(wt, 'fr')['last_verdict'] == 'IN_PROGRESS'
+      and '- VERDICT: CLEAN' not in r.stdout, out(r) + ev_text + log_text[-400:] + fu.read_text())
+r, cap, done = gem(wt, 'fr-r3', body=body3)
+check('…次の通常の起動は回して確定し、後回し票は今回の分を 1 回だけ足す', r.returncode == 0 and state(wt, 'fr')['last_verdict'] == 'VERDICT: CLEAN'
+      and fu.read_text().startswith(fu_before) and fu.read_text().count('今回の残件') == 1, out(r) + fu.read_text())
+
+# 16-3. 同じ logs/ のレビューは、label もエンジンも問わず 1 本ずつ（logs/.review.lock）。取れなければ実行中のレビューの記録・再利用の記録に
+#       触らずに exit 2。今回の label には EXIT:2 を残す（前回の DONE を返さない）
+wt, first = repo('rlock')
+r, cap, done = gem(wt, 'lk-g')
+check('用意: Gemini レビューが一度 CLEAN で終わる（前回の DONE がある）', r.returncode == 0, out(r))
+ledger = (wt / 'logs/.lanes-records').read_text().splitlines()
+check('レビューの排他のロックファイルは台帳に file:.review.lock で載る（chk-run.sh の指紋から外れる）', 'file:.review.lock' in ledger, '\n'.join(ledger))
+(wt / 'logs/other.done').write_text('EXIT:0\nVERDICT: CLEAN\nfinished=x\nelapsed_min=1\n')
+def logs_snapshot(wt):
+    return {p.name: p.read_bytes() for p in (wt / 'logs').iterdir() if p.is_file() and (p.name.endswith('.review-state') or p.name.startswith('other.'))}
+before = logs_snapshot(wt)
+ready = T / 'rlock.ready'; ready.unlink(missing_ok=True)
+holder = subprocess.Popen(['zsh', '-fc', 'zmodload zsh/system zsh/zselect; zsystem flock -f fd "$1" || exit 1; print ready > "$2"; zselect -t 6000 || true',
+                           '_', str(wt / 'logs/.review.lock'), str(ready)])
+for _ in range(100):
+    if ready.exists(): break
+    time.sleep(0.1)
+check('用意: 別のレビューがレビューの排他を持っている', ready.exists())
+for how, script, extra, lbl in (('Gemini（前回 DONE の label）', 'run-gemini-review.sh', (), 'lk-g'), ('Codex（入口 --engine codex）', 'run-review.sh', ('--engine', 'codex'), 'lk-c'),
+                                ('Claude（入口 --engine claude）', 'run-review.sh', ('--engine', 'claude'), 'lk-cl')):
+    r, cap, done = run(script, wt, lbl, *extra)
+    st_out = subprocess.run(['zsh', '-f', str(lanes / 'lanes-status.sh'), str(wt), lbl], env=BASE, capture_output=True, text=True)
+    check(f'別のレビューが実行中なら {how} は exit 2・子を起動しない・今回の label は FAILED（EXIT:2）・ほかの記録と再利用の記録は変えない',
+          r.returncode == 2 and cap is None and done.startswith('EXIT:2\nVERDICT: NONE') and '別のレビューが実行中' in done
+          and st_out.stdout.startswith('FAILED') and logs_snapshot(wt) == before, out(r) + done + st_out.stdout)
+holder.terminate(); holder.wait(timeout=10)
+r, cap, done = gem(wt, 'lk-g', '--force')
+check('排他が空けば、同じ label で今までどおり回る', r.returncode == 0 and cap is not None and 'VERDICT: CLEAN' in done, out(r))
+# 実際に同時に起動する: Gemini のレビューが走っている間の Codex のレビュー（別の label）は止まり、Gemini の確認中の印を巻き戻さない
+wt, first = repo('rlock-live')
+capture.unlink(missing_ok=True)
+p = subprocess.Popen(['zsh', '-f', str(lanes / 'run-gemini-review.sh'), str(wt), str(prompt), 'live-gem-r1'],
+                     env=make_env(events='sleep', env={'GT_SLEEP': '6'}), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+for _ in range(300):
+    if capture.exists(): break
+    time.sleep(0.1)
+check('用意: Gemini のレビューの子が起動した（確認中の印を書いた）', capture.exists() and state(wt, 'live-gem')['last_verdict'] == 'IN_PROGRESS')
+c = subprocess.run(['zsh', '-f', str(lanes / 'run-review.sh'), str(wt), str(prompt), 'live-main', '--engine', 'codex'],
+                   env=make_env(), capture_output=True, text=True, timeout=120)
+cdone = (wt / 'logs/live-main.done').read_text() if (wt / 'logs/live-main.done').is_file() else ''
+check('Gemini のレビューの実行中に、別の label の Codex のレビューは exit 2（Gemini の確認中の印はそのまま）',
+      c.returncode == 2 and '別のレビューが実行中' in cdone and state(wt, 'live-gem')['last_verdict'] == 'IN_PROGRESS', out(c) + cdone)
+so, se = p.communicate(timeout=120)
+gdone = (wt / 'logs/live-gem-r1.done').read_text()
+check('…Gemini のレビューは最後まで回って CLEAN で確定する', p.returncode == 0 and 'VERDICT: CLEAN' in gdone and state(wt, 'live-gem')['last_verdict'] == 'VERDICT: CLEAN',
+      f'{p.returncode}\n{se[-1500:]}\n{gdone}')
+c = subprocess.run(['zsh', '-f', str(lanes / 'run-review.sh'), str(wt), str(prompt), 'live-main', '--engine', 'codex'],
+                   env=make_env(), capture_output=True, text=True, timeout=120)
+check('…終わった後の Codex のレビューは回り、Gemini の確定した記録を変えない', c.returncode == 0 and state(wt, 'live-gem')['last_verdict'] == 'VERDICT: CLEAN', out(c))
+# 逆向き: Claude のレビューが走っている間の Gemini のレビュー（別の label）も止まる
+capture.unlink(missing_ok=True)
+pc = subprocess.Popen(['zsh', '-f', str(lanes / 'run-review.sh'), str(wt), str(prompt), 'live-cl', '--engine', 'claude'],
+                      env=make_env(env={'STUB_RUN': 'sleep 5'}), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+for _ in range(100):
+    pidf = wt / 'logs/live-cl.pid'
+    if pidf.is_file() and 'child_pid=' in pidf.read_text(): break
+    time.sleep(0.1)
+r, cap, done = gem(wt, 'live-gem2')
+check('Claude のレビューの実行中に、別の label の Gemini のレビューは exit 2・agy を起動しない', r.returncode == 2 and cap is None and '別のレビューが実行中' in done, out(r) + done)
+so, se = pc.communicate(timeout=120)
+check('…Claude のレビューは最後まで回る', pc.returncode == 0, f'{pc.returncode}\n{se[-1500:]}')
+
+# 16-4. 同じ head の結果を使う経路（skip-same-head）も、ログ・証跡・.done が全部書けてから合格を表示する
+wt, first = repo('skip-log')
+gem(wt, 'sl')
+(wt / 'logs/sl.log').unlink(); (wt / 'logs/sl.log').mkdir()
+r, cap, done = gem(wt, 'sl')
+ev_path = wt / 'logs/sl.evidence.md'
+check('skip-same-head でログ（同じ名前のフォルダ）を書けなければ、合格の証跡を残さず EXIT:3・VERDICT: NONE（標準出力にも合格を出さない）',
+      r.returncode == 3 and cap is None and done.startswith('EXIT:3\nVERDICT: NONE') and 'ログ' in done
+      and (not ev_path.exists() or '- VERDICT: CLEAN' not in ev_path.read_text()) and '- VERDICT: CLEAN' not in r.stdout
+      and state(wt, 'sl')['last_verdict'] == 'VERDICT: CLEAN', out(r) + done + (ev_path.read_text() if ev_path.exists() else ''))
+(wt / 'logs/sl.log').rmdir()
+r, cap, done = gem(wt, 'sl')
+check('…フォルダを外せば、同じ head の結果を使って合格（ログ・証跡・.done が揃う）', r.returncode == 0 and cap is None and 'skip-same-head' in evidence(wt, 'sl')
+      and (wt / 'logs/sl.log').read_text().rstrip().endswith('VERDICT: CLEAN') and done.startswith('EXIT:0\nVERDICT: CLEAN') and '- VERDICT: CLEAN' in r.stdout, out(r))
+
+# 16-5. .done は一時ファイルに書き切ってから置き換える（書きかけの EXIT:0 を見せない）。書き直し（lanes_rewrite_done）の扱い
+ud = T / 'done-unit'; ud.mkdir()
+def done_probe(script, *args):
+    return subprocess.run(['zsh', '-fc', 'source "$1/_common.sh"; d="$2"; LANES_LOGDIR="$d" LANES_LOGDIR_ID="$(lanes_logdir_id "$d")"; '
+                           'LANES_DONEFILE="$d/u.done" LANES_T0=$(date +%s) LANES_LABEL=u; ' + script, '_', str(lanes), str(ud), *args],
+                          env=dict(BASE, LANES_NOTIFY='0', LANES_DIR=str(lanes)), capture_output=True, text=True, timeout=60)
+long_note = 'x' * 900
+p_ = done_probe('LANES_DONE_WRITTEN=0; ulimit -f 1; lanes_mark_done 0 "VERDICT: CLEAN" "$3"; print -r -- "ok=$LANES_DONE_OK"', long_note)
+check('.done の書き込みが途中で失敗しても（ファイルの大きさの上限）、書きかけの .done も一時ファイルも残さない（LANES_DONE_OK=0）',
+      'ok=0' in p_.stdout and not (ud / 'u.done').exists() and not [n for n in os.listdir(ud) if n.endswith('.tmp')], p_.stdout + p_.stderr + str(os.listdir(ud)))
+(ud / 'u.done').mkdir()
+p_ = done_probe('LANES_DONE_WRITTEN=0; lanes_mark_done 0 "VERDICT: CLEAN" n; print -r -- "ok=$LANES_DONE_OK"')
+check('.done の名前がフォルダなら書かない（中へ移さない・一時ファイルを残さない）', 'ok=0' in p_.stdout and (ud / 'u.done').is_dir() and not list((ud / 'u.done').iterdir())
+      and not [n for n in os.listdir(ud) if n.endswith('.tmp')], p_.stdout + p_.stderr)
+(ud / 'u.done').rmdir()
+p_ = done_probe('LANES_DONE_WRITTEN=0; lanes_rewrite_done 3 "VERDICT: NONE" before; print -r -- "pre=$([[ -e $d/u.done ]] && print y || print n)"; '
+                'lanes_mark_done 0 "VERDICT: CLEAN" first; print -r -- "ok=$LANES_DONE_OK"; lanes_mark_done 4 "VERDICT: NONE" again; '
+                'cp "$d/u.done" "$d/u.first"; lanes_rewrite_done 3 "VERDICT: NONE" rollback; print -r -- "ok2=$LANES_DONE_OK"')
+first_done, after = (ud / 'u.first').read_text(), (ud / 'u.done').read_text()
+check('書き直しは lanes_mark_done の後だけ。二重の lanes_mark_done は書かない。lanes_rewrite_done は今回の結果で丸ごと置き換える',
+      'pre=n' in p_.stdout and 'ok=1' in p_.stdout and 'ok2=1' in p_.stdout and first_done.startswith('EXIT:0\nVERDICT: CLEAN\n') and 'note=first' in first_done
+      and after.startswith('EXIT:3\nVERDICT: NONE\n') and 'note=rollback' in after, p_.stdout + p_.stderr + first_done + after)
+p_ = done_probe('LANES_DONE_WRITTEN=0; lanes_mark_done 0 "VERDICT: CLEAN" first; lanes_replace_file() { return 1; }; '
+                'lanes_rewrite_done 3 "VERDICT: NONE" rollback; print -r -- "ok=$LANES_DONE_OK"')
+check('書き直せなければ、合格の .done を消す（合格のまま残さない）', 'ok=0' in p_.stdout and not (ud / 'u.done').exists(), p_.stdout + p_.stderr)
+
+# 16-6. 旧形式（<系列>-r<k>.evidence.md）の指摘ログを途中までしか読めなければ、その失敗を返し、確認中の印に置き換えない
+lg = T / 'legacy-logs'; lg.mkdir()
+(lg / 'v-r1.evidence.md').write_text('## Claude レビュー証跡（v-r1）\n- VERDICT: NEEDS_FIX\n- 実行: x / EXIT:0\n- HEAD: 0123456789ab → 0123456789ab / 作業ツリー差分行 0\n')
+(lg / 'v-r1.log').write_text('- [P1] a.txt:1 未解決の重大な指摘\nVERDICT: NEEDS_FIX\n')
+legacy = ('source "$1/review-dedup.zsh"; eval "$3"; out="$(rvd_record_get "$2/v-r1.evidence.md" report)"; print -r -- "get=$? [$out]"; '
+          'rvd_mark_in_progress "$2" v 2 v-r2 "$2/v-r1.evidence.md" "VERDICT: NEEDS_FIX"; print -r -- "mark=$?"')
+p_ = subprocess.run(['zsh', '-fc', legacy, '_', str(lanes), str(lg), 'cat() { print -rn -- "途中まで"; return 1; }'], env=BASE, capture_output=True, text=True)
+check('旧形式の本文の読み取りが途中で失敗したら、rvd_record_get は失敗を返し、rvd_mark_in_progress は記録を作らない',
+      'get=1 [途中まで]' in p_.stdout and 'mark=1' in p_.stdout and not (lg / '.v.review-state').exists(), p_.stdout + p_.stderr)
+p_ = subprocess.run(['zsh', '-fc', legacy, '_', str(lanes), str(lg), ':'], env=BASE, capture_output=True, text=True)
+st = json.loads((lg / '.v.review-state').read_text()) if (lg / '.v.review-state').exists() else {}
+check('…読み切れたときは今までどおり、旧形式の未解決指摘を確認中の印に持ち越す', 'get=0' in p_.stdout and 'mark=0' in p_.stdout
+      and st.get('last_verdict') == 'IN_PROGRESS' and '未解決の重大な指摘' in st.get('last_report', ''), p_.stdout + p_.stderr)
+
+# 16-7. 相対パスの LANES_CONF・CHK_CACHE で親が chk-run.sh を通しても、同じ場所から起動したレビューは記録と照合できる
+wt, first = repo('relconf')
+rb = T / 'relbase'; rb.mkdir()
+(rb / 'rel.conf').write_text('LANES_CHECK_CMD=/usr/bin/true\n')
+rel = {'LANES_CONF': 'rel.conf', 'CHK_CACHE': 'chk-rel/passed.tsv'}
+chk = subprocess.run(['bash', str(lanes / 'chk-run.sh'), str(wt), '49995', str(T / 'chk-out-rel')], env=make_env(env=rel), capture_output=True, text=True, timeout=120, cwd=rb)
+check('用意: 相対パスの LANES_CONF・CHK_CACHE で chk-run.sh が記録を残す', chk.returncode == 0 and 'recorded=' in chk.stdout + chk.stderr
+      and (rb / 'chk-rel/passed.tsv').is_file(), chk.stdout[-800:] + chk.stderr[-800:])
+r, cap, done = gem(wt, 'rcf', cwd=rb, env=dict(rel, LANES_REVIEW_REQUIRE_CHECKS='1'))
+check('相対パスの LANES_CONF・CHK_CACHE でも、親の記録を使い回す（LANES_REVIEW_REQUIRE_CHECKS=1 でも起動する）',
+      r.returncode == 0 and cap is not None and '親の chk-run の記録を使用' in evidence(wt, 'rcf'), out(r) + done)
+
+# 16-8. 相対パスの LANES_SCRATCH_ROOT は、起動元を基準に絶対パスへ直してから scratch を作る（/ を基準に作らない）
+wt, first = repo('relscratch')
+sub = T / 'relscratch-cwd'; sub.mkdir()
+r, cap, done = gem(wt, 'rsc', cwd=sub, env={'LANES_SCRATCH_ROOT': 'rel-scratch'})
+check('相対パスの LANES_SCRATCH_ROOT は起動元の下に scratch を作る（/ の下に作らない）',
+      r.returncode == 0 and cap is not None and cap['env']['LANES_SCRATCH'].startswith(str(sub / 'rel-scratch') + '/') and (sub / 'rel-scratch').is_dir()
+      and not os.path.lexists('/rel-scratch'), out(r) + json.dumps(cap['env'] if cap else {}, ensure_ascii=False))
+
+# 16-9. stream-json の監査は 1 行ずつ読む。最後の行に \n が無くても、空の行（\n だけ）は不正な行として数える
+wt, first = repo('stream')
+init_line = json.dumps({'event': 'init'})
+result_line = json.dumps({'event': 'result', 'result': {'status': 'SUCCESS', 'response': '問題なし\nVERDICT: CLEAN', 'num_turns': 1, 'usage': {}}}, ensure_ascii=False)
+nores = T / 'stream-noeol.jsonl'; nores.write_text(init_line + '\n' + result_line, encoding='utf-8')
+r, cap, done = gem(wt, 'sn', raw=nores)
+check('最後の行に改行が無い stream-json も、1 行ずつ読んで本文の VERDICT を採用する（CLEAN）', r.returncode == 0 and 'VERDICT: CLEAN' in done, out(r) + done)
+blank = T / 'stream-blank.jsonl'; blank.write_text(init_line + '\n\n' + result_line + '\n', encoding='utf-8')
+r, cap, done = gem(wt, 'sb', raw=blank)
+check('途中の空の行は JSON の不正行として数える（VERDICT: NONE・EXIT:3）', r.returncode == 3 and 'VERDICT: NONE' in done and 'JSON の不正行' in evidence(wt, 'sb'), out(r) + done)
 
 print(f'PASS: {passed} 件 / EXIT:0')
 PY

@@ -168,7 +168,7 @@ zsh -f "$LANES_DIR/prepare-screen-qa.sh" "$wt" screen-1 --url "http://localhost:
 [[ "$(git -C "$wt" status --porcelain)" == "" ]] || fail "QA レーンの後に未 commit の変更がある（用意が誤り）"
 [[ "$(query "$wt")" == reuse=yes* ]] || fail "QA レーン・画面 QA の準備の記録が入力に数えられている: $(query "$wt")"
 for owner in label:impl-claude label:impl-codex label:rev-impl-r1 label:qa-1 label:screen-1 file:launch.log file:impl.launch.log file:qa.launch.log \
-    file:.rev-impl.review-state file:rev-impl.followups.md file:.review-reuse-blocked; do
+    file:.rev-impl.review-state file:rev-impl.followups.md file:.review-reuse-blocked file:.review.lock; do
   grep -qxF -- "$owner" "$wt/logs/.lanes-records" || { cat "$wt/logs/.lanes-records" >&2; fail "台帳に載っていない: $owner"; }
 done
 [[ "$(sort "$wt/logs/.lanes-records" | uniq -d)" == "" ]] || fail "台帳に同じ行が 2 回載っている"
@@ -205,6 +205,7 @@ records=(
   x.pid x.done x.lock x.log x.json x.stderr.log x.prompt.md x.dry-run.prompt.md x.evidence.md x.last.md x.completion.json
   x.try1.json x.try1.stderr.log x.verify.log x.meta.txt x.launch.log qa-deps-root.log qa-case.md
   rev-a.followups.md .rev-a.review-state .rev-a.review-state.tmp.12345 .x.pid.12345.0123456789ab.tmp
+  .x.done.12345.0123456789ab.tmp .x.evidence.md.12345.0123456789ab.tmp .x.log.12345.0123456789ab.tmp .rev-a.followups.md.12345.0123456789ab.tmp
   .x.last.md.12345.1794270246011662000.tmp .x.completion.json.12345.1794270246011662001.tmp
   x.prev-20260101-000000.pid x.prev-20260101-000000-2.done x.stderr.prev-20260101-000000.log x.prompt.prev-20260101-000000.md
   x.evidence.prev-20260101-000000.md x.completion.prev-20260101-000000.json x.last.prev-20260101-000000-3.md rev-1.2_b-r3.json
@@ -221,11 +222,11 @@ yes_again "記録に似た名前のファイルを消した後"
 pass "台帳に載っていない持ち主のファイルは、名前が記録に似ていても入力のまま（$(( ${#records} + ${#lookalikes} )) 通り。logs/input.json を含む）"
 # 台帳に載せた後は、置いても書き換えても入力に数えない（全部を一度に置いて、1 つでも数えられたら使い回さなくなる）
 claim "$wt/logs" label:x label:rev-1.2_b-r3 file:x.launch.log file:qa-deps-root.log file:qa-case.md file:rev-a.followups.md file:.rev-a.review-state
-for f in "${records[@]}" launch.log .review-reuse-blocked; do print -r -- "記録 $f" >> "$wt/logs/$f"; done
+for f in "${records[@]}" launch.log .review-reuse-blocked .review.lock; do print -r -- "記録 $f" >> "$wt/logs/$f"; done
 [[ "$(query "$wt")" == reuse=yes* ]] || fail "台帳に載せた持ち主の記録が入力に数えられている: $(query "$wt")"
-for f in "${records[@]}" launch.log .review-reuse-blocked; do print -r -- "書き換え" >> "$wt/logs/$f"; done
+for f in "${records[@]}" launch.log .review-reuse-blocked .review.lock; do print -r -- "書き換え" >> "$wt/logs/$f"; done
 [[ "$(query "$wt")" == reuse=yes* ]] || fail "台帳に載せた持ち主の記録の書き換えが入力に数えられている: $(query "$wt")"
-pass "台帳に載せた持ち主の記録（$(( ${#records} + 2 )) 通り。Gemini・QA・回転した前回分・書きかけの一時ファイルを含む）は、置いても書き換えても入力に数えない"
+pass "台帳に載せた持ち主の記録（$(( ${#records} + 3 )) 通り。Gemini・QA・回転した前回分・書きかけの一時ファイル・レビューの排他のロックファイルを含む）は、置いても書き換えても入力に数えない"
 # 台帳に載っていても、持ち主の決まった名前でないもの（label x の、ランチャが書かない語尾）は入力のまま
 for f in x.txt x.config.json.bak x.pid.txt x-extra.json xx.json x.json.tmp.12345 launch.log.tmp.12345 .x.json.12345.tmp .x.json.abc.0123.tmp; do
   print -r -- "入力" > "$wt/logs/$f"; no_reuse "logs/$f（label x の決まった名前ではない）"; rm -f "$wt/logs/$f"
