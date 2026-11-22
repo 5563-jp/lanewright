@@ -358,7 +358,7 @@ import base64, json, os, re, stat, sys
 d = sys.argv[1]; out = {}
 if os.path.isdir(d) and not os.path.islink(d):
     for e in os.scandir(d):
-        if re.fullmatch(r"\..+\.review-state", e.name):
+        if re.fullmatch(r"\.[^/\x00]+\.review-state", e.name):
             s = e.stat(follow_symlinks=False)
             if stat.S_ISREG(s.st_mode) and s.st_nlink == 1:
                 with open(os.path.join(d, e.name), "rb") as f:
@@ -369,22 +369,40 @@ print(json.dumps(out, sort_keys=True))
 PY_STATES
 }
 # rvd_states_restore <logdir>（覚えた中身は標準入力で渡す。記録が増えても引数の長さの上限に当たらない）
-#   → 0 = 変わっていない / 1 = 変わっていたので戻した / 2 = 戻しきれなかった
+#   → 0 = 変わっていない / 1 = 変わっていたので戻した / 2 = 戻しきれなかった（覚えた中身が不正なときも。そのときは何も触らない）
+# 戻す前に、覚えた中身を全部確かめる: 名前はどれも logs/ の直下の 1 つの .review-state（/ を含まない）で、中身はどれも復号できること。
+# 1 つでも外れたら（壊れた・書き換えられた「確認中」の印など）、logs/ の記録を 1 つも消さずに exit 2（外へ作らない・消してから気づかない）。
 # 戻すときは、記録の名前の物（普通のファイル・読めないファイル・フォルダ・symlink）を 1 つずつ消し、覚えた普通のファイルだけを
 # 開いたフォルダの中で O_EXCL|O_NOFOLLOW で作り直す。1 つ失敗しても残りを最後まで試す。
 # 戻しきれなかったときは exit 2。ランチャは rvd_mark_blocked で「使い回し禁止」の印を置く（logs/ の中と、子の作業場所の外の
 # 両方）。ランチャはこの印があると、どの系列でも前回の記録を使わず（同じ HEAD の省略も差分にもしない）毎回 full でレビューする
 rvd_states_restore() {
   python3 -I -c '
-import base64, json, os, re, shutil, stat, sys
+import base64, binascii, json, os, re, shutil, stat, sys
 d = sys.argv[1]
-pat = re.compile(r"\..+\.review-state")
-def block(dfd):
-    pass  # 印はランチャが rvd_mark_blocked で置く（logs/ の外にも置くため）
+pat = re.compile(r"\.[^/\x00]+\.review-state")
 try:
     before = json.loads(sys.stdin.read())
-    dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 except Exception:
+    sys.exit(2)
+if not isinstance(before, dict):
+    sys.exit(2)
+decoded = {}
+for name, data in before.items():
+    if not (isinstance(name, str) and pat.fullmatch(name)):
+        sys.exit(2)
+    if data is None:
+        decoded[name] = None
+        continue
+    if not isinstance(data, str):
+        sys.exit(2)
+    try:
+        decoded[name] = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        sys.exit(2)
+try:
+    dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError:
     sys.exit(2)
 def current(name):
     try:
@@ -399,7 +417,7 @@ def current(name):
 try:
     names = [n for n in os.listdir(dfd) if pat.fullmatch(n)]
 except OSError:
-    block(dfd); sys.exit(2)
+    sys.exit(2)
 now = {n: current(n) for n in names}
 if now == before and None not in now.values():
     sys.exit(0)
@@ -422,12 +440,10 @@ for name, data in before.items():
     try:
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666, dir_fd=dfd)
         with os.fdopen(fd, "wb") as f:
-            f.write(base64.b64decode(data))
+            f.write(decoded[name])
     except OSError:
         failed = True
-if failed:
-    block(dfd); sys.exit(2)
-sys.exit(1)
+sys.exit(2 if failed else 1)
 ' "$1"
 }
 # 「使い回し禁止」の印。logs/ の中（人が見つけやすい）と、logs/ の外（${XDG_STATE_HOME:-~/.local/state}/lanewright/reuse-blocked/
@@ -436,16 +452,24 @@ sys.exit(1)
 # （消し方は rvd_mark_blocked が出す案内を見る）。
 # 限界: Claude のレビューの子は同じ利用者の権限で Bash を使えるので、外の印も消せる。ランチャはレビューの前後で印の有無を比べ、
 # 消されていたら改ざんとして不合格にし、印を置き直す（気づく守り。完全な閉じ込めではない）。Codex のレビューは読み取り専用で外へ書けない
+# logs/ の外の印・排他の名前に使う指紋。worktree の実パス＋/logs から求める（logs/ そのものは辿らない。子が logs/ を symlink・
+# 別のフォルダに差し替えても、同じ worktree なら同じ名前になる。logs/ が本物のフォルダのときは logs/ の実パスと同じ）
+rvd_logdir_key() {   # <logdir> → 32 桁の指紋
+  local key
+  key="$(print -rn -- "${${1:h}:A}/${1:t}" | shasum -a 256 | cut -c1-32)" || return 1
+  [[ "$key" =~ '^[0-9a-f]{32}$' ]] || return 1
+  print -r -- "$key"
+}
 rvd_block_files() {   # <logdir> → 印のパスを 2 行で出す（1 行目 logs/ の中、2 行目 外）
-  local real key
-  real="${1:A}"
-  key="$(print -rn -- "$real" | shasum -a 256 | cut -c1-32)" || return 1
+  local key
+  key="$(rvd_logdir_key "$1")" || return 1
   print -r -- "$1/.review-reuse-blocked"
   print -r -- "${XDG_STATE_HOME:-$HOME/.local/state}/lanewright/reuse-blocked/$key"
 }
-rvd_reuse_blocked() {   # <logdir> → 0 = 前回の記録を使ってはいけない
-  local f
-  for f in "${(@f)$(rvd_block_files "$1")}"; do [[ -e "$f" || -L "$f" ]] && return 0; done
+rvd_reuse_blocked() {   # <logdir> → 0 = 前回の記録を使ってはいけない（印の置き場所を決められないときも 0）
+  local f files
+  files="$(rvd_block_files "$1")" || return 0
+  for f in "${(@f)files}"; do [[ -e "$f" || -L "$f" ]] && return 0; done
   return 1
 }
 # 印の有無を置き場所ごとに出す（"inner=0|1 outer=0|1"。1 行目 logs/ の中、2 行目 外のパスを渡す）。子の前後で比べ、どちらか一方だけの
@@ -520,41 +544,93 @@ except OSError:
     sys.exit(1)
 PY_INVALIDATE
 }
-rvd_mark_blocked() {   # <logdir> → 0 = logs/ の外の印は置けた（logs/ の中は置ければ置く）/ 1 = どちらも置けない
-  local files inner outer ok=1
-  files=("${(@f)$(rvd_block_files "$1")}"); inner="${files[1]}"; outer="${files[2]}"
+rvd_mark_blocked() {   # <logdir> → 0 = logs/ の外の印は置けた（logs/ の中は置ければ置く）/ 1 = 外の印を置けない
+  local -a files
+  local inner outer ok=1
+  files=("${(@f)$(rvd_block_files "$1")}"); (( ${#files} == 2 )) || return 1
+  inner="${files[1]}"; outer="${files[2]}"
   ( umask 077; mkdir -p -- "${outer:h}" && : >> "$outer" ) 2>/dev/null && [[ -f "$outer" && ! -L "$outer" ]] && ok=0
   [[ -L "$inner" ]] || ( : >> "$inner" ) 2>/dev/null || true
   print -u2 -- "印: $inner と $outer（logs/.*.review-state の中身を確かめてから両方消す）"
   return $ok
 }
 
-# ---- 同じ logs/ のレビューは 1 本ずつ（全系列の再利用の記録を守るための排他）----
+# ---- 違反（書き込みの試み・改ざん）を見つけたときの前回の CLEAN の失効（3 つのレビューのランチャで共通）----
+# 見つけたら、ほかの何より先に呼ぶ（証跡の書き込みや標準出力への表示で set -e が発動しても、前回の CLEAN を残さない）。
+# この系列の前回の CLEAN を失効させる（rvd_invalidate_state）。失効させられなければ「使い回し禁止」の印を置く。2 回目以降は何もしない。
+# RVD_VIOLATION=1（違反を見つけた）・RVD_VIOLATION_SETTLED=1（失効か印のどちらかが済んだ）。済んでいなければランチャは「確認中」の印を
+# 消さない（rvd_inflight_finish。次のレビューが後始末する）。0 = 済んだ / 1 = どちらもできない
+typeset -g +x RVD_VIOLATION=0 RVD_VIOLATION_SETTLED=0
+rvd_invalidate_on_violation() {   # <logdir> <series> <終了コード> <label>
+  if (( RVD_VIOLATION )); then return $(( ! RVD_VIOLATION_SETTLED )); fi
+  RVD_VIOLATION=1
+  if rvd_invalidate_state "$1" "$2" "$3" "$4" 2>/dev/null; then RVD_VIOLATION_SETTLED=1; return 0; fi
+  ( print -u2 -- "→ この系列（$2）の前回の再利用の記録を失効させられない。「使い回し禁止」の印を置く" ) || true
+  if rvd_mark_blocked "$1" 2>/dev/null; then RVD_VIOLATION_SETTLED=1; return 0; fi
+  ( print -u2 -- "→ 「使い回し禁止」の印も置けない。「確認中」の印を残す（次のレビューが後始末する）。次のレビューは --mode full --force で回す" ) || true
+  return 1
+}
+# 「確認中」の印を消す（3 つのレビューのランチャの最後に呼ぶ）。呼ぶのは、子の後の確認と、今回の判定の保存（rvd_save_state。rc 0 のとき）
+# または前回の CLEAN の失効（違反のとき。rvd_invalidate_on_violation）が済んだ後だけ。保存の前に消すと、保存までに止まったとき
+# （証跡を書けない・set -e など）系列に前回の CLEAN だけが残り、次回が後始末も確認もせずにその合格を返す。
+# 違反を見つけたのに失効も印も済んでいなければ消さない（次のレビューが後始末する）
+rvd_inflight_finish() {   # <logdir>
+  if (( RVD_VIOLATION && ! RVD_VIOLATION_SETTLED )); then
+    ( print -u2 -- "→ 前回の CLEAN を失効させられず「使い回し禁止」の印も置けなかったので、「確認中」の印（$(rvd_inflight_file "$1")）を残す（次のレビューが後始末する）" ) || true
+    return 0
+  fi
+  rvd_inflight_end "$1" && return 0
+  ( print -u2 -- "→ 「確認中」の印（$(rvd_inflight_file "$1")）を消せない。次のレビューは今回を途中で終わったものとして後始末する" ) || true
+  return 0
+}
+
+# ---- 同じ worktree のレビューは 1 本ずつ（全系列の再利用の記録を守るための排他）----
 # レビューは子の前に logs/ の全系列の再利用の記録を覚え、子の後で違っていたら子の前の中身に戻す（rvd_states_restore）。同じ logs/ で
 # 別の label のレビュー（既定のレビューと追加の Gemini レビューなど）が並行すると、先に終わった方が正規に保存した記録まで、後から
 # 終わった方が「子の改ざん」として巻き戻す（新しい NEEDS_FIX が古い CLEAN に戻り、次回その古い合格を再利用し得る）。
-# そこで、ランチャは記録の取得（前回の記録を読む所）から最後の保存までの間、logs/ のフォルダそのものに排他のロック（flock）をかける。
+# そこで、ランチャは記録の取得（前回の記録を読む所）から最後の保存までの間、排他のロック（flock）を 2 つかける:
+#   1. logs/ の外の固定の場所（${XDG_STATE_HOME:-~/.local/state}/lanewright/review-lock/<worktree の実パス＋/logs の指紋>。rvd_lock_file）。
+#      子が実行中に logs/ を別の普通のフォルダへ差し替えても、後続のレビューは同じ名前のファイルでロックを取ろうとして止まる
+#      （logs/ の実体に掛けるだけだと、差し替えた新しい logs/ では別のロックが取れてしまい、同じ外の「確認中」の印を並行して処理し得る）
+#   2. logs/ のフォルダそのもの（子が外の 1 のファイルを消して作り直しても、logs/ が同じなら別のロックは取れない）
 # 待たない（取れなければ別のレビューが動いているので起動しない）。ロックはランチャが終わる（kill -9 を含む）とカーネルが外す。
-# 開いた番号は RVD_REVIEW_LOCK_FD に残す（閉じると外れる）。レビューの CLI 自身には渡らない（監督役が close_fds で起動する）。
-# logs/ そのものに掛けるので、子が中に置いたファイルを消しても外れない（logs/ を差し替えたら lanes_logdir_check が止める）。
-# 0 = 取れた / 1 = 別のレビューが持っている / 2 = 開けない・本物のフォルダでない・起動時の logs/ と別物（<識別子> を渡したとき）
+# 開いた番号は RVD_REVIEW_LOCK_FD / RVD_REVIEW_OUTER_LOCK_FD に残す（閉じると外れる）。レビューの CLI 自身には渡らない（監督役が close_fds で起動する）。
+# 外のロックのファイルは消さない（消すと別の実体に別のロックを取れてしまう。label の .lock と同じ考え方）。
+# 0 = 取れた / 1 = 別のレビューが持っている / 2 = 開けない・本物のフォルダ（ファイル）でない・起動時の logs/ と別物（<識別子> を渡したとき）
+rvd_lock_file() {   # <logdir> → 外のロックのファイルのパス
+  local key; key="$(rvd_logdir_key "$1")" || return 1
+  print -r -- "${XDG_STATE_HOME:-$HOME/.local/state}/lanewright/review-lock/$key"
+}
 rvd_review_lock() {   # <logdir> [logs/ の識別子（dev:inode。_common.sh の LANES_LOGDIR_ID）]
-  local fd rc=0
+  local fd lfd lock rc=0
   [[ -d "$1" && ! -L "$1" ]] || return 2
-  { exec {fd}<"$1" } 2>/dev/null || return 2
+  lock="$(rvd_lock_file "$1")" || return 2
+  ( umask 077; mkdir -p -- "${lock:h}" ) 2>/dev/null || return 2
+  [[ ! -L "$lock" && ( ! -e "$lock" || -f "$lock" ) ]] || return 2
+  { exec {lfd}>>"$lock" } 2>/dev/null || return 2
+  { exec {fd}<"$1" } 2>/dev/null || { exec {lfd}>&-; return 2; }
   python3 -I -c '
 import fcntl, os, stat, sys
-st = os.fstat(3)
-if not stat.S_ISDIR(st.st_mode) or (sys.argv[1] and sys.argv[1] != f"{st.st_dev}:{st.st_ino}"):
+lock, logdir_id = sys.argv[1], sys.argv[2]
+st, lst = os.fstat(3), os.fstat(4)
+if not stat.S_ISDIR(st.st_mode) or (logdir_id and logdir_id != f"{st.st_dev}:{st.st_ino}"):
+    sys.exit(2)
+# 外のロックは、開いた物が名前のとおりの普通のファイルであること（開く前後に symlink・別のファイルへ差し替えられていない）
+try:
+    now = os.lstat(lock)
+except OSError:
+    sys.exit(2)
+if not stat.S_ISREG(lst.st_mode) or not stat.S_ISREG(now.st_mode) or (now.st_dev, now.st_ino) != (lst.st_dev, lst.st_ino):
     sys.exit(2)
 try:
+    fcntl.flock(4, fcntl.LOCK_EX | fcntl.LOCK_NB)
     fcntl.flock(3, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
     sys.exit(1)
 except OSError:
-    sys.exit(2)' "${2:-}" 3<&$fd || rc=$?
-  if (( rc )); then exec {fd}<&-; return $rc; fi
-  typeset -g RVD_REVIEW_LOCK_FD=$fd
+    sys.exit(2)' "$lock" "${2:-}" 3<&$fd 4<&$lfd || rc=$?
+  if (( rc )); then exec {fd}<&- {lfd}>&-; return $rc; fi
+  typeset -g RVD_REVIEW_LOCK_FD=$fd RVD_REVIEW_OUTER_LOCK_FD=$lfd
 }
 # ランチャが呼ぶ入口。取れなければ理由を出して止める（_common.sh の lanes_die を使う。今回の失敗 EXIT:2 として .done に残る）
 rvd_review_lock_or_die() {   # <logdir> [logs/ の識別子]
@@ -564,37 +640,40 @@ rvd_review_lock_or_die() {   # <logdir> [logs/ の識別子]
   if (( rc == 1 )); then
     lanes_die "同じ worktree（$1）で別のレビューが動いている（または前のレビューの子が残っている）。並行すると、後から終わった方が先に終わった方の再利用の記録（logs/.*.review-state）を子の改ざんとして巻き戻すので、同じ worktree のレビューは 1 本ずつ回す。終わってから起動し直す（lanes-status.sh で確かめる）"
   fi
-  lanes_die "レビューの排他（logs/ のロック）を取れない: $1"
+  lanes_die "レビューの排他（logs/ と $(rvd_lock_file "$1" 2>/dev/null || print -r -- '${XDG_STATE_HOME:-~/.local/state}/lanewright/review-lock/' ) のロック）を取れない: $1"
 }
 
 # ---- 途中で終わったレビューの後始末（「確認中」の印）----
-# ランチャは子を起動する前に、覚えた全系列の再利用の記録（rvd_states_snapshot の出力）を logs/ の外の「確認中」の印に書き、
-# 子の後の復元・確認（記録の復元・印の比較・書き込みの試み・改ざんの判定と、違反のときの前回の CLEAN の失効）が全部終わってから消す。
-# 終了シグナル・set -e・kill -9 などで途中で終わると印が残る。次のレビューは（排他を取った後、前回の記録を読む前に）印を見つけたら、
+# ランチャは子を起動する前に、覚えた全系列の再利用の記録（rvd_states_snapshot の出力）と「使い回し禁止」の印の有無（置き場所ごと）を
+# logs/ の外の「確認中」の印に書き、子の後の確認と、今回の判定の保存（または違反のときの前回の CLEAN の失効）が済んでから消す
+# （rvd_inflight_finish）。終了シグナル・set -e・kill -9 などで途中で終わると印が残る。次のレビューは（排他を取った後、前回の記録を
+# 読む前に）印を見つけたら、
 #   1. 印に残した中身へ全系列の記録を戻す（途中で終わったレビューの子が書き換えた記録を信じない）
 #   2. 途中で終わったレビューの系列の前回の CLEAN を失効させる（何を試みたか確かめられていないので、古い合格を再利用しない）
-#   3. どちらかができなければ「使い回し禁止」の印を置く
-# 置き場所: ${XDG_STATE_HOME:-~/.local/state}/lanewright/review-inflight/<logs/ の実パスの指紋>（「使い回し禁止」の外の印と同じ考え方。
-# Codex・Gemini のレビューの子はここへ書けない。Claude のレビューの子は Bash で消せる＝気づく守り）
+#   3. 「使い回し禁止」の印の有無が子の前と違えば（子が消した・作った）、印を置き直す（全系列の再利用禁止を保つ）
+#   4. 印が読めない・中身が不正・別の logs/ のもの、1・2 ができないときも「使い回し禁止」の印を置く
+# 「使い回し禁止」の印を置けたときだけ「確認中」の印を消す。置けなければ「確認中」の印を残し、ランチャはその場で止まる
+# （rvd_inflight_recover_or_die。古い CLEAN を再利用し得る状態で起動しない）。
+# 置き場所: ${XDG_STATE_HOME:-~/.local/state}/lanewright/review-inflight/<worktree の実パス＋/logs の指紋>（「使い回し禁止」の外の印と同じ
+# 考え方。Codex・Gemini のレビューの子はここへ書けない。Claude のレビューの子は Bash で消せる＝気づく守り）
 rvd_inflight_file() {   # <logdir> → 印のパス
-  local key
-  key="$(print -rn -- "${1:A}" | shasum -a 256 | cut -c1-32)" || return 1
-  [[ -n "$key" ]] || return 1
+  local key; key="$(rvd_logdir_key "$1")" || return 1
   print -r -- "${XDG_STATE_HOME:-$HOME/.local/state}/lanewright/review-inflight/$key"
 }
 rvd_inflight_present() {   # <logdir> → 0 = 印がある（確かめられないときも 0）
   local f; f="$(rvd_inflight_file "$1")" || return 0
   [[ -e "$f" || -L "$f" ]]
 }
-# <logdir> <series> <label> <logs/ の識別子（dev:inode）>（覚えた中身は標準入力で渡す）→ 0 = 置いた / 1 = 置けない（ランチャは子を起動しない）。
+# <logdir> <series> <label> <logs/ の識別子（dev:inode）> <「使い回し禁止」の印の有無（rvd_block_state の出力）>
+# （覚えた中身は標準入力で渡す）→ 0 = 置いた / 1 = 置けない（ランチャは子を起動しない）。
 # 識別子も残す（後始末は同じ logs/ のときだけ記録を戻す。消して作り直した worktree の logs/ に古い記録を戻さない）
 rvd_inflight_begin() {
   local f; f="$(rvd_inflight_file "$1")" || return 1
-  [[ -n "${4:-}" ]] || return 1
+  [[ -n "${4:-}" && "${5:-}" =~ '^inner=[01] outer=[01]$' ]] || return 1
   ( umask 077; mkdir -p -- "${f:h}" ) 2>/dev/null || return 1
   python3 -I -c '
 import json, os, sys
-path, series, label, logdir_id = sys.argv[1:5]
+path, series, label, logdir_id, blocked = sys.argv[1:6]
 states = json.loads(sys.stdin.read())
 if not isinstance(states, dict):
     sys.exit(1)
@@ -604,29 +683,42 @@ tmp = f".{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
 fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
 try:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(json.dumps({"series": series, "label": label, "logdir_id": logdir_id, "states": states}, ensure_ascii=False) + "\n")
+        f.write(json.dumps({"series": series, "label": label, "logdir_id": logdir_id, "blocked": blocked, "states": states},
+                           ensure_ascii=False) + "\n")
     os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
 except BaseException:
     try:
         os.unlink(tmp, dir_fd=dfd)
     except OSError:
         pass
-    raise' "$f" "$2" "$3" "$4" 2>/dev/null
+    raise' "$f" "$2" "$3" "$4" "$5" 2>/dev/null
 }
 rvd_inflight_end() {   # <logdir> → 0 = 消した（無かった）/ 1 = 消せない
   local f; f="$(rvd_inflight_file "$1")" || return 1
   rm -f -- "$f" 2>/dev/null || true
   [[ ! -e "$f" && ! -L "$f" ]]
 }
+# 後始末で「使い回し禁止」の印を置く。置けたときだけ「確認中」の印を消す。2 = 置いた（「確認中」の印は消した）/ 3 = 置けない（残した）
+rvd_inflight_block() {   # <logdir> <「確認中」の印のパス（決められなければ空）> <理由>
+  ( print -u2 -- "注意: $3。「使い回し禁止」の印を置く" ) || true
+  if rvd_mark_blocked "$1" 2>/dev/null; then
+    [[ -z "$2" ]] || rm -f -- "$2" 2>/dev/null || true
+    return 2
+  fi
+  ( print -u2 -- "→ 「使い回し禁止」の印を置けない。「確認中」の印${2:+（$2）}は残す（次のレビューが後始末し直す）" ) || true
+  return 3
+}
 # 印があれば後始末する。排他（rvd_review_lock）を取った後、前回の記録を読む前に呼ぶ。
-# 0 = 印なし / 1 = 後始末した / 2 = 後始末しきれない（「使い回し禁止」の印を置いた。置けなければその旨も出す）
+# 0 = 印なし / 1 = 後始末した / 2 = 「使い回し禁止」の印を置いた（「確認中」の印は消した）/ 3 = 「使い回し禁止」の印を置けない（「確認中」の印は残した）
 rvd_inflight_recover() {   # <logdir>
-  local logdir="$1" f data series="" label="" states="" rec_id="" now_id="" s_rc=0 i_rc=0
-  local -a data_lines
-  f="$(rvd_inflight_file "$logdir")" || { rvd_mark_blocked "$logdir" 2>/dev/null || true; return 2; }
+  local logdir="$1" f data series="" label="" states="" rec_id="" rec_blocked="" now_id="" now_blocked="" s_rc=0 i_rc=0 why=""
+  local -a data_lines block_files
+  f="$(rvd_inflight_file "$logdir")" || { rvd_inflight_block "$logdir" "" "「確認中」の印の置き場所を決められない"; return $?; }
   [[ -e "$f" || -L "$f" ]] || return 0
+  # 中身を全部確かめてから使う: 系列・label は 1 行の名前、記録の名前はどれも logs/ の直下の 1 つの .review-state、中身はどれも復号できる、
+  # 印の有無は決まった形（古い形式で無ければ「-」＝分からない）。1 つでも外れたら読めないものとして扱う（何も戻さない）
   data="$(python3 -I -c '
-import json, os, stat, sys
+import base64, binascii, json, os, re, stat, sys
 fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
 with os.fdopen(fd, "rb") as f:
     if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
@@ -639,16 +731,30 @@ if any(not s or "\n" in s or "/" in s for s in (d["series"], d["label"])):
 rid = d.get("logdir_id", "")
 if not isinstance(rid, str) or "\n" in rid:
     sys.exit(1)
-print(d["series"]); print(d["label"]); print(rid or "-"); print(json.dumps(d["states"], sort_keys=True))' "$f" 2>/dev/null)" || data=""
+blocked = d.get("blocked", "-")
+if not (isinstance(blocked, str) and (blocked == "-" or re.fullmatch(r"inner=[01] outer=[01]", blocked))):
+    sys.exit(1)
+pat = re.compile(r"\.[^/\x00]+\.review-state")
+for name, value in d["states"].items():
+    if not (isinstance(name, str) and pat.fullmatch(name)):
+        sys.exit(1)
+    if value is None:
+        continue
+    if not isinstance(value, str):
+        sys.exit(1)
+    try:
+        base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        sys.exit(1)
+print(d["series"]); print(d["label"]); print(rid or "-"); print(blocked); print(json.dumps(d["states"], sort_keys=True))' "$f" 2>/dev/null)" || data=""
   if [[ -n "$data" ]]; then
     data_lines=("${(@f)data}")
-    series="${data_lines[1]:-}"; label="${data_lines[2]:-}"; rec_id="${data_lines[3]:-}"; states="${data_lines[4]:-}"
+    if (( ${#data_lines} == 5 )); then
+      series="${data_lines[1]}"; label="${data_lines[2]}"; rec_id="${data_lines[3]}"; rec_blocked="${data_lines[4]}"; states="${data_lines[5]}"
+    fi
   fi
   if [[ -z "$series" || -z "$states" ]]; then
-    ( print -u2 -- "注意: 途中で終わったレビューの「確認中」の印（$f）を読めない。「使い回し禁止」の印を置いて、印を消す" ) || true
-    rvd_mark_blocked "$logdir" 2>/dev/null || ( print -u2 -- "→ 「使い回し禁止」の印も置けない。次のレビューは --mode full --force で回す" ) || true
-    rm -f -- "$f" 2>/dev/null || true
-    return 2
+    rvd_inflight_block "$logdir" "$f" "途中で終わったレビューの「確認中」の印（$f）を読めない・中身が不正（記録は戻さない）"; return $?
   fi
   # 印を置いたときと別の logs/ なら、古い記録は戻さない（消して作り直した worktree の logs/ に古い記録を入れない）。
   # ただし、途中で終わったレビューの子が logs/ を差し替えて偽の記録を置いた（差し替えを見つける前にランチャが止まった）ことも
@@ -656,23 +762,37 @@ print(d["series"]); print(d["label"]); print(rid or "-"); print(json.dumps(d["st
   now_id="$(python3 -I -c 'import os, sys
 s = os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$logdir" 2>/dev/null)" || now_id=""
   if [[ -z "$now_id" || "$rec_id" != "$now_id" ]]; then
-    ( print -u2 -- "注意: 前のレビュー（$label）の「確認中」の印は、今の logs/ とは別の logs/ のもの（作り直した worktree か、子が差し替えた logs/）。記録は戻さず、「使い回し禁止」の印を置く" ) || true
-    rvd_mark_blocked "$logdir" 2>/dev/null || ( print -u2 -- "→ 「使い回し禁止」の印も置けない。次のレビューは --mode full --force で回す" ) || true
-    rm -f -- "$f" 2>/dev/null || true
-    return 2
+    rvd_inflight_block "$logdir" "$f" "前のレビュー（$label）の「確認中」の印は、今の logs/ とは別の logs/ のもの（作り直した worktree か、子が差し替えた logs/）。記録は戻さない"
+    return $?
   fi
   print -r -- "$states" | rvd_states_restore "$logdir" || s_rc=$?
   rvd_invalidate_state "$logdir" "$series" 3 "$label" "途中で終わったレビュー（子の後の確認が済んでいない）" || i_rc=$?
+  # 「使い回し禁止」の印の有無を、子の前（印に残したもの）と比べる。途中で終わったレビューの子が消した（または作った）なら、
+  # 作業ツリー全体が再利用禁止だったのに別の系列の古い CLEAN を使えてしまうので、印を置き直す（古い形式で分からないときも置く）
+  block_files=("${(@f)$(rvd_block_files "$logdir")}")
+  (( ${#block_files} == 2 )) && now_blocked="$(rvd_block_state "${block_files[1]}" "${block_files[2]}")"
   local changed=""; (( s_rc != 1 )) || changed="（変わっていた）"
   ( print -u2 -- "注意: 前のレビュー（$label）が子の後の確認の前に終わっていた。再利用の記録を子の前の中身に戻し${changed}、系列 $series の前回の CLEAN を再利用しないようにした" ) || true
-  if (( s_rc == 2 || i_rc != 0 )); then
-    ( print -u2 -- "→ 再利用の記録を戻しきれない・失効させられない。「使い回し禁止」の印を置く" ) || true
-    rvd_mark_blocked "$logdir" 2>/dev/null || ( print -u2 -- "→ 「使い回し禁止」の印も置けない。次のレビューは --mode full --force で回す" ) || true
-    rm -f -- "$f" 2>/dev/null || true
-    return 2
+  if (( s_rc == 2 )); then why="再利用の記録を戻しきれない"
+  elif (( i_rc != 0 )); then why="系列 $series の前回の CLEAN を失効させられない"
+  elif [[ "$rec_blocked" == - ]]; then why="子の前の「使い回し禁止」の印の有無が分からない（古い形式の「確認中」の印）"
+  elif [[ -z "$now_blocked" || "$now_blocked" != "$rec_blocked" ]]; then why="「使い回し禁止」の印が子の前（$rec_blocked）と違う（今: ${now_blocked:-分からない}。inner=logs/ の中、outer=外）"
   fi
+  if [[ -n "$why" ]]; then rvd_inflight_block "$logdir" "$f" "$why"; return $?; fi
   rm -f -- "$f" 2>/dev/null || true
   return 1
+}
+# ランチャが排他を取った直後に呼ぶ入口。後始末で「使い回し禁止」の印を置いたら、この起動も前回の記録を使わない
+# （RVD_RECOVER_BLOCKED=1。印をあとで子が消しても、この起動の判定は変えない）。印を置けなかったら（「確認中」の印は残してある）、
+# その場で止める（EXIT:2。古い CLEAN を再利用し得る状態のまま起動しない）
+rvd_inflight_recover_or_die() {   # <logdir>
+  local rc=0
+  typeset -g RVD_RECOVER_BLOCKED=0
+  rvd_inflight_recover "$1" || rc=$?
+  (( rc >= 2 )) || return 0
+  RVD_RECOVER_BLOCKED=1
+  (( rc == 2 )) && return 0
+  lanes_die "途中で終わった前のレビューの後始末で「使い回し禁止」の印を置けない（「確認中」の印 $(rvd_inflight_file "$1" 2>/dev/null) は残した）→ 起動しない。${XDG_STATE_HOME:-~/.local/state}/lanewright/ と logs/ の権限・空き容量を確かめてから起動し直す"
 }
 
 # ---- 必須検証の使い回し（親の chk-run.sh の記録）----
@@ -691,11 +811,14 @@ rvd_checks_query() {
   local lanes_dir="$1" wt="$2" out="" rc=0 line k first
   local -a out_lines
   typeset -g RVD_CHECKS_REUSE=no RVD_CHECKS_HEAD="" RVD_CHECKS_AT="" RVD_CHECKS_SRC="" RVD_CHECKS_FP="" RVD_CHECKS_REASON=""
-  typeset -g RVD_CHECKS_PORT="" RVD_CHECKS_OUTDIR="" RVD_CHECKS_INPUT="" RVD_CHECKS_DETAIL=""
+  typeset -g RVD_CHECKS_PORT="" RVD_CHECKS_OUTDIR="" RVD_CHECKS_INPUT="" RVD_CHECKS_DETAIL="" RVD_CHECKS_QUERY_PWD=""
   typeset -gA RVD_CHECKS_QUERY_ENV=()
   if [[ "${LANES_REVIEW_REUSE_CHECKS:-1}" != 1 ]]; then RVD_CHECKS_REUSE=off; RVD_CHECKS_REASON="LANES_REVIEW_REUSE_CHECKS=0"; return 0; fi
   [[ -f "$lanes_dir/chk-run.sh" ]] || { RVD_CHECKS_REASON="chk-run.sh が無い"; return 0; }
   for k in ${(k)parameters[(R)*export*]}; do RVD_CHECKS_QUERY_ENV[$k]="${(P)k}"; done
+  # 問い合わせた場所も控える。chk-run.sh は設定（lanes.env・設定ファイル）を読み直し、相対の設定（LANES_SCRATCH_ROOT=rel-scratch など）を
+  # 起動した場所から絶対パスに直すので、子の後の照合し直し（rvd_checks_recheck）も同じ場所から呼ぶ（別の場所からだと指紋が変わる）
+  RVD_CHECKS_QUERY_PWD="$PWD"
   if (( ${+functions[lanes_with_caller_auth_env]} )); then
     out="$(lanes_with_caller_auth_env bash "$lanes_dir/chk-run.sh" "$wt" --query 2>/dev/null)" || rc=$?
   else
@@ -738,11 +861,14 @@ rvd_checks_query() {
 rvd_checks_recheck() {   # <lanes_dir> <wt>
   local lanes_dir="$1" wt="$2" out="" rc=0 line input="" dirty=""
   [[ "${RVD_CHECKS_REUSE:-}" == yes ]] || return 0
-  [[ "$RVD_CHECKS_PORT" == <-> && "$RVD_CHECKS_OUTDIR" == /* && -n "$RVD_CHECKS_INPUT" && -f "$lanes_dir/chk-run.sh" ]] || return 2
+  [[ "$RVD_CHECKS_PORT" == <-> && "$RVD_CHECKS_OUTDIR" == /* && -n "$RVD_CHECKS_INPUT" && -f "$lanes_dir/chk-run.sh" \
+     && "$RVD_CHECKS_QUERY_PWD" == /* ]] || return 2
   out="$(
-    # 作業ツリーの外から呼ぶ（chk-run.sh は自分の python3 を起動した場所で探すので、作業ツリーへ移ったランチャから呼んでも、
-    # PATH の . などで作業ツリーの中の物を選ばない。chk-run.sh は引数の worktree へ自分で移る。指紋は作業場所に左右されない）
-    builtin cd -q / || exit 2
+    # 最初に問い合わせた場所（rvd_checks_query が控えた RVD_CHECKS_QUERY_PWD）から呼ぶ。chk-run.sh は設定を読み直して相対の設定を
+    # 起動した場所から絶対パスに直すので、別の場所（/ など）から呼ぶと、変更が無くても指紋が変わる。作業ツリーへ移ったランチャ
+    # （Codex・Claude レビュー）から呼んでも、最初の問い合わせと同じ場所に戻すので、PATH の . などで選ぶ物も最初の問い合わせと同じ。
+    # chk-run.sh は引数の worktree へ自分で移る
+    builtin cd -q -- "$RVD_CHECKS_QUERY_PWD" || exit 2
     # 問い合わせたときの環境に戻す（子シェルの中だけ）。後から export された変数は外し、外された・値の変わった変数だけを戻す
     # （同じ値の変数には触らない。Mac の zsh は XPC_SERVICE_NAME などへの代入で子シェルごと止まることがある）
     for k in ${(k)parameters[(R)*export*]}; do (( ${+RVD_CHECKS_QUERY_ENV[$k]} )) || unset -- "$k" 2>/dev/null || true; done

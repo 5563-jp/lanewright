@@ -102,11 +102,18 @@ if (( roles_ok )); then
   fi
   # <tool> <変数名> <コマンド名> <ログインのやり直し方>
   check_cli() {
-    local tool="$1" var="$2" name="$3" howto="$4" bin st
-    bin="${(P)var:-}"
-    # -x はフォルダでも真になるので、ふつうのファイルであることも確かめる
-    if [[ -z "$bin" || ! -f "$bin" || ! -x "$bin" ]]; then
-      bin="$(command -v "$name" 2>/dev/null || true)"
+    local tool="$1" var="$2" name="$3" howto="$4" bin="" st
+    if (( ${+functions[lanes_find_bin]} )); then
+      # ランチャ（_common.sh の lanes_resolve_bin）と同じ探し方。名前だけの指定（GEMINI_BIN=agy-preview など）は PATH から探し、
+      # 起動と同じ実行ファイルを点検する（現在地の同名のファイルや、既定の名前の別の版を見ない）
+      bin="$(lanes_find_bin "$var" "$name")" || bin=""
+    else
+      # python3 が無く _common.sh を読めないとき（ログインの確認もできないので NG になる）。探し方は同じ
+      bin="${(P)var:-}"
+      [[ -z "$bin" || "$bin" == */* ]] || bin="$(whence -p -- "$bin" 2>/dev/null || true)"
+      if [[ -z "$bin" || ! -f "$bin" || ! -x "$bin" ]]; then
+        bin="$(whence -p -- "$name" 2>/dev/null || true)"
+      fi
     fi
     if [[ -z "$bin" ]]; then
       ng "$tool: $name が見つからない（$var にも PATH にも無い）。入れるか $var にパスを書く"

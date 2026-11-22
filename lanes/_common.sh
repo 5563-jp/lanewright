@@ -51,6 +51,18 @@ lanes_restore_caller_auth_env() {
 lanes_with_caller_auth_env() { lanes_restore_caller_auth_env; "$@"; }
 
 lanes_die() { print -u2 -- "ERROR: $*"; lanes_record_early_failure "$*"; exit 2; }
+# lanes_die と同じ（EXIT:2）。ただし排他（lanes_mark_start）を取った後でも、理由を .done の note に「起動前の誤り: …」として残す
+# （lanes_die の後は終了処理が「ランチャが途中終了」とだけ書く）。子を起動する前に、理由と直し方を lanes-status.sh で読ませたいときに使う
+lanes_die_noted() {
+  local msg="${*//$'\n'/ }"
+  print -u2 -- "ERROR: $*"
+  if [[ -n "${LANES_DONEFILE:-}" ]] && (( ! ZSH_SUBSHELL )); then
+    lanes_mark_done 2 "VERDICT: NONE" "起動前の誤り: $msg"
+  else
+    lanes_record_early_failure "$*"
+  fi
+  exit 2
+}
 
 # ---- 生成物（確認コマンドの型の生成・ビルド・テストが作る出力）の定義 ----
 # chk-run.sh（成功の記録の指紋）と cleanup-after-merge.sh（マージ後の後片付け）が同じ定義を使う。直すのはここ 1 か所だけ。
@@ -189,17 +201,24 @@ python3() { "$LANES_PYTHON3" "$@"; }
 # バイナリが無ければ PATH から探す。決めた実行ファイルは、作業場所を移る前のここで絶対パスに直して <var> に入れる
 # （相対パスの CLAUDE_BIN / CODEX_BIN / GEMINI_BIN や、PATH の . などで見つかった ./agy のままだと、--help などの点検は呼び出し元の
 # 作業場所で、起動は作業ツリーへ移った後（Codex・Claude レビューの cd、子の作業場所で起動する監督役）になり、別のファイルを指し得る）。
-# 名前だけ（/ を含まない）の指定は PATH から探す（作業場所の同名のファイルを選ばない）。点検と起動は、ここで決めた同じ値を使う
-lanes_resolve_bin() {
-  local var="$1" name="$2" v="${(P)1}"
+# 名前だけ（/ を含まない）の指定は PATH から探す（作業場所の同名のファイルを選ばない）。点検と起動は、ここで決めた同じ値を使う。
+# 起動前点検（lanes-doctor.sh の check_cli）も同じ探し方（lanes_find_bin）を使う（GEMINI_BIN=agy-preview のような名前だけの指定を、
+# 点検と起動で別の実行ファイルに解決しない）
+lanes_find_bin() {   # <変数名> <既定のコマンド名> → 決めた絶対パスを出す。見つからない・確かめられないときは 1（何も出さない）
+  local name="$2" v="${(P)1:-}"
   [[ -z "$v" || "$v" == */* ]] || v="$(whence -p -- "$v" 2>/dev/null || true)"
   # -x はフォルダでも真になるので、ふつうのファイルであることも確かめる
   if [[ -z "$v" || ! -f "$v" || ! -x "$v" ]]; then
     v="$(whence -p -- "$name" 2>/dev/null || true)"
-    [[ -n "$v" ]] || lanes_die "$name が見つからない（${var} にも PATH にも無い）。入れてから lanes-doctor.sh で確かめる"
+    [[ -n "$v" ]] || return 1
   fi
   v="${v:a}"
-  [[ -f "$v" && -x "$v" ]] || lanes_die "$name の実行ファイルを確かめられない: $v"
+  [[ -f "$v" && -x "$v" ]] || return 1
+  print -r -- "$v"
+}
+lanes_resolve_bin() {
+  local var="$1" name="$2" v
+  v="$(lanes_find_bin "$var" "$name")" || lanes_die "$name が見つからない・実行ファイルを確かめられない（${var} にも PATH にも無い）。入れてから lanes-doctor.sh で確かめる"
   typeset -g "$var"="$v"
 }
 
@@ -1079,7 +1098,10 @@ def main():
     child = None
     failed = False
     state_path = pathlib.Path(sys.argv[2]) if sys.argv[1] == "supervise-state" else None
-    command = sys.argv[3:] if state_path else sys.argv[2:]
+    # supervise-in <dir>: 子（コマンド）だけを <dir> で起動する。監督役自身の作業場所は変えない（監督役が名前で起動する ps などを、
+    # PATH の . や相対の項目から <dir>（レビュー対象の作業ツリー）の中の物で選ばない）
+    child_cwd = sys.argv[2] if sys.argv[1] == "supervise-in" else None
+    command = sys.argv[3:] if (state_path or child_cwd is not None) else sys.argv[2:]
     def record_state(phase):
         if state_path:
             row = snapshot().get(child.pid) if child is not None and phase == "running" else None
@@ -1092,7 +1114,7 @@ def main():
         if requested:
             return 128 + requested[0]
         record_state("starting")
-        child = subprocess.Popen(command, env={**os.environ, "LANES_PROCESS_TOKEN": token})
+        child = subprocess.Popen(command, cwd=child_cwd, env={**os.environ, "LANES_PROCESS_TOKEN": token})
         record_state("running")
         # ps の一時失敗（高負荷時の 3 秒タイムアウト等）で健全な子まで止めない。
         # 取り逃した孫は継承した識別子で後から見つかるので、連続失敗が長く続くときだけ打ち切る。
@@ -1156,14 +1178,18 @@ lanes_start_child() {
   typeset -g LANES_MANAGED_CHILD_PID="$LANES_CHILD"
   lanes_record_child "$LANES_CHILD"
 }
-# lanes_start_child と同じ。ただし作業場所（cwd）を <dir> にするのは監督役とその子だけ（呼び出し元のシェルは移らない）。
+# lanes_start_child と同じ。ただし作業場所（cwd）を <dir> にするのは子（<コマンド...>）だけ。呼び出し元のシェルも監督役も移らない
+# （監督役は supervise-in で、子を起動する Popen にだけ cwd=<dir> を渡す）。
 # 親（ランチャ）が対象の作業ツリーへ cd せずに済むので、親が回す python3・git が作業ツリーの中の同名のモジュールや設定に引きずられない。
-# 子シェルで cd してから exec で監督役に置き換わるので、LANES_CHILD は監督役の pid（lanes_start_child と同じ扱い）。
-# 監督役の python3 は cd の前に確定した絶対パス（LANES_PYTHON3）。cd の後に PATH で探し直さない（相対の PATH で作業ツリーの中の物を選ばない）。
-# <コマンド...> の先頭も、監督役が作業場所で PATH から探すので、相対の PATH に左右されない絶対パスで渡す（受け取り役は "$LANES_PYTHON3"）
+# 監督役は、呼び出し元の作業場所にかかわらず / で動かす（呼び出し元が作業ツリーに移っている run-gemini.sh でも同じ）。監督役が名前で
+# 起動する ps も、PATH の . や相対の項目から作業ツリーの中の物を選ばない（隔離の前に親の権限で動かさない）。
+# 子シェルで / へ移ってから exec で監督役に置き換わるので、LANES_CHILD は監督役の pid（lanes_start_child と同じ扱い）。
+# 監督役の python3 は起動時に確定した絶対パス（LANES_PYTHON3）。<dir> と <コマンド...> の先頭（受け取り役は "$LANES_PYTHON3"）は、
+# 監督役の作業場所（/）にも子の作業場所（<dir>）から見た相対の PATH にも左右されない絶対パスで渡す
 lanes_start_child_in() {   # <dir> <コマンド...>
   local dir="$1"; shift
-  ( builtin cd -q -- "$dir" && exec "$LANES_PYTHON3" -I -c "$LANES_PROCESS_GUARD" supervise "$@" ) <&0 &
+  [[ "$dir" == /* && -d "$dir" && "${1:-}" == /* ]] || lanes_die "子の作業場所・コマンドが絶対パスではない: $dir ${1:-}"
+  ( builtin cd -q / && exec "$LANES_PYTHON3" -I -c "$LANES_PROCESS_GUARD" supervise-in "$dir" "$@" ) <&0 &
   typeset -g LANES_CHILD=$!
   typeset -g LANES_MANAGED_CHILD_PID="$LANES_CHILD"
   lanes_record_child "$LANES_CHILD"

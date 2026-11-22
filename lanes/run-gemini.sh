@@ -281,81 +281,84 @@ def resolve(p):
     return os.path.realpath(p if os.path.isabs(p) else os.path.join(wt, p))
 def inside(rp):
     return rp == wt or rp.startswith(wt + os.sep) or rp == scr or rp.startswith(scr + os.sep)
+def read_lines(path):
+    # バイト列のまま 1 行ずつ反復する（全体を読み込んで複製しない。長い実装でコマンドの出力が膨らんでも、メモリは 1 行分だけ）。
+    # 各行の最後の改行だけを外す（最後の改行の後ろの空は行に数えない）
+    with open(path, "rb") as f:
+        for raw in f:
+            yield raw[:-1] if raw.endswith(b"\n") else raw
 for src_index, src in enumerate(srcs):
-    # バイト列のまま改行ごとに区切って、1 行ずつ UTF-8 として読む（末尾の文字切れなどの不正行は監査の不備として数え、その前後の
-    # 正常な行の書き込み先は失わない。全体を一度に読むと、1 か所の文字切れで全部の行を捨てて、外への書き込みを見落とす）
-    try:
-        with open(src, "rb") as f:
-            lines = f.read().split(b"\n")
-    except OSError:
-        invalid.append('ログを読み取れない'); continue
-    if lines and lines[-1] == b"":
-        lines.pop()
-    if not lines:
-        invalid.append('ログが空'); continue
+    # 1 行ずつ UTF-8 として読む（末尾の文字切れなどの不正行は監査の不備として数え、その前後の正常な行の書き込み先は失わない。
+    # 全体を一度に解釈すると、1 か所の文字切れで全部の行を捨てて、外への書き込みを見落とす）
     results = 0
     last_event = None
-    inits, first_init = 0, False
-    for index, raw_line in enumerate(lines):
-        try: line = raw_line.decode("utf-8")
-        except UnicodeError:
-            invalid.append('文字コードの不正行（末尾の文字切れなど）'); continue
-        try: d = json.loads(line)
-        except (ValueError, TypeError):
-            invalid.append('JSON の不正行'); continue
-        if not isinstance(d, dict) or not isinstance(d.get('event'), str):
-            invalid.append('イベントの形式が不正'); continue
-        last_event = d['event']
-        if d['event'] == 'init':
-            # 開始から記録できたことの確かめ（1 行目の init）。Gemini レビューの監査と同じ
-            inits += 1; first_init = first_init or index == 0
-            continue
-        if d.get("event") == "result":
-            r = d.get("result")
-            if not isinstance(r, dict) or r.get('status') not in ('SUCCESS', 'ERROR'):
-                invalid.append('結果の形式が不正'); continue
-            if any(not isinstance(r.get(k, ''), str) for k in ('response', 'error')):
-                invalid.append('結果本文の形式が不正'); continue
-            if type(r.get('num_turns', 0)) is not int or r.get('num_turns', 0) < 0 or not isinstance(r.get('usage', {}), dict):
-                invalid.append('結果集計の形式が不正'); continue
-            results += 1
-            status = r.get("status", "?"); body = r.get("response", "") or r.get("error", "")
-            error = r.get("error", "") or ""; turns = r.get("num_turns", 0); usage = r.get("usage", {})
-            continue
-        if d['event'] != 'step_update': continue
-        su = d.get("step_update")
-        if not isinstance(su, dict) or not isinstance(su.get('step_type'), str):
-            invalid.append('作業記録の形式が不正'); continue
-        name = su.get("tool_name") or ""
-        if not isinstance(name, str) or (su['step_type'] == 'tool' and not name.strip()):
-            invalid.append('ツール名の形式が不正'); continue
-        if name.startswith("ask_"):
-            # 同じ呼び出しの経過の記録（何度も届く step_update）は 1 回に数える（Gemini レビューの監査と同じ。1 回目と再実行は分けて数える）
-            key = next((str(su[k]) for k in ("step_index", "step_id", "id", "tool_call_id") if k in su), None)
-            asks.add((src_index, key if key is not None else name + "\0" + json.dumps(su.get("tool_info"), sort_keys=True, ensure_ascii=False)))
-        if su.get("step_type") != "tool" or not any(h in name.lower() for h in WRITE_HINT): continue
-        info = su.get('tool_info')
-        params = info.get('parameters') if isinstance(info, dict) else None
-        if not isinstance(params, dict):
-            invalid.append('書き込み先の記録が無い'); continue
-        gone = any(h in name.lower() for h in GONE_HINT)
-        path_seen = False
-        for k, v in params.items():
-            if not k.lower().endswith(PATH_KEYS) and not (gone and k.lower().endswith("source")): continue
-            path_seen = True
-            if not isinstance(v, str) or not v:
-                invalid.append('書き込み先の形式が不正'); continue
-            if "\n" in v or "\r" in v or "\0" in v:
-                invalid.append('書き込み先に制御文字'); continue
-            cands = [v] + ([unescape(v)] if unescape(v) != v else [])
-            rps = [resolve(c) for c in cands]
-            writes.add(rps[-1])
-            # エスケープ表記の解釈が曖昧でも、外へ向く候補があれば成功扱いにしない。
-            for rp in set(rps):
-                if inside(rp): continue
-                if gone or os.path.lexists(rp): outside.append(f"{name} {k}={rp}")
-                else: suspect.append(f"{name} {k}={rp}")
-        if not path_seen: invalid.append('書き込み先を特定できない')
+    inits, first_init, nlines = 0, False, 0
+    try:
+        for index, raw_line in enumerate(read_lines(src)):
+            nlines += 1
+            try: line = raw_line.decode("utf-8")
+            except UnicodeError:
+                invalid.append('文字コードの不正行（末尾の文字切れなど）'); continue
+            try: d = json.loads(line)
+            except (ValueError, TypeError):
+                invalid.append('JSON の不正行'); continue
+            if not isinstance(d, dict) or not isinstance(d.get('event'), str):
+                invalid.append('イベントの形式が不正'); continue
+            last_event = d['event']
+            if d['event'] == 'init':
+                # 開始から記録できたことの確かめ（1 行目の init）。Gemini レビューの監査と同じ
+                inits += 1; first_init = first_init or index == 0
+                continue
+            if d.get("event") == "result":
+                r = d.get("result")
+                if not isinstance(r, dict) or r.get('status') not in ('SUCCESS', 'ERROR'):
+                    invalid.append('結果の形式が不正'); continue
+                if any(not isinstance(r.get(k, ''), str) for k in ('response', 'error')):
+                    invalid.append('結果本文の形式が不正'); continue
+                if type(r.get('num_turns', 0)) is not int or r.get('num_turns', 0) < 0 or not isinstance(r.get('usage', {}), dict):
+                    invalid.append('結果集計の形式が不正'); continue
+                results += 1
+                status = r.get("status", "?"); body = r.get("response", "") or r.get("error", "")
+                error = r.get("error", "") or ""; turns = r.get("num_turns", 0); usage = r.get("usage", {})
+                continue
+            if d['event'] != 'step_update': continue
+            su = d.get("step_update")
+            if not isinstance(su, dict) or not isinstance(su.get('step_type'), str):
+                invalid.append('作業記録の形式が不正'); continue
+            name = su.get("tool_name") or ""
+            if not isinstance(name, str) or (su['step_type'] == 'tool' and not name.strip()):
+                invalid.append('ツール名の形式が不正'); continue
+            if name.startswith("ask_"):
+                # 同じ呼び出しの経過の記録（何度も届く step_update）は 1 回に数える（Gemini レビューの監査と同じ。1 回目と再実行は分けて数える）
+                key = next((str(su[k]) for k in ("step_index", "step_id", "id", "tool_call_id") if k in su), None)
+                asks.add((src_index, key if key is not None else name + "\0" + json.dumps(su.get("tool_info"), sort_keys=True, ensure_ascii=False)))
+            if su.get("step_type") != "tool" or not any(h in name.lower() for h in WRITE_HINT): continue
+            info = su.get('tool_info')
+            params = info.get('parameters') if isinstance(info, dict) else None
+            if not isinstance(params, dict):
+                invalid.append('書き込み先の記録が無い'); continue
+            gone = any(h in name.lower() for h in GONE_HINT)
+            path_seen = False
+            for k, v in params.items():
+                if not k.lower().endswith(PATH_KEYS) and not (gone and k.lower().endswith("source")): continue
+                path_seen = True
+                if not isinstance(v, str) or not v:
+                    invalid.append('書き込み先の形式が不正'); continue
+                if "\n" in v or "\r" in v or "\0" in v:
+                    invalid.append('書き込み先に制御文字'); continue
+                cands = [v] + ([unescape(v)] if unescape(v) != v else [])
+                rps = [resolve(c) for c in cands]
+                writes.add(rps[-1])
+                # エスケープ表記の解釈が曖昧でも、外へ向く候補があれば成功扱いにしない。
+                for rp in set(rps):
+                    if inside(rp): continue
+                    if gone or os.path.lexists(rp): outside.append(f"{name} {k}={rp}")
+                    else: suspect.append(f"{name} {k}={rp}")
+            if not path_seen: invalid.append('書き込み先を特定できない')
+    except OSError:
+        invalid.append('ログを読み取れない'); continue
+    if not nlines:
+        invalid.append('ログが空'); continue
     if results > 1 or (results == 1 and last_event != 'result'):
         invalid.append('結果が重複、または終端ではない')
     if results == 0 and not (allow_incomplete and src == srcs[-1]):
@@ -411,8 +414,10 @@ gem_gitlink_check
 run_audit "$json"
 gstatus="$(audit_get status)"; [[ -n "$gstatus" ]] || gstatus="NONE"
 scope_ok=1; changes="$(gem_changes check)" || { scope_ok=0; changes=0; }
-# 1 回だけの自動再実行: 見張りで止めていない・差分なし・外への書き込みなし・時間切れではない・一時的なエラー（503 / UNAVAILABLE / stream interrupted）
-if (( ! GEM_IDLE_KILLED && ! GEM_NOOUT && scope_ok && changes == 0 )) && [[ "$gstatus" != "SUCCESS" && "$(audit_get audit_ok)" == 1 ]] \
+# 1 回だけの自動再実行: 見張りで止めていない・差分なし・外への書き込みなし・時間切れではない・一時的なエラー（503 / UNAVAILABLE / stream interrupted）。
+# 公開用の stream-json（logs/<label>.json）の改ざんを 1 回目で見つけたら再実行しない（改ざんした実装に、もう一度作業ツリーを触らせない。
+# 今の状態のまま、下の判定で EXIT:4 として親へ返す）
+if (( ! GEM_IDLE_KILLED && ! GEM_NOOUT && ! public_tampered && scope_ok && changes == 0 )) && [[ "$gstatus" != "SUCCESS" && "$(audit_get audit_ok)" == 1 ]] \
    && ! grep -q -E '^(outside|suspect)=' "$audit" 2>/dev/null && (( GEM_SECS < 70 * 60 )) \
    && { grep -q -E 'UNAVAILABLE|code 503|(^|[^0-9])503([^0-9]|$)|stream was interrupted|interrupted' "$err" 2>/dev/null \
         || [[ "$(audit_get error)" =~ '(UNAVAILABLE|503|interrupted)' ]]; }; then

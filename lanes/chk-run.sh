@@ -185,13 +185,18 @@ if [ -z "$generated_def" ]; then
 fi
 
 # 未追跡ファイルを含む作業ツリー状態と、実行環境・導入済み依存の同一性フィンガープリントを計算する
+# 入力の照合（--query-input）は、入力の指紋（fp）と未 commit の変更の有無（dirty）が決まった所で答えを返す（生成物の全ファイルは読まない。
+# 答えに使わないのに、大きな .next/・dist/ をレビューの終わりのたびに読み直さない）。read_mode は full（既定）か input
+read_mode=full
+[ "$query_input" = 1 ] && read_mode=input
 read_state() {
-python3 -I - "$wt" "$o" "$cache" "$lanes_dir" "$port" "$generated_def" "${output_names[@]}" <<'PY'
+python3 -I - "$wt" "$o" "$cache" "$lanes_dir" "$port" "$generated_def" "$read_mode" "${output_names[@]}" <<'PY'
 import hashlib, os, shutil, stat, subprocess, sys
 
 wt, outdir, cache_path = [os.path.realpath(x) for x in sys.argv[1:4]]
+input_only = sys.argv[7] == "input"
 top_tracked = set(subprocess.check_output(["git", "ls-files", "-z"], cwd=wt).split(b"\0")) - {b""}
-outputs = {os.path.join(outdir, name) for name in sys.argv[7:]} | {cache_path}
+outputs = {os.path.join(outdir, name) for name in sys.argv[8:]} | {cache_path}
 
 def is_internal_artifact(rel_path):
     return (os.fsencode(rel_path) not in top_tracked
@@ -814,6 +819,10 @@ try:
         else:
             h.update(f"other:{rel}:missing\0".encode("utf-8", errors="surrogateescape"))
     fp_hex = h.hexdigest()[:32]
+    if input_only:
+        # 入力の照合は fp と dirty だけを答える（生成物の指紋 cache_fp は求めない）
+        sys.stdout.buffer.write(f"dirty={dirty}\nfp={fp_hex}\n".encode("ascii"))
+        sys.exit(0)
     # 生成物は検証前後の入力比較から外すが、再利用には現在の出力の一致も要求する。
     cache_fp = ""
     if reusable:

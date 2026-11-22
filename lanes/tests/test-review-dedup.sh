@@ -567,12 +567,19 @@ r, argv, done = launch(wt, 'cf4-r3', claude=True, body='- [P1] 重大\n'+skip_li
 check('Claude-round3のP1はSTOP', 'VERDICT: NEEDS_FIX' in done and 'gate=STOP_P0P1' in done)
 r, argv, done = launch(wt, 'cf5', claude=True, args=('--round', '3'), body='- [P3] 軽微\n'+skip_line+'\nVERDICT: CLEAN')
 check('Claude---roundでも後回し票', 'VERDICT: CLEAN' in done and '軽微' in (wt / 'logs' / 'cf5.followups.md').read_text())
-# 子が再利用の記録を偽造したら元に戻して不合格（Codex と同じ）
+# 子が再利用の記録を偽造したら元に戻して不合格（Codex と同じ）。戻した記録の前回の CLEAN は失効させる（次回は同じ HEAD でも使わない）
+def restored_invalidated(path, saved):
+    # 子の前の中身に戻したうえで、last_exit を今回の終了コード（4）にし、失効の理由を足しただけ（ほかの値は子の前と同じ）
+    now, before = json.loads(path.read_text()), json.loads(saved)
+    rest = lambda d: {k: v for k, v in d.items() if k not in ('last_exit', 'last_invalidated')}
+    return now.get('last_exit') == 4 and 'last_invalidated' in now and rest(now) == rest(before)
 wt, base = repo('claude-forge-state')
 launch(wt, 'review-r1', claude=True)
 state = wt / 'logs' / '.review.review-state'; state_save = state.read_text()
 r, argv, done = launch(wt, 'review-r2', claude=True, args=('--force',), mutation='forge-state')
-check('Claude-再利用の記録の偽造は戻して不合格', r.returncode == 4 and 'VERDICT: NEEDS_FIX' in done and state.read_text() == state_save)
+check('Claude-再利用の記録の偽造は戻して不合格（戻した記録の前回の CLEAN は失効）', r.returncode == 4 and 'VERDICT: NEEDS_FIX' in done and restored_invalidated(state, state_save))
+r, argv, done = launch(wt, 'review-r2', claude=True)
+check('Claude-偽造の後の通常の起動は同じ HEAD でも前回の CLEAN を使わない', argv is not None and 'skip-same-head' not in done)
 # 別の系列（other）の記録に偽の CLEAN を作られても、子の前の状態に戻して不合格（Codex・Claude とも）
 for claude in (False, True):
     kind = 'claude' if claude else 'codex'
@@ -588,7 +595,7 @@ for claude in (False, True):
     logs = wt / 'logs'; state = logs / '.review.review-state'; state_save = state.read_text()
     r, argv, done = launch(wt, 'review-r2', claude=claude, args=('--force',), mutation='forge-hard')
     check(f'読めない記録・同名フォルダがあっても最後まで戻す-{kind}', r.returncode == 4 and 'VERDICT: NEEDS_FIX' in done
-          and state.read_text() == state_save and not (logs / '.zzz.review-state').exists() and not (logs / '.aaa.review-state').exists()
+          and restored_invalidated(state, state_save) and not (logs / '.zzz.review-state').exists() and not (logs / '.aaa.review-state').exists()
           and not (logs / '.review-reuse-blocked').exists())
     r, argv, done = launch(wt, 'review-r3', claude=claude, args=('--force',), mutation='undeletable')
     check(f'戻しきれなければ印を置いて不合格-{kind}', 'VERDICT: NEEDS_FIX' in done and (logs / '.review-reuse-blocked').exists())

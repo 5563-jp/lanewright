@@ -16,7 +16,9 @@
 #       / <label>.pid（起動時）/ <label>.done（終了時）← 生死は lanes-status.sh <worktree> <label> で見る
 #       / .<系列>.review-state（再利用の記録）/ <系列>.followups.md（round 3 以降の後回し票）
 # label 省略時はプロンプトのファイル名（拡張子なし）。英数と . _ - のみ
-# 最終行は必ず VERDICT: CLEAN | NEEDS_FIX | NONE（NONE = 完走せず / claude 非 0 / is_error）。終了コード: claude の rc（非 0 ならそのまま）、rc 0 で VERDICT が取れなければ 3
+# 最終行は必ず VERDICT: CLEAN | NEEDS_FIX | NONE（NONE = 完走せず / claude 非 0 / is_error）。終了コード: claude の rc（非 0 ならそのまま）、rc 0 で VERDICT が取れなければ 3、
+#   改ざん・入力の不一致（作業ツリー・条件・git の管理フォルダ・再利用の記録・使い回し禁止の印・使い回した必須検証の入力の変化）は 4
+#   （claude の rc より優先。claude の rc は証跡の「実行」の行と .done の note に別に書く。Gemini・Codex レビューと同じ）
 set -euo pipefail
 # 設定値の誤りもすぐには止めず、label が決まってから今回の失敗として .done に残す（lanes.env「設定の誤りの扱い」）
 typeset +x LANES_DEFER_CONFIG_ERROR=1
@@ -56,11 +58,6 @@ else
     || lanes_die "比較起点 origin/${LANES_BASE_BRANCH:-develop} が無い。その枝の無い repo では --base <sha|branch> を指定する（統合先は LANES_BASE_BRANCH で変えられる）"
 fi
 review_base="$base"
-# 必須検証の使い回しの問い合わせ。指紋に環境変数が入るので、scratch や git の通信止めを export する前に、
-# 親が chk-run.sh を回したのと同じ環境で呼ぶ。ランチャの記録（logs/ の直下の .pid・ログ・起動ログなど）は指紋に入らない
-rvd_checks_query "$LANES_DIR" "$wt"
-[[ "$RVD_CHECKS_REUSE" == yes ]] && LANES_REVIEW_CHECKS_REUSED=1 || LANES_REVIEW_CHECKS_REUSED=0
-checks_key="$(rvd_checks_key)"
 
 logdir="$wt/logs"
 log="$logdir/$label.log"; json="$logdir/$label.json"; err="$logdir/$label.stderr.log"
@@ -69,18 +66,25 @@ final="$logdir/$label.prompt.md"; evidence="$logdir/$label.evidence.md"
 # dry-run は .pid / .done / ログを触らず、結合結果だけ <label>.dry-run.prompt.md に書く
 # 系列の記録（再利用の記録・後回し票・「使い回し禁止」の印）は label では名前が決まらないので、ランチャの記録の台帳へ名前で載せる
 series="$(rvd_series "$label")"
-# 親の chk-run の記録を使えないときは、子を起動せずに止める（LANES_REVIEW_REQUIRE_CHECKS=1 のとき。review-dedup.zsh の rvd_checks_block）。
-# 排他を取る前に止め、ほかの起動前の誤りと同じく今回の失敗（EXIT:2・note=起動前の誤り）として .done に残す（lanes_die → lanes_record_early_failure。
-# logs/ がまだ無い初回は .done を作らない）。道具・指示書の点検（下の lanes_require_tool など）より先なので、そちらの誤りは chk-run.sh を通した後に出る
-if rvd_checks_block "$allow_missing"; then lanes_die "$RVD_CHECKS_BLOCK"; fi
 (( dry )) || lanes_mark_start "$logdir" "$label" claude-review "$wt" "file:.$series.review-state" "file:$series.followups.md" "file:.review-reuse-blocked"
 if (( ! dry )); then
   # 同じ worktree のレビューは 1 本ずつ（review-dedup.zsh の rvd_review_lock。並行すると、後から終わった方が先に終わった方の
-  # 再利用の記録を子の改ざんとして巻き戻す）。前回の記録を読む所から最後の保存まで、logs/ に排他をかける（終了まで持つ）
+  # 再利用の記録を子の改ざんとして巻き戻す）。前回の記録を読む所から最後の保存まで、排他をかける（logs/ と logs/ の外の固定の場所。終了まで持つ）
   rvd_review_lock_or_die "$logdir" "$LANES_LOGDIR_ID"
-  # 前のレビューが子の後の確認の前に終わっていたら（「確認中」の印が残っている）、記録を子の前に戻し、その系列の CLEAN を失効させる
-  rvd_inflight_recover "$logdir" || true
+  # 前のレビューが子の後の確認の前に終わっていたら（「確認中」の印が残っている）、記録を子の前に戻し、その系列の CLEAN を失効させる。
+  # 「使い回し禁止」の印を置けなければ、ここで止める（rvd_inflight_recover_or_die）
+  rvd_inflight_recover_or_die "$logdir"
 fi
+# 必須検証の使い回しの問い合わせ（排他を取り、前回の記録を戻した後。前回の子が残した台帳に無い記録が入力の変化に見えて、
+# 復旧の前に止まらないように）。指紋に環境変数が入るので、scratch や git の通信止めを export する前に、親が chk-run.sh を回したのと
+# 同じ環境で呼ぶ（ここまでに export・unset したものは無い）。ランチャの記録（logs/ の直下の .pid・ログ・起動ログなど）は指紋に入らない
+rvd_checks_query "$LANES_DIR" "$wt"
+[[ "$RVD_CHECKS_REUSE" == yes ]] && LANES_REVIEW_CHECKS_REUSED=1 || LANES_REVIEW_CHECKS_REUSED=0
+checks_key="$(rvd_checks_key)"
+# 親の chk-run の記録を使えないときは、子を起動せずに止める（LANES_REVIEW_REQUIRE_CHECKS=1 のとき。review-dedup.zsh の rvd_checks_block）。
+# 今回の失敗（EXIT:2・note=起動前の誤り: 理由と直し方）として .done に残す（lanes_die_noted）。道具・指示書の点検（下の lanes_require_tool
+# など）より先なので、そちらの誤りは chk-run.sh を通した後に出る
+if rvd_checks_block "$allow_missing"; then lanes_die_noted "$RVD_CHECKS_BLOCK"; fi
 lanes_require_tool claude run-claude-review.sh
 # 入口（run-review.sh）から来たときの起動前点検は、このランチャのレビュー役（claude）で回す（設定の LANES_REVIEW_ENGINE に引きずられない。
 # 点検は設定ファイルを読み直すので、環境変数ではなく引数で渡す＝設定ファイルに値をそのまま書いた LANES_REVIEW_ENGINE にも上書きされない）
@@ -98,8 +102,9 @@ review_context() { rvd_context "$LANES_DIR" "$prompt" "$review_base" "$requested
 context="$(review_context)"
 tree="$(rvd_snapshot "$wt")" || lanes_die "レビュー前の内容確認に失敗"
 decided="$(rvd_decide_mode "$wt" "$prev_head" "$prev_v" "$context" "$(rvd_record_get "$record" context)" "$tree" "$(rvd_record_get "$record" tree)")"
-# 前のレビューで再利用の記録を戻しきれなかった印があれば、どの系列でも前回の記録を使わない（毎回 full。--mode delta も full にする）
-if rvd_reuse_blocked "$logdir"; then
+# 前のレビューで再利用の記録を戻しきれなかった印があれば、どの系列でも前回の記録を使わない（毎回 full。--mode delta も full にする）。
+# この起動の後始末で印を置いたとき（RVD_RECOVER_BLOCKED=1）も同じ（印をあとで消されても、この起動の判定は変えない）
+if rvd_reuse_blocked "$logdir" || (( ${RVD_RECOVER_BLOCKED:-0} )); then
   decided=full
   print -u2 -- "注意: logs/.review-reuse-blocked がある（前のレビューで再利用の記録を戻しきれなかった）。前回の記録を使わず full でレビューする。logs/.*.review-state を確かめてから印を消す"
 elif (( dry )) && rvd_inflight_present "$logdir"; then
@@ -128,6 +133,10 @@ if (( skip_same )); then
   fi
   for f in "$log" "$json" "$err" "$evidence"; do lanes_rotate_log "$f"; done
   [[ "$(rvd_snapshot "$wt")" == "$tree" && "$(review_context)" == "$context" ]] || lanes_die "省略判定中に内容・指示が変化した。再実行する"
+  # 使い回した親の chk-run の記録の入力（未追跡の logs/input.json・依存・環境変数など。rvd_snapshot は未追跡の logs/ を見ない）も、
+  # 前回の合格を返す直前に照合し直す（問い合わせの後に変わっていたら、古い合格を返さない）
+  skip_checks_rc=0; rvd_checks_recheck "$LANES_DIR" "$wt" || skip_checks_rc=$?
+  (( skip_checks_rc == 0 )) || lanes_die "省略判定中に、使い回した親の chk-run の記録の入力（確認コマンドが読むファイル・依存・環境変数など）が変わった（または照合し直せない）。前回の結果は返さない。chk-run.sh を通し直してから再実行する"
   {
     print -- "## Claude レビュー証跡（$label）"
     print -- "- $prev_v"
@@ -225,17 +234,25 @@ guard_before="$(rvd_git_guard "$wt")" || lanes_die "レビュー前の git 管�
 state_file="$(rvd_state_file "$logdir" "$series")"
 # 今の系列だけでなく、logs/ にある全部の系列の記録を覚える（別の系列の記録に偽の CLEAN を作られても戻す）
 states_before="$(rvd_states_snapshot "$logdir")" || lanes_die "レビュー前の再利用の記録の確認に失敗"
-# 「使い回し禁止」の印の有無も覚える（子が印を消したら改ざんとして扱う）
-blocked_before=0; rvd_reuse_blocked "$logdir" && blocked_before=1
-# 子の起動前に「確認中」の印（覚えた再利用の記録）を logs/ の外へ置く。子の後の確認（記録の復元・印の確認・変更の判定）が全部済んだら
-# 消す（inflight_done）。途中で終わったら、次のレビューが印を見つけて後始末する（review-dedup.zsh の rvd_inflight_recover）
-print -r -- "$states_before" | rvd_inflight_begin "$logdir" "$series" "$label" "$LANES_LOGDIR_ID" \
-  || lanes_die "途中で終わったときの後始末の印（$(rvd_inflight_file "$logdir")）を置けない → 起動しない。${XDG_STATE_HOME:-~/.local/state}/lanewright/ の権限を確かめる"
-inflight_done() {
-  rvd_inflight_end "$logdir" && return 0
-  ( print -u2 -- "→ 「確認中」の印（$(rvd_inflight_file "$logdir")）を消せない。次のレビューは今回を途中で終わったものとして後始末する" ) || true
-  return 0
+# 「使い回し禁止」の印は、置き場所（logs/ の中と外）ごとに有無を覚える（子の後で比べる。片方だけの削除・新設も見つける。Gemini レビューと同じ）。
+# 外の印のパスは logs/ の実パスから決まるので、子が logs/ を差し替える前のここで求めておく
+block_files=("${(@f)$(rvd_block_files "$logdir")}")
+(( ${#block_files} == 2 )) || lanes_die "「使い回し禁止」の印の置き場所を決められない"
+blocked_before="$(rvd_block_state "${block_files[1]}" "${block_files[2]}")"
+# 子の実行中に logs/ そのものを差し替えられたら（lanes_logdir_check が記録を書かずに EXIT:5 で止める）、止める前に logs/ の外へ
+# 「使い回し禁止」の印を置く（Claude のレビューの子は Bash で logs/ を差し替えられる。差し替えた先の偽の記録を次回に使わない）
+lanes_logdir_tamper_hook() {
+  rvd_place_outer_marker "${block_files[2]}" \
+    || ( print -u2 -- "→ 「使い回し禁止」の印（${block_files[2]}）を置けない。次のレビューは --mode full --force で回す" ) || true
 }
+# 違反（改ざん・入力の不一致）を見つけたら、ほかの何より先に呼ぶ。この系列の前回の CLEAN を失効させる（できなければ「使い回し禁止」の印）。
+# どちらもできなければ「確認中」の印を残す（review-dedup.zsh の rvd_invalidate_on_violation / rvd_inflight_finish）
+invalidate_on_violation() { rvd_invalidate_on_violation "$logdir" "$series" "$1" "$label" || true; }
+# 子の起動前に「確認中」の印（覚えた再利用の記録と「使い回し禁止」の印の有無）を logs/ の外へ置く。消すのは最後（rvd_inflight_finish）:
+# 子の後の確認に加えて、今回の判定の保存（rc 0 のとき）か、前回の CLEAN の失効（違反のとき）が済んでから。途中で終わったら、
+# 次のレビューが印を見つけて後始末する（review-dedup.zsh の rvd_inflight_recover）
+print -r -- "$states_before" | rvd_inflight_begin "$logdir" "$series" "$label" "$LANES_LOGDIR_ID" "$blocked_before" \
+  || lanes_die "途中で終わったときの後始末の印（$(rvd_inflight_file "$logdir")）を置けない → 起動しない。${XDG_STATE_HOME:-~/.local/state}/lanewright/ の権限を確かめる"
 started="$(lanes_now)"; t0=$(date +%s)
 
 # レビューの子から push（と fetch）をできなくする。Bash の先頭一致の拒否は `git -C . push` などを通すため、git 側で止める
@@ -247,19 +264,24 @@ lanes_start_child "${cmd[@]}" < "$final" > "$json" 2> "$err"
 wait "$LANES_CHILD" || rc=$?
 lanes_logdir_check
 LANES_CHILD=""   # 以後の trap で（pid 再利用した）別プロセスを kill しない
+child_rc=$rc   # claude の終了コード。改ざん・入力の不一致で EXIT:4 にしたときも、証跡にはこの値を別に残す
 # 再利用の記録が子の実行中に変わっていたら、まず元の中身に戻す（以後どこで終わっても偽の記録を残さない）
 state_tampered=0
 states_rc=0; print -r -- "$states_before" | rvd_states_restore "$logdir" || states_rc=$?
-# 印が子の実行中に消されていたら、改ざんとして扱う（印は置き直す）
-if (( blocked_before )) && ! rvd_reuse_blocked "$logdir"; then
-  print -u2 -- "→ Claude レビューの実行中に「使い回し禁止」の印が消された。置き直して不合格（NEEDS_FIX）にする"
-  (( states_rc != 0 )) || states_rc=1
-fi
-# 戻しきれなかった・印が消されたときは、印を置く（logs/ の外にも）。置けなければその旨を出す（以後も full で回すよう人が確かめる）
-if (( states_rc == 2 )) || { (( blocked_before )) && ! rvd_reuse_blocked "$logdir"; }; then
-  rvd_mark_blocked "$logdir" || print -u2 -- "→ 「使い回し禁止」の印を置けない。logs/ と ${XDG_STATE_HOME:-~/.local/state}/lanewright/ の権限を確かめる。次のレビューは --mode full --force で回す"
-fi
+# 印が子の実行中に変わっていたら（どちらかの置き場所の削除・新設）、改ざんとして扱う。印は両方に置いて使い回し禁止のままにする
+blocked_after="$(rvd_block_state "${block_files[1]}" "${block_files[2]}")"
+marker_tampered=0
+[[ "$blocked_after" == "$blocked_before" ]] || marker_tampered=1
+if (( marker_tampered )) && (( states_rc == 0 )); then states_rc=1; fi
 if (( states_rc != 0 )); then
+  # 違反を見つけたら、表示より先にこの系列の前回の CLEAN の失効と、「使い回し禁止」の印（戻しきれない・印が変わった）を済ませる
+  invalidate_on_violation 4
+  if (( states_rc == 2 || marker_tampered )) && ! rvd_mark_blocked "$logdir" 2>/dev/null; then
+    # 戻しきれない別の系列の記録・消された印を守る物が無いので、「確認中」の印を残す（次のレビューが記録を戻し直し、印を置き直す）
+    RVD_VIOLATION_SETTLED=0
+    ( print -u2 -- "→ 「使い回し禁止」の印を置けない。「確認中」の印を残す（次のレビューが後始末する）。logs/ と ${XDG_STATE_HOME:-~/.local/state}/lanewright/ の権限を確かめる。次のレビューは --mode full --force で回す" ) || true
+  fi
+  (( ! marker_tampered )) || print -u2 -- "→ Claude レビューの実行中に「使い回し禁止」の印が変わった（前: $blocked_before / 後: $blocked_after。inner=logs/ の中、outer=外）。両方に置いて（使い回し禁止のまま）不合格（NEEDS_FIX）にする"
   state_tampered=1
   if (( states_rc == 1 )); then
     print -u2 -- "→ Claude レビューの実行中に再利用の記録（logs/.*.review-state）が増えた・変わった。子の前の状態に戻して不合格（NEEDS_FIX）にする"
@@ -275,20 +297,24 @@ conv_rc=0
 python3 -I - "$json" "$log" <<'PY' || conv_rc=$?
 import json, sys, pathlib
 src, dst = sys.argv[1], sys.argv[2]
-raw = pathlib.Path(src).read_text(encoding="utf-8", errors="replace")
 result, events = None, 0
-for line in raw.splitlines():
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        d = json.loads(line)
-    except Exception:
-        continue
-    events += 1
-    if isinstance(d, dict) and d.get("type") == "result":
-        result = d
+# 1 行ずつ反復して読む（全体を読み込んで行に分けた写しを作らない。長いレビューで出力が膨らんでも、メモリは 1 行分と最後の result だけ）
+with open(src, encoding="utf-8", errors="replace") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        events += 1
+        if isinstance(d, dict) and d.get("type") == "result":
+            result = d
+raw = None
 if result is None:
+    # 旧形式（単一の JSON）か、result が無い（途中終了）ときだけ全体を読む
+    raw = pathlib.Path(src).read_text(encoding="utf-8", errors="replace")
     try:
         d = json.loads(raw)
         if isinstance(d, dict) and "result" in d:
@@ -373,22 +399,31 @@ conditions_after="$(review_context)" || conditions_after=ERROR
 # 設定（core.hooksPath など）・hooks・タグ・stash の書き換えも、作業ツリーの変更と同じく不合格にする
 guard_after="$(rvd_git_guard "$wt")" || guard_after=ERROR
 # 親の chk-run の記録を使い回したときは、確認コマンドの入力（未追跡の logs/input.json・依存・環境変数など）がレビュー中に変わって
-# いないかを、問い合わせたときと同じ環境で照合し直す（rvd_snapshot は未追跡の logs/ を見ないので、ここで見る。review-dedup.zsh の rvd_checks_recheck）
-checks_after_rc=0; rvd_checks_recheck "$LANES_DIR" "$wt" || checks_after_rc=$?
+# いないかを、問い合わせたときと同じ環境で照合し直す（rvd_snapshot は未追跡の logs/ を見ないので、ここで見る。review-dedup.zsh の rvd_checks_recheck）。
+# 作業ツリーの中身が変わっていたら（それだけで下の違反になる）、照合し直さない（子が置いた物の近くで、照合のための道具を親が動かさない）
+checks_after_rc=0
+if [[ "$snapshot_after" != ERROR && "$snapshot_before" == "$snapshot_after" ]]; then
+  rvd_checks_recheck "$LANES_DIR" "$wt" || checks_after_rc=$?
+fi
 dirty=0
 if [[ "$snapshot_after" == ERROR || "$snapshot_before" != "$snapshot_after" || "$conditions_after" != "$context" \
     || "$guard_after" == ERROR || "$guard_before" != "$guard_after" ]] || (( state_tampered || checks_after_rc != 0 )); then
+  # 違反を見つけたら、証跡や表示より先にこの系列の前回の CLEAN を失効させる
+  invalidate_on_violation 4
   dirty=1; verdict="VERDICT: NEEDS_FIX"
   [[ "$gate" == STOP_P0P1 ]] || gate=FIX
-  (( rc != 0 )) || rc=4
+  # 改ざん・入力の不一致は、claude 自身の失敗（非 0 の終了）より優先して EXIT:4 にする（呼び出し元が CLI の障害と違反を区別できるように。
+  # Gemini レビューと同じ）。claude の終了コードは証跡の「実行」の行に別に残す
+  rc=4
   (( checks_after_rc != 1 )) || print -u2 -- "→ Claude レビューの実行中に、使い回した親の chk-run の記録の入力（確認コマンドが読むファイル・依存・環境変数など）が変わった。不合格（NEEDS_FIX）にする"
   (( checks_after_rc != 2 )) || print -u2 -- "→ 使い回した親の chk-run の記録の入力を、レビューの後に照合し直せない（chk-run.sh --query-input の失敗）。不合格（NEEDS_FIX）にする"
 fi
-# 子の後の確認（記録の復元・印の確認・変更の判定）が全部済んだので、「確認中」の印を消す
-inflight_done
 (( rc != 0 )) || [[ "$verdict" == 'VERDICT: CLEAN' || "$verdict" == 'VERDICT: NEEDS_FIX' ]] || rc=3
 # 周回の上限を超えて CLEAN にならなければ ESCALATE（人に返す）。続けるなら人が直して LANES_REVIEW_MAX_ROUNDS を上げる
 gate="$(rvd_escalate "$round" "$verdict" "$gate")"
+# claude の終了コードを EXIT:4 で置き換えたときだけ、元の値を証跡の「実行」の行に足す
+child_rc_note=""
+(( dirty && child_rc != 0 && child_rc != rc )) && child_rc_note="（claude の終了コード $child_rc。改ざん・入力の不一致の EXIT:4 を優先）"
 
 {
   print -- "## Claude レビュー証跡（$label）"
@@ -401,7 +436,7 @@ gate="$(rvd_escalate "$round" "$verdict" "$gate")"
   print -- "- 必須検証の成功確認: $checks（仕組みがあると見た項目: ${checks_present:-なし}。その項目の「該当なし（未導入）」・NA は受け付けない）"
   rvd_checks_evidence
   [[ -n "$followups" ]] && print -- "- 元の判定: $raw_verdict / P2/P3 の保存先: $followups"
-  print -- "- 実行: $started 開始 / 約 ${elapsed} 分 / EXIT:$rc"
+  print -- "- 実行: $started 開始 / 約 ${elapsed} 分 / EXIT:$rc$child_rc_note"
   print -- "- HEAD: $head → $head_after / 内容・履歴・条件の変更検出 $dirty（0=なし、1=あり）"
   print -- "- ログ: $log（本文）/ $json（生）/ $final（渡した全文）"
   if [[ -n "${LANES_SCRATCH:-}" ]]; then print -- "- 作業場所（scratch）: $LANES_SCRATCH（${LANES_BASE_BRANCH:-develop} へのマージ後の cleanup で削除）"; fi
@@ -412,5 +447,8 @@ cat "$evidence"
 final_rc=$rc
 (( rc == 0 )) && rvd_save_state "$logdir" "$series" "$round" "$(git -C "$wt" rev-parse HEAD)" "$verdict" "$gate" "$label" "$context" "$snapshot_after" "$review_base" "$log" "$pending_note" "$blocking_previous"
 (( rc == 0 )) && [[ "$verdict" != "VERDICT: CLEAN" && "$verdict" != "VERDICT: NEEDS_FIX" ]] && final_rc=3   # 完走したのに VERDICT が無い
-lanes_mark_done "$final_rc" "$verdict" "claude rc=$rc gate=$gate $sevsum"
+# 「確認中」の印は、今回の判定の保存（rc 0）か前回の CLEAN の失効（違反）が済んだここで消す（保存の前に消すと、証跡の書き込みなどで
+# 止まったとき系列に前回の CLEAN だけが残り、次回が後始末も確認もせずにその合格を返す）
+rvd_inflight_finish "$logdir"
+lanes_mark_done "$final_rc" "$verdict" "claude rc=$rc child_rc=$child_rc gate=$gate $sevsum"
 exit $final_rc

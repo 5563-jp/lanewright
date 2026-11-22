@@ -7,6 +7,8 @@
 #   STUB_LOG           指定があれば、呼ばれた引数を 1 行 1 JSON で追記する
 #   STUB_RUN           指定があれば、本文を返す前にこのシェルのコマンドを子として実行する（push を試す・git の制御ファイルを書き換えるなど。作業ツリーで実行）
 #   STUB_RUN_RC        STUB_RUN の終了コードを追記するファイル
+#   STUB_STATUS_TOUCH  login status（起動前点検のログイン確認）のときに書き換えるファイル。STUB_STATUS_FLAG のファイルがあるときだけ書く
+#                      （ランチャが親の chk-run の記録を問い合わせた後に、確認コマンドの入力が変わる形を作る）
 import json, os, subprocess, sys
 from pathlib import Path
 def run_stub_cmd():
@@ -19,6 +21,8 @@ def run_stub_cmd():
         with open(os.environ["STUB_RUN_RC"], "a", encoding="utf-8") as f:
             f.write(f"{rc}\n")
 args = sys.argv[1:]
+if args[:2] == ['login', 'status'] and os.environ.get("STUB_STATUS_TOUCH") and os.path.exists(os.environ.get("STUB_STATUS_FLAG", "/nonexistent")):
+    Path(os.environ["STUB_STATUS_TOUCH"]).write_text('{"changed": "during-preflight"}\n', encoding="utf-8")
 if os.environ.get("STUB_LOG"):
     with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as f:
         f.write(json.dumps({"bin": "codex", "args": args}, ensure_ascii=False) + "\n")

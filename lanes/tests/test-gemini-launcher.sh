@@ -140,6 +140,19 @@ elif case == 'retry':
         result('ERROR'); sys.exit(1)
     change()
     # 再試行前に退避されたメッセージを利用せず、書かないまま終了する。
+elif case == 'retry_tampered':
+    # 一時的なエラー（503）で終わる前に、公開用の stream-json（logs/test.json）を書き換える。ランチャは改ざんを見つけたら再実行しない
+    count = scr/'attempt'
+    count.write_text(str(int(count.read_text()) + 1) if count.exists() else '1')
+    if count.read_text() == '1':
+        print('UNAVAILABLE 503', file=sys.stderr)
+        result('ERROR')
+        deadline = time.time() + 30
+        while time.time() < deadline and 'result' not in (Path('logs/test.json').read_text(errors='replace') if Path('logs/test.json').exists() else ''):
+            time.sleep(0.05)
+        Path('logs/test.json').write_text('{"event": "init"}\n')
+        sys.exit(1)
+    change(); message()
 if case in ('noout', 'noout_links'):
     time.sleep(15); sys.exit(0)
 result('ERROR' if case in ('idle_nochange', 'idle_change', 'idle_stale', 'error_change', 'log_link_idle') else 'SUCCESS')
@@ -284,6 +297,11 @@ setup nonzero_success; run 3; committed
 setup message_symlink; run 5; unchanged
 setup retry; run 5; unchanged
 [[ -f "$repo/logs/test.try1.json" && ! -e "$scratch/COMMIT_MSG.txt" ]] || fail '再試行の古いメッセージを再利用'
+# 1 回目で公開用の stream-json の改ざんを見つけたら、一時的なエラーでも再実行しない（改ざんした実装に、もう一度作業ツリーを触らせない）
+setup retry_tampered; run 4; unchanged
+[[ "$(< "$scratch/attempt")" == 1 && ! -e "$repo/logs/test.try1.json" ]] || fail '公開用の stream-json の改ざんを見つけたのに再実行した'
+grep -q 'stream-json.*消された・書き換えられた' "$repo/logs/test.evidence.md" "$T/retry_tampered.log" 2>/dev/null || fail '改ざんの理由が出ていない'
+[[ "$(git -C "$repo" status --porcelain -- owned.txt)" == "" ]] || fail '再実行で作業ツリーが変わった'
 # 子の終了から偽 agy の終了までの間に idle と見なされないよう、このケースだけ猶予を 5 秒にする（並列の負荷で 1 秒を超えるため）
 setup active_test; GEMINI_IDLE_GRACE=5 run 0; unchanged; [[ -e "$GEM_TEST_CHILD" ]] || fail '実行中のテストを idle で停止'
 # 依存の自動用意: worktree の直下・apps/*/・packages/*/ のロックファイルを見て、node_modules/.bin が無い所だけ入れる

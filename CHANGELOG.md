@@ -80,6 +80,23 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 - Gemini レビュー: 次回へ引き継ぐ本文（再利用の記録の未解決指摘）は、親が受信した最後の応答（`last.md`）だけにする（表示用の `logs/<label>.log` の見張りの行・証跡を入れない）。
   承認・質問ツールの回数は呼び出し単位で数える（`run-gemini.sh` も）。`run-gemini.sh` の監査も、ログを行ごとに読む（末尾の文字切れで外への書き込みを見落とさない）。
 - `run-gemini.sh` も、登録済みの linked worktree だけで起動し、`agy` の出力を受け取り役で受けて、子の回収後に受け取った中身と突き合わせる（消された・書き換えられた → `EXIT:4`）。1 行目が `init` でない記録は監査の不備として扱う。
+- Codex・Claude・Gemini のレビュー: 「確認中」の印は、今回の判定の保存（`EXIT:0`）か、違反のときの前回の `CLEAN` の失効（または「使い回し禁止」の印）が済んでから消す
+  （前は保存・失効の前に消していたので、証跡を書けずに止まると前回の `CLEAN` だけが残り、次回がそのまま返していた）。印には「使い回し禁止」の印の有無も残し、
+  後始末のときに違っていれば印を置き直す。後始末は印の中身（記録の名前・値）を全部確かめてから戻し、不正なら何も消さない・作らない。
+  後始末で「使い回し禁止」の印を置けなければ、「確認中」の印を残して起動しない（`EXIT:2`。前は印を消して起動していた）。
+- Codex・Claude のレビュー: 改ざん（再利用の記録・使い回し禁止の印・git の制御ファイル）・使い回した必須検証の入力の変化で不合格にしたら、Gemini と同じく系列の前回の `CLEAN` を失効させ、
+  子の終了コードが非 0 でも `EXIT:4` を優先する（子の終了コードは証跡の「実行」の行と `.done` の `child_rc=` に残す）。「使い回し禁止」の印は置き場所ごとに前後を比べる。
+- Codex・Claude・Gemini のレビュー: 排他のロックを `logs/` に加えて、`logs/` の外の固定の場所（`${XDG_STATE_HOME:-~/.local/state}/lanewright/review-lock/`）にもかける
+  （実行中に `logs/` を別のフォルダへ差し替えられても、後続のレビューが並行しない）。親の chk-run の記録の問い合わせと `LANES_REVIEW_REQUIRE_CHECKS=1` の判定は、
+  排他を取って前回の後始末をした後に行う（前回の子が残した記録が入力の変化に見えて、後始末の前に止まり続けない。止めたときの理由は `.done` の `note=起動前の誤り:` に残る）。
+- Codex・Claude・Gemini のレビュー: 同じ head の前回の結果を返すとき（skip-same-head）も、使い回した親の chk-run の記録の入力を照合し直す。終了時の照合し直しは、
+  最初に問い合わせた場所から呼ぶ（設定ファイルの相対の `LANES_SCRATCH_ROOT` が別の絶対パスに直って、変更が無くても不合格になっていた）。
+- Gemini レビュー: 監査は 2 段にし、書き込みの試みの件数を確定して前回の `CLEAN` を失効させてから本文・表示用のログを書く（`last.md` を書けなくても件数を失わない）。
+  監査ログはバイト列のまま 1 行ずつ反復して読む（全体を二重にメモリへ載せない）。監督役は作業ツリーの外で動き、子を起動するときだけ作業場所を worktree にする。
+- Codex レビュー: 出力の受け取り役（`codex-review-output.py`）も確定した `python3` を `-I` で起動する（相対の `PYTHONPATH` で作業ツリーの同名のモジュールを読まない）。
+- `run-gemini.sh`: 公開用の stream-json の改ざんを見つけたら、一時的なエラーでも自動で再実行しない。
+- `chk-run.sh --query-input`: 入力の指紋と未 commit の有無が決まった所で答え、生成物の中身は読まない。
+- `lanes-doctor.sh`: 名前だけの `GEMINI_BIN`（`agy-preview` など）も、ランチャと同じく PATH から探して点検する（`_common.sh` の `lanes_find_bin`）。
 
 ## [0.1.7] - Cloudflare Workers + vinext の構成の生成物があっても確認の結果を記録する / Record checks with Cloudflare Workers + vinext generated output
 

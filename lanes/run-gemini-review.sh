@@ -29,13 +29,17 @@
 #   監査と最後の応答は、親の受け取り役（gemini-stream-tee.py）がパイプで直接受け取った親専用の写しを読む（子が書ける logs/<label>.json は
 #   判定の正本にしない。回収後に親専用の写しで置き換える）。先頭の init が無い・JSON の欠損・不正・result の重複・終端でない result は VERDICT: NONE。
 #   書き込みの試み・改ざん（EXIT:4）で不合格にしたら、見つけた直後（証跡を書く前）に、その系列の前回の CLEAN を失効させる
-#   （次の通常の起動で同じ HEAD の省略・delta に使わない）。監査は親専用の写しをバイト列のまま行ごとに読む（末尾の文字切れなどの不正行は
-#   監査の不備として数え、それまでに数えた書き込みの試みは失わない）。
+#   （次の通常の起動で同じ HEAD の省略・delta に使わない）。監査は親専用の写しをバイト列のまま 1 行ずつ反復して読む（全体を読み込まない。
+#   末尾の文字切れなどの不正行は監査の不備として数え、それまでに数えた書き込みの試みは失わない）。監査は 2 段: 数える段で書き込みの試みを
+#   確定して前回の CLEAN を失効させてから、本文（last.md）と表示用のログ（log）を書く段に進む（書く段の失敗で件数を失わない）。
 #   親の chk-run の記録を使い回したときは、子の後にも同じ環境で確認コマンドの入力を照合し直す（review-dedup.zsh の rvd_checks_recheck。
 #   レビュー中に未追跡の logs/input.json などが変わっていたら NEEDS_FIX・EXIT:4）。
-# 同じ worktree のレビューは 1 本ずつ（review-dedup.zsh の rvd_review_lock。並行すると、後から終わった方が先に終わった方の再利用の記録を
-#   巻き戻す）。子の起動前に logs/ の外へ「確認中」の印（覚えた再利用の記録）を置き、子の後の確認が全部済んでから消す。途中で終わったら
-#   次のレビューが印を見つけて、記録を子の前の中身に戻し、その系列の前回の CLEAN を再利用しない（rvd_inflight_recover）。
+# 同じ worktree のレビューは 1 本ずつ（review-dedup.zsh の rvd_review_lock。logs/ と logs/ の外の固定の場所の 2 つに排他。並行すると、
+#   後から終わった方が先に終わった方の再利用の記録を巻き戻す）。排他を取って前回の後始末をしてから、親の chk-run の記録を問い合わせる。
+#   子の起動前に logs/ の外へ「確認中」の印（覚えた再利用の記録と「使い回し禁止」の印の有無）を置き、子の後の確認と、今回の判定の保存
+#   （または違反のときの前回の CLEAN の失効）が済んでから消す。途中で終わったら次のレビューが印を見つけて、記録を子の前の中身に戻し、
+#   その系列の前回の CLEAN を再利用しない（rvd_inflight_recover。「使い回し禁止」の印を置けなければ起動しない）。
+#   同じ head の前回の結果を返すとき（skip-same-head）も、使い回した親の chk-run の記録の入力を照合し直す（変わっていたら返さない）。
 # 見張り: run-gemini.sh と同じ（gemini-agy.zsh）。出力が GEMINI_REVIEW_NOOUTPUT_SEC 秒（既定 600）止まったら EXIT:8、
 #   idle（裏の作業待ち）のまま子が無ければ EXIT:3、全体の上限は --print-timeout（GEMINI_REVIEW_PRINT_TIMEOUT、既定 45m）。
 # モデルと effort: GEMINI_REVIEW_MODEL / GEMINI_REVIEW_EFFORT（既定は空 = 付けない。実装用の GEMINI_MODEL / GEMINI_EFFORT とは別）
@@ -87,20 +91,29 @@ else
     || lanes_die "比較起点 origin/${LANES_BASE_BRANCH:-develop} が無い。その枝の無い repo では --base <sha|branch> を指定する（統合先は LANES_BASE_BRANCH で変えられる）"
 fi
 review_base="$base"
-# 必須検証の使い回しの問い合わせ。指紋に環境変数が入るので、scratch や git の通信止めを export する前に、
-# 親が chk-run.sh を回したのと同じ環境で呼ぶ。ランチャの記録（logs/ の直下の .pid・ログ・起動ログなど）は指紋に入らない
-rvd_checks_query "$LANES_DIR" "$wt"
-[[ "$RVD_CHECKS_REUSE" == yes ]] && LANES_REVIEW_CHECKS_REUSED=1 || LANES_REVIEW_CHECKS_REUSED=0
-checks_key="$(rvd_checks_key)"
 
 logdir="$wt/logs"
 log="$logdir/$label.log"; json="$logdir/$label.json"; err="$logdir/$label.stderr.log"; body_log="$logdir/$label.last.md"
 final="$logdir/$label.prompt.md"; evidence="$logdir/$label.evidence.md"
 # 系列の記録（再利用の記録・後回し票・「使い回し禁止」の印）は label では名前が決まらないので、ランチャの記録の台帳へ名前で載せる
 series="$(rvd_series "$label")"
-# 親の chk-run の記録を使えないときは、子を起動せずに止める（LANES_REVIEW_REQUIRE_CHECKS=1 のとき。run-claude-review.sh と同じ位置）
-if rvd_checks_block "$allow_missing"; then lanes_die "$RVD_CHECKS_BLOCK"; fi
-# 同じ道具でレビューしない。この worktree に Gemini 実装の記録があれば、排他を取る前に止める（今回の失敗 EXIT:2 として .done に残す）
+(( dry )) || lanes_mark_start "$logdir" "$label" gemini-review "$wt" "file:.$series.review-state" "file:$series.followups.md" "file:.review-reuse-blocked"
+if (( ! dry )); then
+  # 同じ worktree のレビューは 1 本ずつ。前回の記録を読む所から最後の保存まで、排他をかける（logs/ と logs/ の外の固定の場所。終了まで持つ）
+  rvd_review_lock_or_die "$logdir" "$LANES_LOGDIR_ID"
+  # 前のレビューが子の後の確認の前に終わっていたら（「確認中」の印が残っている）、記録を子の前に戻し、その系列の CLEAN を失効させる。
+  # 「使い回し禁止」の印を置けなければ、ここで止める（rvd_inflight_recover_or_die）
+  rvd_inflight_recover_or_die "$logdir"
+fi
+# 必須検証の使い回しの問い合わせ（排他を取り、前回の記録を戻した後。前回の子が残した台帳に無い記録が入力の変化に見えて、
+# 復旧の前に止まらないように）。指紋に環境変数が入るので、scratch や git の通信止めを export する前に、親が chk-run.sh を回したのと
+# 同じ環境で呼ぶ（ここまでに export・unset したものは無い）。ランチャの記録（logs/ の直下の .pid・ログ・起動ログなど）は指紋に入らない
+rvd_checks_query "$LANES_DIR" "$wt"
+[[ "$RVD_CHECKS_REUSE" == yes ]] && LANES_REVIEW_CHECKS_REUSED=1 || LANES_REVIEW_CHECKS_REUSED=0
+checks_key="$(rvd_checks_key)"
+# 親の chk-run の記録を使えないときは、子を起動せずに止める（LANES_REVIEW_REQUIRE_CHECKS=1 のとき。理由と直し方を .done の note に残す）
+if rvd_checks_block "$allow_missing"; then lanes_die_noted "$RVD_CHECKS_BLOCK"; fi
+# 同じ道具でレビューしない。この worktree に Gemini 実装の記録があれば止める（今回の失敗 EXIT:2 として、理由を .done の note に残す）
 # 記録を読めない（確かめられない）ときも「記録なし」と取り違えず、--allow-same-engine が無ければ止める
 same_engine_line=""; same_rc=0
 lanes_impl_lane_recorded "$logdir" gemini || same_rc=$?
@@ -109,22 +122,15 @@ if (( same_rc == 0 )); then
     same_engine_line="- 同じ道具のレビュー: この worktree に Gemini 実装の記録がある（logs/$REPLY）のに --allow-same-engine で起動した（実装と同じ思い込みを見落としやすい）"
     print -u2 -- "注意: この worktree に Gemini 実装の記録がある（logs/$REPLY）。--allow-same-engine が付いているので Gemini でレビューする（証跡に残す）"
   else
-    lanes_die "この worktree には Gemini 実装の記録がある（logs/$REPLY）。実装と同じ道具（Gemini）でレビューすると同じ思い込みを見落としやすいので起動しない。Codex か Claude のレビューを使う（run-review.sh --engine codex / --engine claude）。どうしても Gemini で回すなら --allow-same-engine を付ける（証跡に残る）"
+    lanes_die_noted "この worktree には Gemini 実装の記録がある（logs/$REPLY）。実装と同じ道具（Gemini）でレビューすると同じ思い込みを見落としやすいので起動しない。Codex か Claude のレビューを使う（run-review.sh --engine codex / --engine claude）。どうしても Gemini で回すなら --allow-same-engine を付ける（証跡に残る）"
   fi
 elif (( same_rc != 1 )); then
   if (( allow_same )); then
     same_engine_line="- 同じ道具のレビュー: この worktree の Gemini 実装の記録を確かめられない（$REPLY）のに --allow-same-engine で起動した"
     print -u2 -- "注意: この worktree の Gemini 実装の記録を確かめられない（$REPLY）。--allow-same-engine が付いているので Gemini でレビューする（証跡に残す）"
   else
-    lanes_die "この worktree の Gemini 実装の記録を確かめられない（$REPLY）。実装と同じ道具（Gemini）でのレビューにならないと確かめられないので起動しない。logs/ の .pid・証跡を読めるように直すか、Codex か Claude のレビューを使う（run-review.sh --engine codex / --engine claude）。どうしても Gemini で回すなら --allow-same-engine を付ける（証跡に残る）"
+    lanes_die_noted "この worktree の Gemini 実装の記録を確かめられない（$REPLY）。実装と同じ道具（Gemini）でのレビューにならないと確かめられないので起動しない。logs/ の .pid・証跡を読めるように直すか、Codex か Claude のレビューを使う（run-review.sh --engine codex / --engine claude）。どうしても Gemini で回すなら --allow-same-engine を付ける（証跡に残る）"
   fi
-fi
-(( dry )) || lanes_mark_start "$logdir" "$label" gemini-review "$wt" "file:.$series.review-state" "file:$series.followups.md" "file:.review-reuse-blocked"
-if (( ! dry )); then
-  # 同じ worktree のレビューは 1 本ずつ。前回の記録を読む所から最後の保存まで、logs/ に排他をかける（終了まで持つ）
-  rvd_review_lock_or_die "$logdir" "$LANES_LOGDIR_ID"
-  # 前のレビューが子の後の確認の前に終わっていたら（「確認中」の印が残っている）、記録を子の前に戻し、その系列の CLEAN を失効させる
-  rvd_inflight_recover "$logdir" || true
 fi
 lanes_require_tool gemini run-gemini-review.sh
 # 入口（run-review.sh）から来たときの起動前点検は、Gemini レビューの点検（agy の有無・サンドボックス）も含めて回す
@@ -150,8 +156,9 @@ review_context() { rvd_context "$LANES_DIR" "$prompt" "$review_base" "$requested
 context="$(review_context)"
 tree="$(rvd_snapshot "$wt")" || lanes_die "レビュー前の内容確認に失敗"
 decided="$(rvd_decide_mode "$wt" "$prev_head" "$prev_v" "$context" "$(rvd_record_get "$record" context)" "$tree" "$(rvd_record_get "$record" tree)")"
-# 前のレビューで再利用の記録を戻しきれなかった印があれば、どの系列でも前回の記録を使わない（毎回 full。--mode delta も full にする）
-if rvd_reuse_blocked "$logdir"; then
+# 前のレビューで再利用の記録を戻しきれなかった印があれば、どの系列でも前回の記録を使わない（毎回 full。--mode delta も full にする）。
+# この起動の後始末で印を置いたとき（RVD_RECOVER_BLOCKED=1）も同じ（印をあとで消されても、この起動の判定は変えない）
+if rvd_reuse_blocked "$logdir" || (( ${RVD_RECOVER_BLOCKED:-0} )); then
   decided=full
   print -u2 -- "注意: logs/.review-reuse-blocked がある（前のレビューで再利用の記録を戻しきれなかった）。前回の記録を使わず full でレビューする。logs/.*.review-state を確かめてから印を消す"
 elif (( dry )) && rvd_inflight_present "$logdir"; then
@@ -180,6 +187,10 @@ if (( skip_same )); then
   fi
   for f in "$log" "$json" "$err" "$evidence" "$body_log"; do lanes_rotate_log "$f"; done
   [[ "$(rvd_snapshot "$wt")" == "$tree" && "$(review_context)" == "$context" ]] || lanes_die "省略判定中に内容・指示が変化した。再実行する"
+  # 使い回した親の chk-run の記録の入力（未追跡の logs/input.json・依存・環境変数など。rvd_snapshot は未追跡の logs/ を見ない）も、
+  # 前回の合格を返す直前に照合し直す（問い合わせの後に変わっていたら、古い合格を返さない）
+  skip_checks_rc=0; rvd_checks_recheck "$LANES_DIR" "$wt" || skip_checks_rc=$?
+  (( skip_checks_rc == 0 )) || lanes_die "省略判定中に、使い回した親の chk-run の記録の入力（確認コマンドが読むファイル・依存・環境変数など）が変わった（または照合し直せない）。前回の結果は返さない。chk-run.sh を通し直してから再実行する"
   {
     print -- "## Gemini レビュー証跡（$label）"
     print -- "- $prev_v"
@@ -332,25 +343,14 @@ lanes_logdir_tamper_hook() {
     || ( print -u2 -- "→ 「使い回し禁止」の印（${block_files[2]}）を置けない。次のレビューは --mode full --force で回す" ) || true
 }
 # 書き込みの試み・改ざんを見つけたら、ほかの何より先に呼ぶ（証跡の書き込みや標準出力への表示で set -e が発動しても、前回の CLEAN を残さない）。
-# この系列の前回の CLEAN を失効させる。失効させられなければ「使い回し禁止」の印を置く。2 回目以降は何もしない
-violation_invalidated=0
-invalidate_on_violation() {   # <終了コード>
-  (( violation_invalidated )) && return 0
-  violation_invalidated=1
-  rvd_invalidate_state "$logdir" "$series" "$1" "$label" 2>/dev/null && return 0
-  ( print -u2 -- "→ この系列（$series）の前回の再利用の記録を失効させられない。「使い回し禁止」の印を置く" ) || true
-  rvd_mark_blocked "$logdir" 2>/dev/null || ( print -u2 -- "→ 「使い回し禁止」の印も置けない。次のレビューは --mode full --force で回す" ) || true
-  return 0
-}
-# 子の起動前に「確認中」の印（覚えた再利用の記録）を logs/ の外へ置く。子の後の確認（記録の復元・印の比較・違反の判定と失効）が
-# 全部済んだら消す（inflight_done）。途中で終わったら、次のレビューが印を見つけて後始末する（review-dedup.zsh の rvd_inflight_recover）
-print -r -- "$states_before" | rvd_inflight_begin "$logdir" "$series" "$label" "$LANES_LOGDIR_ID" \
+# この系列の前回の CLEAN を失効させる。失効させられなければ「使い回し禁止」の印を置く。2 回目以降は何もしない（review-dedup.zsh の
+# rvd_invalidate_on_violation。どちらもできなければ「確認中」の印を残す＝次のレビューが後始末する）
+invalidate_on_violation() { rvd_invalidate_on_violation "$logdir" "$series" "$1" "$label" || true; }
+# 子の起動前に「確認中」の印（覚えた再利用の記録と「使い回し禁止」の印の有無）を logs/ の外へ置く。消すのは最後（rvd_inflight_finish）:
+# 子の後の確認に加えて、今回の判定の保存（rc 0 のとき）か、前回の CLEAN の失効（違反のとき）が済んでから。途中で終わったら、
+# 次のレビューが印を見つけて後始末する（review-dedup.zsh の rvd_inflight_recover）
+print -r -- "$states_before" | rvd_inflight_begin "$logdir" "$series" "$label" "$LANES_LOGDIR_ID" "$blocked_before" \
   || lanes_die "途中で終わったときの後始末の印（$(rvd_inflight_file "$logdir")）を置けない → 起動しない。${XDG_STATE_HOME:-~/.local/state}/lanewright/ の権限を確かめる"
-inflight_done() {
-  rvd_inflight_end "$logdir" && return 0
-  ( print -u2 -- "→ 「確認中」の印（$(rvd_inflight_file "$logdir")）を消せない。次のレビューは今回を途中で終わったものとして後始末する" ) || true
-  return 0
-}
 started="$(lanes_now)"; t0=$(date +%s)
 
 # レビューの子から push（と fetch）をできなくする（読み取り専用の役。git の通信は要らない）
@@ -378,12 +378,14 @@ marker_tampered=0
 if (( marker_tampered )) && (( states_rc == 0 )); then states_rc=1; fi
 if (( states_rc != 0 )); then
   state_tampered=1
-  # 違反を見つけたら、表示より先に「使い回し禁止」の印（戻しきれない・印が変わった）と、この系列の前回の CLEAN の失効を済ませる
+  # 違反を見つけたら、表示より先にこの系列の前回の CLEAN の失効と、「使い回し禁止」の印（戻しきれない・印が変わった）を済ませる
   # （以後どこで終わっても古い合格を残さない）
-  if (( states_rc == 2 || marker_tampered )); then
-    rvd_mark_blocked "$logdir" 2>/dev/null || ( print -u2 -- "→ 「使い回し禁止」の印を置けない。logs/ と ${XDG_STATE_HOME:-~/.local/state}/lanewright/ の権限を確かめる。次のレビューは --mode full --force で回す" ) || true
-  fi
   invalidate_on_violation 4
+  if (( states_rc == 2 || marker_tampered )) && ! rvd_mark_blocked "$logdir" 2>/dev/null; then
+    # 戻しきれない別の系列の記録・消された印を守る物が無いので、「確認中」の印を残す（次のレビューが記録を戻し直し、印を置き直す）
+    RVD_VIOLATION_SETTLED=0
+    ( print -u2 -- "→ 「使い回し禁止」の印を置けない。「確認中」の印を残す（次のレビューが後始末する）。logs/ と ${XDG_STATE_HOME:-~/.local/state}/lanewright/ の権限を確かめる。次のレビューは --mode full --force で回す" ) || true
+  fi
   (( ! marker_tampered )) || print -u2 -- "→ Gemini レビューの実行中に「使い回し禁止」の印が変わった（前: $blocked_before / 後: $blocked_after。inner=logs/ の中、outer=外）。両方に置いて（使い回し禁止のまま）不合格（NEEDS_FIX）にする"
   if (( states_rc == 1 )); then
     print -u2 -- "→ Gemini レビューの実行中に再利用の記録（logs/.*.review-state）が増えた・変わった。子の前の状態に戻して不合格（NEEDS_FIX）にする"
@@ -396,10 +398,11 @@ git_fp_after="$(lanes_git_ctl_fingerprint "$wt" "$gitdir" "$gitcommon" 2>/dev/nu
 if [[ "$git_fp_after" != "$git_fp_before" ]]; then
   # 最初にこの系列の前回の CLEAN を失効させる（次の通常の起動で古い合格を返さない。ログへの書き込みで止まっても残さない）
   invalidate_on_violation 4
-  inflight_done
   { print -- "[run-gemini-review] $(lanes_now) git の制御ファイル（.git・commondir・gitdir・config・config.worktree・hooks）が変わった → git を実行せず停止"
     print -- "EXIT:4"; } >> "$log" 2>/dev/null || true
   ( print -u2 -- "→ Gemini レビューの実行中に git の制御ファイルが変わった。git を実行せず停止（EXIT:4）。$wt/.git と $gitdir・$gitcommon の中身を手で確かめてから直す" ) || true
+  # 失効（か「使い回し禁止」の印）が済んでから「確認中」の印を消す（どちらもできなければ残す）
+  rvd_inflight_finish "$logdir"
   lanes_mark_done 4 "VERDICT: NEEDS_FIX" "git の制御ファイルの変更を検出（git 未実行）"
   exit 4
 fi
@@ -410,84 +413,98 @@ elapsed=$(( ($(date +%s) - t0) / 60 ))
 # 同時に、書き込み系のツール呼び出し（run-gemini.sh の監査と同じ判定: ツール名に write / replace / edit / delete / move / rename /
 # create / append / copy / patch を含む tool の step_update）を数える。読み取り専用のレビューでは 1 件でも不合格。
 # 開始から記録できたことも確かめる: 1 行目が init のイベントでない（先頭の欠落・result だけ残った）・init が 2 回ある記録は不備。
-# 写しはバイト列のまま改行ごとに区切って、1 行ずつ UTF-8 として読む（末尾の文字切れなどの不正行は監査の不備として数え、その前後の
-# 正常な行の書き込みの試みは失わない。全体を一度に読むと、1 か所の文字切れで全部の行を捨ててしまう）。
+# 写しはバイト列のまま 1 行ずつ反復して読み、行ごとに UTF-8 として解釈する（全体を一度に読み込んで複製しない。長い実行でコマンドの出力が
+# 膨らんでも、メモリは 1 行分と最後の応答の本文だけ。末尾の文字切れなどの不正行は監査の不備として数え、その前後の正常な行の
+# 書き込みの試みは失わない）。
 # 承認・質問ツール（ask_*）と書き込みの試みは、同じ呼び出しの経過の記録（何度も届く step_update）を 1 件に数える。
-# 出力（標準出力）: status= / writes= / write_tools= / asks= / turns= / invalid=。終了コード: 0 = 本文あり / 4 = JSON の欠損・不正・
-# init の欠落・result の重複・終端でない / 5 = status が SUCCESS でない（本文は書かない＝VERDICT を拾わない）
-conv_rc=0
-audit_out="$(gem_stream_read "$GEM_STREAM_FD" python3 -I - "$body_log" "$log" <<'PY'
+# 2 段に分ける（同じ写しを 2 回読む。子と孫は回収済みで、写しの名前は子の起動前に消してあるので、2 回とも同じ中身）:
+#   audit   … 数えるだけ（ファイルは書かない）。出力（標準出力）: status= / writes= / write_tools= / asks= / turns= / invalid= / invalid_kinds=。
+#             終了コード: 0 = 本文あり / 4 = JSON の欠損・不正・init の欠落・result の重複・終端でない / 5 = status が SUCCESS でない
+#   publish … 本文（last.md）と表示用のログ（log）を書く。0 = 書けた / 1 = 書けない
+# ランチャは audit の件数で違反を確定し、前回の CLEAN を失効させてから publish する（公開用のファイルの書き込みに失敗しても、
+# 書き込みの試みの件数を失わない・失効より後回しにしない）
+gem_audit_py="$(cat <<'PY'
 import json, os, sys
-body_out, log_out = sys.argv[1:3]
+mode, body_out, log_out = sys.argv[1:4]
 WRITE_HINT = ("write", "replace", "edit", "delete", "move", "rename", "create", "append", "copy", "patch")
 status, body, error, turns = "NONE", "", "", 0
 writes, write_tools, asks, invalid = set(), set(), set(), []
-results, last_event, events, inits, first_init = 0, None, 0, 0, False
-try:
-    os.lseek(3, 0, os.SEEK_SET)
-    with os.fdopen(3, "rb", closefd=False) as f:
-        raw = f.read()
-    lines = raw.split(b"\n")
-    if lines and lines[-1] == b"":
-        lines.pop()   # 最後の改行の後ろの空（ふつうの終わり方）
-except OSError:
-    lines = None; invalid.append("ログを読み取れない")
-if lines is not None and not lines:
-    invalid.append("ログが空")
+results, last_event, events, inits, first_init, nlines = 0, None, 0, 0, False, 0
 def call_key(su, name):
     # 同じ呼び出しの経過の記録は 1 件に数える。手がかり（呼び出しの番号・識別子）が無ければ中身で区別する
     key = next((str(su[k]) for k in ("step_index", "step_id", "id", "tool_call_id") if k in su), None)
     return key if key is not None else name + "\0" + json.dumps(su.get("tool_info"), sort_keys=True, ensure_ascii=False)
-for index, raw_line in enumerate(lines or []):
+def one_line(index, raw_line):
+    global status, body, error, turns, results, last_event, events, inits, first_init
     try:
         line = raw_line.decode("utf-8")
     except UnicodeError:
-        invalid.append("文字コードの不正行（末尾の文字切れなど）"); continue
+        invalid.append("文字コードの不正行（末尾の文字切れなど）"); return
     try:
         d = json.loads(line)
     except (ValueError, TypeError):
-        invalid.append("JSON の不正行"); continue
+        invalid.append("JSON の不正行"); return
     if not isinstance(d, dict) or not isinstance(d.get("event"), str):
-        invalid.append("イベントの形式が不正"); continue
+        invalid.append("イベントの形式が不正"); return
     events += 1
     last_event = d["event"]
     if d["event"] == "init":
         inits += 1
         first_init = first_init or index == 0
-        continue
+        return
     if d["event"] == "result":
         r = d.get("result")
         if not isinstance(r, dict) or r.get("status") not in ("SUCCESS", "ERROR"):
-            invalid.append("結果の形式が不正"); continue
+            invalid.append("結果の形式が不正"); return
         if any(not isinstance(r.get(k, ""), str) for k in ("response", "error")):
-            invalid.append("結果本文の形式が不正"); continue
+            invalid.append("結果本文の形式が不正"); return
         if type(r.get("num_turns", 0)) is not int or r.get("num_turns", 0) < 0 or not isinstance(r.get("usage", {}), dict):
-            invalid.append("結果集計の形式が不正"); continue
+            invalid.append("結果集計の形式が不正"); return
         results += 1
         status = r["status"]; body = r.get("response", "") or ""; error = r.get("error", "") or ""; turns = r.get("num_turns", 0)
-        continue
+        return
     if d["event"] != "step_update":
-        continue
+        return
     su = d.get("step_update")
     if not isinstance(su, dict) or not isinstance(su.get("step_type"), str):
-        invalid.append("作業記録の形式が不正"); continue
+        invalid.append("作業記録の形式が不正"); return
     name = su.get("tool_name") or ""
     if not isinstance(name, str) or (su["step_type"] == "tool" and not name.strip()):
-        invalid.append("ツール名の形式が不正"); continue
+        invalid.append("ツール名の形式が不正"); return
     if name.startswith("ask_"):
         asks.add(call_key(su, name))
     if su["step_type"] == "tool" and any(h in name.lower() for h in WRITE_HINT):
         writes.add(call_key(su, name))
         write_tools.add(name)
+try:
+    os.lseek(3, 0, os.SEEK_SET)
+    with os.fdopen(3, "rb", closefd=False) as f:
+        # 1 行ずつ反復する（全体を読み込まない）。改行で区切った各行の最後の改行だけを外す（最後の改行の後ろの空は行に数えない）
+        for raw_line in f:
+            one_line(nlines, raw_line[:-1] if raw_line.endswith(b"\n") else raw_line)
+            nlines += 1
+except OSError:
+    invalid.append("ログを読み取れない")
+if not nlines and "ログを読み取れない" not in invalid:
+    invalid.append("ログが空")
 if results > 1 or (results == 1 and last_event != "result"):
     invalid.append("結果が重複、または終端ではない")
-if results == 0 and lines:
+if results == 0 and nlines:
     invalid.append("終了結果が欠損")
-if lines and not first_init:
+if nlines and not first_init:
     invalid.append("開始の記録（先頭の init）が無い")
 if inits > 1:
     invalid.append("開始の記録（init）が重複")
 ok = not invalid and status == "SUCCESS" and bool(body.strip())
+if mode == "audit":
+    print(f"status={status}")
+    print(f"writes={len(writes)}")
+    print("write_tools=" + ",".join(sorted(write_tools))[:200])
+    print(f"asks={len(asks)}")
+    print(f"turns={turns}")
+    print(f"invalid={len(invalid)}")
+    print("invalid_kinds=" + "・".join(dict.fromkeys(invalid))[:200])
+    sys.exit(0 if ok else (5 if not invalid and results == 1 else 4))
 def new_file(path):
     # 既存の物（symlink・ハードリンク）は辿らず、必ず新しい普通のファイルとして作る（子の回収後に呼ぶ）
     try:
@@ -495,37 +512,46 @@ def new_file(path):
     except FileNotFoundError:
         pass
     return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666), "w", encoding="utf-8")
-# 見張りの行（run_agy_once が子の実行中に書いたもの）は残して、本文の前に置く
 try:
-    watch = open(log_out, encoding="utf-8", errors="replace").read().rstrip()
+    # 見張りの行（run_agy_once が子の実行中に書いたもの）は残して、本文の前に置く
+    try:
+        with open(log_out, encoding="utf-8", errors="replace") as f:
+            watch = f.read().rstrip()
+    except OSError:
+        watch = ""
+    one = " ".join(str(error).split())[:300]
+    meta = (f"[meta] status={status} turns={turns} events={events} inits={inits} writes={len(writes)} asks={len(asks)} audit_errors={len(invalid)}"
+            + (f" error={one}" if one else "") + "\n")
+    with new_file(body_out) as f:
+        f.write(body if ok else "")
+    with new_file(log_out) as f:
+        f.write(meta + (watch + "\n" if watch else "")
+                + ("" if ok else "[meta] 正常な result（status=SUCCESS の本文）が無い・JSON が不正なので VERDICT は採用しない\n")
+                + "\n" + (body if ok else ""))
 except OSError:
-    watch = ""
-one = " ".join(str(error).split())[:300]
-meta = (f"[meta] status={status} turns={turns} events={events} inits={inits} writes={len(writes)} asks={len(asks)} audit_errors={len(invalid)}"
-        + (f" error={one}" if one else "") + "\n")
-with new_file(body_out) as f:
-    f.write(body if ok else "")
-with new_file(log_out) as f:
-    f.write(meta + (watch + "\n" if watch else "")
-            + ("" if ok else "[meta] 正常な result（status=SUCCESS の本文）が無い・JSON が不正なので VERDICT は採用しない\n")
-            + "\n" + (body if ok else ""))
-print(f"status={status}")
-print(f"writes={len(writes)}")
-print("write_tools=" + ",".join(sorted(write_tools))[:200])
-print(f"asks={len(asks)}")
-print(f"turns={turns}")
-print(f"invalid={len(invalid)}")
-print("invalid_kinds=" + "・".join(dict.fromkeys(invalid))[:200])
-sys.exit(0 if ok else (5 if not invalid and results == 1 else 4))
+    sys.exit(1)
 PY
-)" || conv_rc=$?
+)"
+conv_rc=0
+audit_out="$(gem_stream_read "$GEM_STREAM_FD" python3 -I -c "$gem_audit_py" audit "$body_log" "$log")" || conv_rc=$?
 audit_get() { local line; for line in "${(@f)audit_out}"; do [[ "$line" == "$1="* ]] && { print -r -- "${line#*=}"; return 0; }; done; print -r -- ""; }
 gstatus="$(audit_get status)"; [[ -n "$gstatus" ]] || gstatus=NONE
 writes_n="$(audit_get writes)"; [[ "$writes_n" == <-> ]] || writes_n=0
 write_tools="$(audit_get write_tools)"; asks_n="$(audit_get asks)"; [[ "$asks_n" == <-> ]] || asks_n=0
 invalid_n="$(audit_get invalid)"; [[ "$invalid_n" == <-> ]] || invalid_n=0; invalid_kinds="$(audit_get invalid_kinds)"
-# 監査そのものが動かなかった（python の失敗など）ときも、成功扱いにしない
-[[ -n "$audit_out" ]] || { conv_rc=4; invalid_n=1; invalid_kinds="監査を実行できない"; }
+# 監査そのものが動かなかった（python の失敗など）ときも、成功扱いにしない。書き込みの試みがあったかどうか分からないので、
+# この系列の前回の CLEAN も再利用しない（失効させる。終了コードは EXIT:4 にはしない＝改ざんの証拠ではない）
+if [[ "$(audit_get writes)" != <-> ]]; then
+  conv_rc=4; invalid_n=$(( invalid_n + 1 )); invalid_kinds="${invalid_kinds:+$invalid_kinds・}監査を実行できない"
+  invalidate_on_violation 3
+fi
+# 書き込みの試み・公開ログの改ざんは、公開用のファイル（last.md・log）を書く前に確定し、この系列の前回の CLEAN を失効させる
+(( writes_n == 0 && ! GEM_PUBLIC_TAMPERED )) || invalidate_on_violation 4
+# 本文と表示用のログを書く（失敗しても、上で数えた書き込みの試みと失効はそのまま。判定は VERDICT: NONE）
+publish_rc=0; gem_stream_read "$GEM_STREAM_FD" python3 -I -c "$gem_audit_py" publish "$body_log" "$log" || publish_rc=$?
+if (( publish_rc != 0 )); then
+  conv_rc=4; invalid_n=$(( invalid_n + 1 )); invalid_kinds="${invalid_kinds:+$invalid_kinds・}本文・ログ（$body_log:t・$log:t）を書けない"
+fi
 # 必須検証の仕組みの有無をランチャ側で見て判定へ渡す（仕組みがあるのに「該当なし（未導入）」・NA と書いた項目は未実施と同じ扱い）
 checks_present="$(lanes_checks_present "$wt")" || checks_present=""
 export LANES_CHECKS_PRESENT="$checks_present"
@@ -590,8 +616,12 @@ snapshot_after="$(rvd_snapshot "$wt")" || snapshot_after=ERROR
 conditions_after="$(review_context)" || conditions_after=ERROR
 guard_after="$(rvd_git_guard "$wt")" || guard_after=ERROR
 # 親の chk-run の記録を使い回したときは、確認コマンドの入力（未追跡の logs/input.json・依存・環境変数など）がレビュー中に変わって
-# いないかを、問い合わせたときと同じ環境で照合し直す（rvd_snapshot は未追跡の logs/ を見ないので、ここで見る）
-checks_after_rc=0; rvd_checks_recheck "$LANES_DIR" "$wt" || checks_after_rc=$?
+# いないかを、問い合わせたときと同じ環境で照合し直す（rvd_snapshot は未追跡の logs/ を見ないので、ここで見る）。
+# 作業ツリーの中身が変わっていたら（それだけで下の違反になる）、照合し直さない（子が置いた物の近くで、照合のための道具を親が動かさない）
+checks_after_rc=0
+if [[ "$snapshot_after" != ERROR && "$snapshot_before" == "$snapshot_after" ]]; then
+  rvd_checks_recheck "$LANES_DIR" "$wt" || checks_after_rc=$?
+fi
 dirty=0
 if [[ "$snapshot_after" == ERROR || "$snapshot_before" != "$snapshot_after" || "$conditions_after" != "$context" \
     || "$guard_after" == ERROR || "$guard_before" != "$guard_after" ]] || (( state_tampered || writes_n > 0 || GEM_PUBLIC_TAMPERED || checks_after_rc != 0 )); then
@@ -607,8 +637,6 @@ if [[ "$snapshot_after" == ERROR || "$snapshot_before" != "$snapshot_after" || "
   (( checks_after_rc != 1 )) || print -u2 -- "→ Gemini レビューの実行中に、使い回した親の chk-run の記録の入力（確認コマンドが読むファイル・依存・環境変数など）が変わった。不合格（NEEDS_FIX）にする"
   (( checks_after_rc != 2 )) || print -u2 -- "→ 使い回した親の chk-run の記録の入力を、レビューの後に照合し直せない（chk-run.sh --query-input の失敗）。不合格（NEEDS_FIX）にする"
 fi
-# 子の後の確認（記録の復元・印の比較・違反の判定と失効）が全部済んだので、「確認中」の印を消す
-inflight_done
 (( rc != 0 )) || [[ "$verdict" == 'VERDICT: CLEAN' || "$verdict" == 'VERDICT: NEEDS_FIX' ]] || rc=3
 # 周回の上限を超えて CLEAN にならなければ ESCALATE（人に返す）。続けるなら人が直して LANES_REVIEW_MAX_ROUNDS を上げる
 gate="$(rvd_escalate "$round" "$verdict" "$gate")"
@@ -645,7 +673,10 @@ final_rc=$rc
 # logs/<label>.log は表示用（見張りの行・証跡を含み、子の実行中に公開ログから読み戻した行もある）なので正本にしない
 (( rc == 0 )) && rvd_save_state "$logdir" "$series" "$round" "$(git -C "$wt" rev-parse HEAD)" "$verdict" "$gate" "$label" "$context" "$snapshot_after" "$review_base" "$body_log" "$pending_note" "$blocking_previous"
 (( rc == 0 )) && [[ "$verdict" != "VERDICT: CLEAN" && "$verdict" != "VERDICT: NEEDS_FIX" ]] && final_rc=3   # 完走したのに VERDICT が無い
-# 書き込みの試み・改ざん（EXIT:4）の失効は、見つけた直後（invalidate_on_violation）に済ませてある
+# 書き込みの試み・改ざん（EXIT:4）の失効は、見つけた直後（invalidate_on_violation）に済ませてある。
+# 「確認中」の印は、今回の判定の保存（rc 0）か前回の CLEAN の失効（違反）が済んだここで消す（保存の前に消すと、証跡の書き込みなどで
+# 止まったとき系列に前回の CLEAN だけが残り、次回が後始末も確認もせずにその合格を返す）
+rvd_inflight_finish "$logdir"
 exec {GEM_STREAM_FD}<&- 2>/dev/null || true
 lanes_mark_done "$final_rc" "$verdict" "gemini rc=$rc agy_rc=$agy_rc gate=$gate $sevsum"
 exit $final_rc

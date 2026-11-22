@@ -135,6 +135,46 @@ bash "$L/chk-run.sh" "$real_root/no-such-wt" --query >/dev/null 2>&1; rc=$?; [ $
 bash "$L/chk-run.sh" "$real_root/r" --query --force >/dev/null 2>&1; rc=$?; [ $rc = 2 ] && ok "問い合わせ: --force と組み合わせたら exit 2" || ng "問い合わせ: --force と組み合わせて exit $rc"
 export LANES_CHECK_CMD="$saved_cmd"
 
+# ---- 入力だけの照合（--query-input）: 入力の指紋（fp）と未 commit の有無が決まった所で答え、生成物（dist/ など）は読まない ----
+# 指紋の計算（read_state の python3 -I -）だけを包み、開いたファイルを記録する（Python の監査フック）。生成物の中を開いたかを見る
+qi="$real_root/qi"; mkdir -p "$qi/dist" "$real_root/pywrap" "$real_root/out-qi"
+( cd "$qi" && git init -q && git config user.email t@t && git config user.name t && printf 'dist/\n' > .gitignore && echo x > a.ts \
+  && git add -A && git commit -qm qi ) || ng "入力だけの照合の準備: リポを作れない"
+head -c 300000 /dev/zero > "$qi/dist/bundle.js"
+real_py=$(command -v python3)
+cat > "$real_root/pywrap/python3" <<'WRAP'
+#!/bin/sh
+# 指紋の計算の python3（-I -）だけを包み、開いたファイルを QI_OPEN_LOG に残す。ほかの呼び出しはそのまま本物へ
+if [ "$1" = "-I" ] && [ "$2" = "-" ]; then
+  shift 2
+  exec "$QI_REAL_PY" -I -c 'import sys
+log = open(sys.argv[1], "a")
+def hook(event, args):
+    if event == "open" and isinstance(args[0], str):
+        log.write(args[0] + "\n"); log.flush()
+sys.addaudithook(hook)
+del sys.argv[1]
+exec(compile(sys.stdin.read(), "<stdin>", "exec"), {"__name__": "__main__"})' "$QI_OPEN_LOG" "$@"
+fi
+exec "$QI_REAL_PY" "$@"
+WRAP
+chmod +x "$real_root/pywrap/python3"
+qi_run() { QI_REAL_PY="$real_py" QI_OPEN_LOG="$real_root/qi-open.log" PATH="$real_root/pywrap:$PATH" LANES_CHECK_CMD=true bash "$L/chk-run.sh" "$qi" "$@"; }
+rm -f "$real_root/qi-open.log"
+o=$(qi_run 49997 "$real_root/out-qi"); has "入力だけの照合の準備: 回して記録する" "$o" '^recorded='
+grep -q '/dist/bundle.js$' "$real_root/qi-open.log" 2>/dev/null && ok "対照: 回すとき（記録の照合）は生成物を読む（監査フックで見える）" \
+  || ng "対照: 回すときに生成物を読んでいない（監査フックが働いていない）"
+qo=$(qi_run --query); qi_input=$(printf '%s\n' "$qo" | sed -n 's/^input=//p')
+has "入力だけの照合の準備: 問い合わせで input= を得る" "$qo" '^input=[0-9a-f]+$'
+rm -f "$real_root/qi-open.log"
+o=$(qi_run --query-input 49997 "$real_root/out-qi"); rc=$?
+[ $rc = 0 ] && ok "入力だけの照合: exit 0" || ng "入力だけの照合: exit $rc"
+has "入力だけの照合: 未 commit の変更なし（dirty=0）" "$o" '^dirty=0$'
+[ "$(printf '%s\n' "$o" | sed -n 's/^input=//p')" = "$qi_input" ] && ok "入力だけの照合: 指紋は問い合わせの input= と同じ（同じ計算）" \
+  || ng "入力だけの照合: 指紋が問い合わせの input= と違う（$o / $qi_input）"
+[ -s "$real_root/qi-open.log" ] && ! grep -q '/dist/' "$real_root/qi-open.log" && ok "入力だけの照合: 生成物（dist/ の中）を開かない" \
+  || { ng "入力だけの照合: 生成物を開いた（または監査フックの記録が無い）"; grep '/dist/' "$real_root/qi-open.log" 2>/dev/null | head -3 | sed 's/^/     /'; }
+
 # ---- 追加テスト 1: test-chk-run.sh の作成・移動失敗時に呼び出し元を汚さない ----
 guard_dir="$real_root/caller-repo"
 mkdir -p "$guard_dir"
