@@ -1170,13 +1170,21 @@ except Exception:
     sys.exit(3)
 '
 
-# 呼び出し元の標準入出力を保って背景起動する。LANES_CHILD を wait すれば孫の回収まで完了する。
-lanes_start_child() {
-  # 監督役は起動時に確定した python3（LANES_PYTHON3）で動かす（背景起動は関数の python3 を通さない。$! を監督役の pid にするため）
-  "$LANES_PYTHON3" -I -c "$LANES_PROCESS_GUARD" supervise "$@" <&0 &
+# 監督役を / で動かし、子（<コマンド...>）だけを <子の作業場所> で起動する（監督役は supervise-in で、子を起動する Popen にだけ cwd を渡す）。
+# 監督役は起動時に確定した python3（LANES_PYTHON3）で動かす（背景起動は関数の python3 を通さない。$! を監督役の pid にするため）。
+# 監督役が名前で起動する ps も、PATH の . や相対の項目から作業ツリーの中の物を選ばない（親の権限で動かさない）。
+# 子のコマンドの探し方は今までと同じ（Popen は、名前だけのコマンドを PATH から、相対のパスを子の作業場所から探す）
+_lanes_start_supervised() {   # <子の作業場所（絶対パス）> <コマンド...>
+  ( builtin cd -q / && exec "$LANES_PYTHON3" -I -c "$LANES_PROCESS_GUARD" supervise-in "$@" ) <&0 &
   typeset -g LANES_CHILD=$!
   typeset -g LANES_MANAGED_CHILD_PID="$LANES_CHILD"
   lanes_record_child "$LANES_CHILD"
+}
+# 呼び出し元の標準入出力を保って背景起動する。LANES_CHILD を wait すれば孫の回収まで完了する。
+# 子は呼び出し元の作業場所（Codex・Claude のレビューと実装は worktree）で起動し、監督役は / で動く（_lanes_start_supervised）
+lanes_start_child() {
+  [[ "$PWD" == /* && -d "$PWD" ]] || lanes_die "今の作業場所を確かめられない: $PWD"
+  _lanes_start_supervised "$PWD" "$@"
 }
 # lanes_start_child と同じ。ただし作業場所（cwd）を <dir> にするのは子（<コマンド...>）だけ。呼び出し元のシェルも監督役も移らない
 # （監督役は supervise-in で、子を起動する Popen にだけ cwd=<dir> を渡す）。
@@ -1189,10 +1197,7 @@ lanes_start_child() {
 lanes_start_child_in() {   # <dir> <コマンド...>
   local dir="$1"; shift
   [[ "$dir" == /* && -d "$dir" && "${1:-}" == /* ]] || lanes_die "子の作業場所・コマンドが絶対パスではない: $dir ${1:-}"
-  ( builtin cd -q / && exec "$LANES_PYTHON3" -I -c "$LANES_PROCESS_GUARD" supervise-in "$dir" "$@" ) <&0 &
-  typeset -g LANES_CHILD=$!
-  typeset -g LANES_MANAGED_CHILD_PID="$LANES_CHILD"
-  lanes_record_child "$LANES_CHILD"
+  _lanes_start_supervised "$dir" "$@"
 }
 
 # 記録用: このレーンが CLI に渡す設定のモデルと effort（考える深さ）を LANES_REC_MODEL / LANES_REC_EFFORT に入れる。
@@ -1397,7 +1402,8 @@ lanes_kill_child() {
   [[ -n "$started" ]] || { [[ "$(lanes_process_state "$LANES_CHILD" "")" == dead ]]; return $?; }
   local mode=stop
   [[ "${LANES_MANAGED_CHILD_PID:-}" == "$LANES_CHILD" ]] && mode=stop-supervisor
-  python3 -I -c "$LANES_PROCESS_GUARD" "$mode" "$LANES_CHILD" "$started" || return $?
+  # 止める処理も / で動かす（名前で起動する ps を、作業ツリーへ移ったランチャの作業場所から選ばない。監督役と同じ）
+  ( builtin cd -q / && python3 -I -c "$LANES_PROCESS_GUARD" "$mode" "$LANES_CHILD" "$started" ) || return $?
 }
 
 lanes_finish_after_stop() {

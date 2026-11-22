@@ -94,6 +94,8 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 - Gemini レビュー: 監査は 2 段にし、書き込みの試みの件数を確定して前回の `CLEAN` を失効させてから本文・表示用のログを書く（`last.md` を書けなくても件数を失わない）。
   監査ログはバイト列のまま 1 行ずつ反復して読む（全体を二重にメモリへ載せない）。監督役は作業ツリーの外で動き、子を起動するときだけ作業場所を worktree にする。
 - Codex レビュー: 出力の受け取り役（`codex-review-output.py`）も確定した `python3` を `-I` で起動する（相対の `PYTHONPATH` で作業ツリーの同名のモジュールを読まない）。
+- 全ランチャ: 子プロセスの監督役（と止める処理）は、ランチャの作業場所にかかわらず `/` で動き、子を起動するときだけ作業場所を渡す
+  （監督役が名前で起動する `ps` を、PATH の `.` などから作業ツリーの中の物で選ばない）。
 - `run-gemini.sh`: 公開用の stream-json の改ざんを見つけたら、一時的なエラーでも自動で再実行しない。
 - `chk-run.sh --query-input`: 入力の指紋と未 commit の有無が決まった所で答え、生成物の中身は読まない。
 - `lanes-doctor.sh`: 名前だけの `GEMINI_BIN`（`agy-preview` など）も、ランチャと同じく PATH から探して点検する（`_common.sh` の `lanes_find_bin`）。

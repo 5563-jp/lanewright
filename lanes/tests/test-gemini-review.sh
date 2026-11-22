@@ -1070,6 +1070,13 @@ r, cap, done = gem(wt, 'rps', cwd=T, env={'PATH': '.' + os.pathsep + BASE['PATH'
 check('PATH に . があっても、監督役は作業ツリーの ps を選ばない（監督役の作業場所は作業ツリーではない）。子の agy の作業場所は worktree',
       r.returncode == 0 and 'VERDICT: CLEAN' in done and not ps_log.exists() and cap is not None and os.path.realpath(cap['cwd']) == os.path.realpath(wt),
       out(r) + (ps_log.read_text() if ps_log.exists() else ''))
+# Codex・Claude のレビューは親が作業ツリーへ移る（CLI の作業場所のため）。監督役（一覧を ps -axo ...stat= で取る・ps eww で所属を確かめる）は
+# それでも / で動くので、作業ツリーの ps を選ばない（親のシェルが直接呼ぶ ps -o lstart= は対象外。README の限界のとおり）
+for script, lb in (('run-codex-review.sh', 'rps-codex'), ('run-claude-review.sh', 'rps-claude')):
+    ps_log.unlink(missing_ok=True)
+    r, cap, done = run(script, wt, lb, cwd=T, env={'PATH': '.' + os.pathsep + BASE['PATH']})
+    sup = [l for l in (ps_log.read_text().splitlines() if ps_log.exists() else []) if 'stat=' in l or l.startswith('eww')]
+    check(f'{script}: 親が作業ツリーへ移っても、監督役は作業ツリーの ps を選ばない', r.returncode == 0 and 'VERDICT: CLEAN' in done and not sup, out(r) + '\n'.join(sup[:3]))
 
 # ---- 45. Codex の出力の受け取り役も -I（相対の PYTHONPATH で作業ツリーの同名のモジュールを読まない）----
 wt, first = repo('codex-pypath')
