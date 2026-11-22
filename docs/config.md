@@ -124,7 +124,7 @@ grep -E '^(lane|model|effort)=' <worktree>/logs/*.pid   # ファイル名（labe
 
 | キー | 既定 | 意味 |
 |---|---|---|
-| `LANES_REVIEW_REUSE_CHECKS` | `1` | `1` なら、レビューランチャ（`run-codex-review.sh` / `run-claude-review.sh`）が子を起動する前に `chk-run.sh <worktree> --query` で問い合わせ、親が同じ中身で確認コマンドを通した記録（`passed.tsv`）があれば、指示書に「必須検証（typecheck / lint / unit）は親が実施済み。回さないこと」と入れ、必須検証は済んだものとして判定する。`0` なら問い合わせず、毎回レビューの中で回させる。`0` か `1` 以外は `lanes.env` が止める（ランチャでは今回の失敗として `.done` に残す） |
+| `LANES_REVIEW_REUSE_CHECKS` | `1` | `1` なら、レビューランチャ（`run-codex-review.sh` / `run-claude-review.sh` / `run-gemini-review.sh`）が子を起動する前に `chk-run.sh <worktree> --query` で問い合わせ、親が同じ中身で確認コマンドを通した記録（`passed.tsv`）があれば、指示書に「必須検証（typecheck / lint / unit）は親が実施済み。回さないこと」と入れ、必須検証は済んだものとして判定する。`0` なら問い合わせず、毎回レビューの中で回させる。`0` か `1` 以外は `lanes.env` が止める（ランチャでは今回の失敗として `.done` に残す） |
 | `LANES_REVIEW_REQUIRE_CHECKS` | `0` | `1` なら、上の問い合わせで親の記録を使えないと分かったとき、レビューの子を起動せずに止める（`EXIT:2`。`.done` に `note=起動前の誤り: …` として理由と直し方が残り、`lanes-status.sh` は `FAILED` を返す）。止めるのは、問い合わせの理由が `no-record`（同じ中身の記録が無い）・`uncommitted`（未 commit の変更か未追跡のファイルがある）・`input-changed`（記録の後で依存・環境変数・確認コマンドなどが変わった）のとき。止まったら、表示された直し方のとおりに理由を解決して `chk-run.sh` を通し（出力に `recorded=` が出ること）、やり直す。**`chk-run.sh` が通っても `record=no` になる構成（確認コマンドを照合できない書き方・確認の途中で入力が変わる、など）は、記録が 1 件も無いので `no-record` として毎回止まる。** 通し直すだけでは直らないので、`record=no` の行に出る理由を先に直す。確認コマンドが未設定の案件（`no-check`）、`LANES_REVIEW_REUSE_CHECKS=0` のときは止めない。`logs/` がまだ無い worktree の初回の起動では `.done` を作らない（標準エラーと終了コード 2 だけ）。この値は `chk-run.sh` の入力の指紋に入らないので、起動のときだけ環境変数で渡しても記録は合う。その起動だけ記録なしで回すなら、ランチャに `--allow-missing-checks` を付ける（証跡に残る）。`0`（既定）なら今までどおり起動し、レビューの中で必須検証を回させる |
 
 - 使い回す条件は `chk-run.sh` が同じ確認を省く条件（`skip=same-tree`）と同じです（tree・入力の指紋・確認コマンドの指紋。緩めません）。入力の指紋には環境変数も入るので、親は `chk-run.sh` とレビューを同じ環境から呼びます。ランチャの記録（`logs/` の直下の `.pid`・ログ・証跡・起動ログなどのうち、ランチャが台帳 `logs/.lanes-records` に載せた持ち主のもの）は指紋に入らないので、`detach-run.sh` の起動ログを `logs/` に置いても、前のレーンの記録が残っていても使い回せます。`detach-run.sh` は呼び出し元の環境変数をそのまま起動するコマンドへ渡すので（`python3` の入口が書き換えた分は渡しません）、`detach-run.sh` を挟んで起動しても同じ環境として照合します。台帳に無い名前のファイル（確認コマンドが読む `logs/input.json` など）は、記録に似た名前でも入力として照合します（`lanes/README.md` の 7 章）。
@@ -132,6 +132,36 @@ grep -E '^(lane|model|effort)=' <worktree>/logs/*.pid   # ファイル名（labe
 - **記録が無いままレビューを起動しても、たいてい「必須検証が未完了」の指摘で終わります。** レビューは既定で読み取り専用の閉じ込めの中で動くので、その中で単体テストなどを回そうとすると、一時ファイルを書けずに失敗します。この指摘は直しのレーンでは直せません（コードの欠陥ではないため）。`chk-run.sh` を必ず通す運用なら、`LANES_REVIEW_REQUIRE_CHECKS=1` にして、記録を使えないレビューを起動の前に止めてください。証跡の「必須検証:」の行が「親の chk-run の記録は使わない: …」なら、指摘を直しに行く前に、理由を解決して `chk-run.sh` とレビューをやり直します。
 - **何を確かめたことになるかは確認コマンドの中身次第です。** 確認コマンドに単体テストを入れていなければ、単体テストを確かめたことにはなりません。型検査・lint・単体テストをすべて `.lanes/check.sh` か `LANES_CHECK_CMD` に入れてください。
 - 使い回しの有無と使った記録（head・日時・確認コマンドの種類）はレビューの再利用の条件に入ります。記録が変わったら同じ HEAD でも前回の結果を使いません。証跡には `- 必須検証: 親の chk-run の記録を使用（head・日時・確認コマンド）` か、`- 必須検証: レビューの中で回すよう指示（親の chk-run の記録は使わない: <理由>）` が出ます。
+
+### レビュー役を選ぶ・Gemini でレビューする
+
+既定のレビュー役は構成で決まります（codex のある構成は Codex、無い構成は Claude の別セッション）。
+`run-review.sh --engine codex|claude|gemini` か設定の `LANES_REVIEW_ENGINE` で、起動ごと・設定ごとに選び直せます（優先順は `--engine` ＞ `LANES_REVIEW_ENGINE` ＞ 構成）。
+Gemini レビュー（`run-gemini-review.sh`）は、選んだときだけ動きます。既定のレビュー役は変わりません。
+
+| キー | 既定 | 意味 |
+|---|---|---|
+| `LANES_REVIEW_ENGINE` | 空 | `run-review.sh` が振り分けるレビュー役。空なら構成のレビュー役。`codex` / `claude` / `gemini` を書くとそちらへ振り分ける（`codex` と `gemini` は構成にその道具があるときだけ。無ければ `exit 2`）。ほかの値は設定の誤りとして止める（ランチャでは今回の失敗として `.done` に残す）。`chk-run.sh` の入力の指紋には入らないので、起動のときだけ環境変数で渡しても親の記録を使い回せる |
+| `GEMINI_REVIEW_MODEL` | 空 | Gemini レビューのモデル。空なら `--model` を付けない（CLI の既定）。実装用の `GEMINI_MODEL` とは別 |
+| `GEMINI_REVIEW_EFFORT` | 空 | Gemini レビューの effort。空なら `--effort` を付けない。値の扱いは `GEMINI_EFFORT` と同じ（そのまま CLI へ渡す。モデルによって使える値が違う）。環境変数が設定ファイルと違う値で勝っていると、起動時に注意を 1 行出す |
+| `GEMINI_REVIEW_PRINT_TIMEOUT` | `45m` | Gemini レビューの全体の上限（agy の `--print-timeout`。`45m` のような数字＋`ms`/`s`/`m`/`h`） |
+| `GEMINI_REVIEW_NOOUTPUT_SEC` | `600` | 出力（json・stderr）がこの秒数止まったら止める（`EXIT:8`）。idle の猶予と確認の間隔は Gemini 実装と同じ `GEMINI_IDLE_GRACE`（60）・`GEMINI_IDLE_RESUME_GRACE`（300）・`GEMINI_POLL_SEC`（5） |
+
+- 起動前点検（`lanes-doctor.sh`）は、`run-review.sh` が振り分けたレビュー役を前提に回します（振り分け先へ `LANES_REVIEW_ENGINE` で渡し、点検の `--review-engine` に使う）。
+  設定ファイルが `LANES_REVIEW_ENGINE=gemini` で固定していても、`--engine codex` で選んだ起動は Gemini の点検で止まりません。
+  Gemini レビューを使うときだけ、`agy --help` に `--sandbox`・`--settings`・`--mode plan` があるかも見ます（手で見るなら `lanes-doctor.sh --review-engine gemini`）。
+- 読み取り専用は、agy を `--mode plan`・`--sandbox`・`--settings`（起動単位の設定。利用者の設定ファイルは変えない）で起動して強制します。
+  `--settings` の拒否は固定です（`lanes/_common.sh` の `lanes_gemini_review_settings`。設定キーでは緩められない）: MCP（`mcp(*)`）、ファイルの書き込み（`write_file(*)`・`write_file(/)`。作成・編集・削除・移動を含む）、
+  URL の読み込み・実行、Claude レビューの固定の拒否の一覧のうちコマンドの分（`git commit`・`git push`・`git stash`・`git tag`・`gh pr merge`・`vercel`・別のエージェントの起動など）。
+  **deny に相対パス（`write_file(.)` など）を書くと、端末サンドボックスの設定エラーになり、読み取りのコマンドまで動かなくなります**（キットの固定の一覧には入れていません）。
+  plan モードだけでは道具の呼び出しは止まらず、止めているのは deny ルールです。
+- それでも子が作業ツリー・git の管理フォルダ・git の制御ファイルを変えたら、前後の比較で不合格（`EXIT:4`）にします。書き込み系のツールを呼んだ（拒否されて書けなかった試みも含む）だけでも不合格です（証跡の「読み取り専用の確認」の行に件数）。
+- 再利用の記録（`logs/.<系列>.review-state`）は、子を起動する直前に `IN_PROGRESS`（確認中）にし、公開ログ（`<label>.last.md`・`<label>.log`）・後回し票・証跡が全部書けて、`agy` が 0 で終わり、判定が `CLEAN` か `NEEDS_FIX` のときだけ確定します。
+  失敗・見張りの停止・中断・強制終了・書き込みの試み・記録の書き込みの失敗では `IN_PROGRESS` のまま残り、次の起動は前回の結果（古い `CLEAN` も、過去の証跡も）を使わずに full で回します。前回が `NEEDS_FIX` だったときの未解決指摘だけは引き継ぎます。
+- 判定の読み方は Codex・Claude と同じ共通の判定（最後の行の `VERDICT:`）です。Gemini レビューだけ、共通の判定が `NONE` のときに、本文の途中にある独立した行の `VERDICT:`（コード・引用・表・字下げ・番号付きの行は除く。`NEEDS_FIX` があればそれ、無ければ最後のもの）を最後の行に置き直して、同じ判定にもう一度かけます（レビュー不能の文言・閉じていないコード・必須検証の不足・P0〜P2 の規則はそのまま効く）。そのときは証跡に「VERDICT の読み取り」の行が出ます。
+- Gemini で実装した worktree（`logs/` に `lane=gemini` の `.pid` か Gemini 実装の証跡がある）は、Gemini でレビューしません（`exit 2`）。どうしても回すなら `--allow-same-engine`（証跡に残る）。
+- Gemini レビューも、読み取り専用の閉じ込めの中では必須検証を回しきれないことがあります。`chk-run.sh` を先に通して記録を使い回す（`LANES_REVIEW_REQUIRE_CHECKS=1` を勧める）のは Codex・Claude と同じです。
+- 限界: 子は同じ利用者の権限で動きます。閉じ込めをすり抜けて `logs/` の記録を書き換えるような細工までは防ぎません（ほかのレビュー役と同じ前提。最終の担保は CI と人のレビュー）。
 
 ## 確認・QA・デプロイ連携
 

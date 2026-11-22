@@ -6,6 +6,41 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+0.1.8 の候補 / Candidate for 0.1.8
+
+### 足したこと / Added
+- Gemini（Antigravity CLI `agy`）でレビューするランチャ `lanes/run-gemini-review.sh`。別の目を足したいときに使う。
+  **選んだときだけ動く**（`run-review.sh --engine gemini` か設定の `LANES_REVIEW_ENGINE=gemini`。構成に gemini があるときだけ）。既定のレビュー役（構成で決まる Codex / Claude）は変わらない。
+  - 読み取り専用は、`agy` を `--mode plan`・`--sandbox`（端末サンドボックス）・`--settings`（起動単位の設定。利用者の設定ファイルは変えない）で起動して強制する。
+    `--settings` の拒否は固定（MCP・ファイルの書き込み・URL の読み込みと実行・Claude レビューの固定の拒否の一覧のコマンドの分＝commit・push・stash・tag・PR のマージ・デプロイ・別のエージェントの起動など）で、設定キーでは緩められない。
+    `--dangerously-skip-permissions`・`accept-edits`・`auto` は使わない。端末サンドボックスを有効にできない・`agy --help` に `--sandbox` / `--settings` / `--mode`（plan）が無い
+    （オプション名は単語として照合し、`--model` の説明の「plan」では通さない）・登録済みの linked worktree でないなら起動しない。
+  - 子の前後で作業ツリー・指示と条件・git の管理フォルダ・git の制御ファイル（git を呼ぶ前に）を比べ、変わっていれば `NEEDS_FIX`・`EXIT:4`。
+    stream-json の書き込み系のツール呼び出し（拒否されて書けなかった試みも含む）が 1 件でもあれば `NEEDS_FIX`・`EXIT:4`（証跡に件数。`agy` の失敗の終了コードより優先し、`agy` の終了コードは証跡に別に書く）。
+    1 行目が `init` でない・JSON の不正・`result` の欠損や重複・`status=ERROR` は `VERDICT: NONE`。
+  - **再利用の記録は「確認中」の印で守る**: 子を起動する直前に `logs/.<系列>.review-state` を `IN_PROGRESS` にし、公開ログ（`<label>.last.md`・`<label>.log`）・後回し票・証跡が全部書けて、
+    `agy` が 0 で終わり、判定が `CLEAN` / `NEEDS_FIX` のときだけ確定する。失敗・見張りの停止・中断・強制終了・書き込みの試み・記録の書き込みの失敗では `IN_PROGRESS` のまま残り、
+    次の起動は古い `CLEAN`（記録も過去の証跡も）を使わずに full で回す。前回 `NEEDS_FIX` の未解決指摘だけは引き継ぐ。
+  - 周回の仕組み（`review-dedup.zsh` の full / delta / 同じ HEAD の省略・未解決指摘の引き継ぎ・round 3 以降の P2/P3 の後回し・`ESCALATE`）と、
+    親の chk-run の記録の使い回し・`LANES_REVIEW_REQUIRE_CHECKS=1`・`--allow-missing-checks`・`.lanes/accepted-limitations.md` は Codex・Claude のレビューと同じ。
+  - 判定は共通の判定（最後の行の `VERDICT:`）。それが `NONE` のときだけ、本文の途中の独立した行の `VERDICT:`（コード・引用・表・字下げ・番号付きの行は除く）を同じ判定にかけ直す
+    （最後の行に補足を書き足す応答でも判定を取れる。レビュー不能の文言・閉じていないコード・必須検証の不足・P0〜P2 の規則はそのまま効く）。
+  - **実装と同じ道具でレビューしない**: `logs/` に Gemini 実装（`run-gemini.sh`）の記録があれば起動しない（`EXIT:2`。Codex か Claude のレビューを案内）。どうしても回すときだけ `--allow-same-engine`（証跡に残る）。
+  - モデルと effort は `GEMINI_REVIEW_MODEL` / `GEMINI_REVIEW_EFFORT`（既定は空＝CLI の既定。実装用の `GEMINI_MODEL` / `GEMINI_EFFORT` とは別）。`.pid` と証跡に残る。
+    見張りは `GEMINI_REVIEW_NOOUTPUT_SEC`（既定 600 秒。`EXIT:8`）と `GEMINI_REVIEW_PRINT_TIMEOUT`（既定 `45m`）。
+- `run-review.sh --engine codex|claude|gemini` と設定キー `LANES_REVIEW_ENGINE`（優先順は `--engine` ＞ `LANES_REVIEW_ENGINE` ＞ 構成）。構成に無い道具・知らない値は今回の失敗（`EXIT:2`）として `.done` に残す。
+  起動前点検は振り分けたレビュー役で回す（`lanes-doctor.sh --review-engine`。設定が `gemini` で固定でも、`--engine codex` の起動は Gemini の点検で止めない）。
+- `lanes-doctor.sh --review-engine codex|claude|gemini`。Gemini レビューを使うときだけ、`agy` の `--sandbox`・`--settings`・`--mode plan` も点検する（既定の設定の点検結果は変わらない）。
+- `lanes-roles.sh --print` に Gemini レビューの案内と、`LANES_REVIEW_ENGINE` を書いたときの振り分け先・独立性の行。`lanes-monitor.sh` は Gemini レビューを Gemini 実装と分けて数える（一覧に `[gemini-review]`）。
+
+### 変えたこと / Changed
+- `run-gemini.sh` の `agy` の起動と見張りを `lanes/gemini-agy.zsh` に切り出し、Gemini レビューと共通にした。`agy` の出力は受け取り役 `lanes/gemini-stream-tee.py` がパイプで受けて
+  `logs/<label>.json` へそのまま書く（`agy` の補助のプロセスが出力を持ち続けても、`agy` が終われば 2 秒で受け取りを終える）。動き（終了コード・監査・保存）は変わらない。
+- `review-dedup.zsh`: 再利用の記録の書き込みを 1 つの関数（一時ファイルに書いてから名前を付け替える）にまとめた。`IN_PROGRESS` のまま残った記録があれば、
+  どのレビュー役も前回の記録として使わない（過去の証跡にも戻らない）。Codex・Claude のレビューは `IN_PROGRESS` を書かないので、今までどおりの動き。
+- `chk-run.sh` は `LANES_REVIEW_ENGINE` を確認コマンドに渡さず、入力の指紋からも外す（起動のときだけ渡しても親の記録を使い回せる）。
+  **上げた後は、`chk-run.sh` を 1 回通し直す。** `chk-run.sh` と `_common.sh` の中身が変わったので、前の版で残した確認済みの記録は 1 回だけ使えなくなる（レビューの問い合わせは `input-changed`）。
+
 ## [0.1.7] - Cloudflare Workers + vinext の構成の生成物があっても確認の結果を記録する / Record checks with Cloudflare Workers + vinext generated output
 
 ### 直したこと / Fixed

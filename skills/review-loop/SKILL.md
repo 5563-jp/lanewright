@@ -17,7 +17,9 @@ description: >-
   - **Claude 固定（`--engine claude`）**: 決済・課金、認証・RLS（データベースの行単位のアクセス制限）、DB（データベース）・migration（構造の変更手順）、秘密値、公開判定、`.github/`、端末作業中心、重い設計判断、レビューで P0/P1（重大・高優先度の不具合）が出た修正、Gemini で 2 回続けて `NEEDS_FIX`（要修正）になった票。
   - **Gemini 優先（`--engine gemini --verify "<検証>" --allow-path <相対パス>`）**: 仕様が確定していて設計判断が要らない、目安 6 ファイル・400 行程度までの作業。開発サーバー・スクリーンショット・ブラウザ・ネイティブビルドが要る票は送らない。commit と push（リモートへの送信）はランチャ（レーンを起動・管理するスクリプト）が行う。
 - **レビュー（`<kit>/lanes/run-review.sh`）**:
-  - `LANES_TOOLS` に Codex が含まれる構成（`full` / `claude-codex`）では Codex レビュー（`run-codex-review.sh`）、含まれない構成（`claude-gemini` / `claude-only`）では Claude レビュー（`run-claude-review.sh`・別セッション・読み取り専用）が走る。Gemini はレビューに使わない。
+  - `LANES_TOOLS` に Codex が含まれる構成（`full` / `claude-codex`）では Codex レビュー（`run-codex-review.sh`）、含まれない構成（`claude-gemini` / `claude-only`）では Claude レビュー（`run-claude-review.sh`・別セッション・読み取り専用）が走る。
+  - Gemini レビュー（`run-gemini-review.sh`）は、`run-review.sh --engine gemini`（または設定の `LANES_REVIEW_ENGINE=gemini`）で選んだときだけ走る（構成に gemini があるとき）。label は既定のレビューと別の系列（例 `grev-<票>-r<N>`）にする。周回の仕組み（full / delta / 同じ HEAD の省略・round 3 以降の後回し・ESCALATE）と VERDICT の読み方は Codex・Claude と同じ。
+  - **実装と同じ道具でレビューしない**: Gemini で実装した worktree は Gemini でレビューしない（ランチャが `EXIT:2` で止め、Codex か Claude のレビューを案内する。どうしても回すときだけ `--allow-same-engine`。証跡に残る）。P0/P1 の修正後の再レビューと、認証・課金・データ削除などリスクの高い差分は既定のレビュー役で回す。
   - label は全構成で `rev-<票>-r<N>` の形で round 番号を入れる。比較の起点は統合先ブランチ（`LANES_BASE_BRANCH`、既定 `develop`）か `--base`。
   - **どの構成でも（Codex レビュー・Claude レビューとも）**: 既定は `--mode auto`。round 1 は `full`（全体差分レビュー）、前回 `CLEAN`（合格）の後は前回レビューした HEAD（現在のブランチ先端のコミット）からの `delta`（増分レビュー）、同一 HEAD は省略（`skip-same-head`）を自動で選ぶ。前回 `NEEDS_FIX` なら `full` に戻して未解決指摘を引き継ぐ。`--round N`・`--force` も使える。仕組みは `<kit>/lanes/review-dedup.zsh` の 1 つ。
   - **必須検証の使い回し**: 最終 HEAD で `<kit>/lanes/chk-run.sh` を通した後にレビューを回すと、ランチャが記録を問い合わせ（`chk-run.sh <worktree> --query`）、同じ中身で通っていればレビュアーに typecheck / lint / unit を回させない（`LANES_REVIEW_REUSE_CHECKS`。既定 1）。`chk-run.sh` とレビューは同じシェルから呼び、間に作業ツリーを変えない。確かめたことになるのは確認コマンドに入れた項目だけ。
@@ -32,8 +34,8 @@ description: >-
 
 - 明示判定は独立行の `VERDICT: CLEAN` / `VERDICT: NEEDS_FIX` のときだけ採用される（コードフェンス・引用・表・番号付き・見出しの中は無効）。
 - 出力の未完了・途切れ・「実施できませんでした」等の未実施文言は、指摘数より優先して `VERDICT: NONE`（`EXIT:3`、失敗）になる。
-- P0/P1/P2（P2 は中程度の指摘）が 1 件でもあれば、明示 `CLEAN` 行があっても `NEEDS_FIX` が優先される。Claude レビューも Codex レビューも同じ共通の判定を使う。例外は round 3 以降だけで、P2/P3 を後回し票に保存して `CLEAN` で通す（下の「round 3 以降」。Codex・Claude のレビューとも）。
-- レビュアーが作業ツリーを書き換えた場合は `VERDICT: NEEDS_FIX`（`EXIT:4`）になる。
+- P0/P1/P2（P2 は中程度の指摘）が 1 件でもあれば、明示 `CLEAN` 行があっても `NEEDS_FIX` が優先される。Claude レビューも Codex レビューも Gemini レビューも同じ共通の判定を使う（Gemini レビューだけ、共通の判定が `NONE` のときに本文の途中の独立した行の `VERDICT:` を同じ判定にかけ直す）。例外は round 3 以降だけで、P2/P3 を後回し票に保存して `CLEAN` で通す（下の「round 3 以降」。Codex・Claude のレビューとも）。
+- レビュアーが作業ツリーを書き換えた場合は `VERDICT: NEEDS_FIX`（`EXIT:4`）になる。Gemini レビューは、書き込み系のツールを呼んだ（拒否されて書けなかった試みも含む）だけでも `NEEDS_FIX`（`EXIT:4`。証跡の「読み取り専用の確認」の行に件数）。
 
 ## 重大度（Severity）ごとのルール
 

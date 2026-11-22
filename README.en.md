@@ -29,7 +29,7 @@ A toolkit for running multiple AI coding CLIs installed on macOS—Claude Code, 
   `lanes-status.sh` returns a single-line status: `RUNNING` / `STALLED` / `DONE` / `FAILED` / `DEAD`.
 - **Reviews cannot be skipped**: A separate lane reviews the changes in read-only mode and decides using the final line `VERDICT: CLEAN` (no issues) or `VERDICT: NEEDS_FIX` (changes required).
   Truncated output or vague prose is never treated as `CLEAN`.
-- **No repeated checks**: From the second round on, reviews look only at what changed since the last clean review (`--mode auto` for both Codex and Claude reviews). If the parent already passed the check command (`chk-run.sh`) on the same content, the review reuses that record instead of rerunning typecheck, lint, and unit tests (`LANES_REVIEW_REUSE_CHECKS`).
+- **No repeated checks**: From the second round on, reviews look only at what changed since the last clean review (`--mode auto` for Codex, Claude, and Gemini reviews alike). If the parent already passed the check command (`chk-run.sh`) on the same content, the review reuses that record instead of rerunning typecheck, lint, and unit tests (`LANES_REVIEW_REUSE_CHECKS`).
 - **Fewer accidents by design**: Launchers only start with subscription logins—never API keys. MCP (external service connections for AI) is disabled across all lanes.
   Duplicate runs with the same `label` are rejected. Post-merge cleanup stops if uncommitted changes remain.
 - **Flexible tool combinations**: Works with Claude alone. Adding Codex or Gemini automatically assigns implementation and review roles ([docs/roles.md](docs/roles.md), in Japanese).
@@ -93,6 +93,7 @@ For that reason, **the launchers always pass explicit permissions** instead of r
 | Codex implementation (only when explicitly used) | Sandbox (`--sandbox`) | `workspace-write` (can write to the worktree and the scratch area; only the parts of the git directory a commit needs (the worktree gitdir, objects, refs, logs) are added; the shared config and hooks stay read-only. Control files inside the gitdir (such as `commondir` and `config.worktree`) are still writable, so the launcher fingerprints them before and after the run and stops with EXIT:4 without calling git if they changed; network is off) | `CODEX_IMPL_SANDBOX` |
 | Codex review | Sandbox (`-c sandbox_mode=...`) | `read-only` | `CODEX_REVIEW_SANDBOX` (`read-only` or `workspace-write` only) |
 | Claude review / QA | Tool set, deny-list, and permission mode `manual` | Editing tools removed; history rewrites, PR merges, deploys, etc. denied | `CLAUDE_REVIEW_TOOLS` / `CLAUDE_REVIEW_DENY` |
+| Gemini review (only when selected) | `--mode plan`, `--sandbox`, and per-launch `--settings` | MCP, file writes, URL access, and the command part of the Claude review deny-list (commit, push, PR merge, deploy, …) denied; any write-tool call fails the review | fixed (no config key) |
 
 - By default the Claude implementation lane **can run any shell command (Bash) without asking**, including writes outside the worktree. Never run it where production keys or databases are reachable (see the disclaimer above).
 - Review and QA child processes start with git networking (push and fetch) disabled via `GIT_ALLOW_PROTOCOL` (see the section "レビューは読み取り専用" (reviews are read-only) in [lanes/README.md](lanes/README.md), Japanese).
@@ -166,6 +167,8 @@ Because the config file is `source`d directly by `zsh`, every line in it is exec
 | `LANES_SCRATCH_ROOT` | `$LANES_RUNS_ROOT/_scratch` | Per-lane temporary directory (`TMPDIR` / `LANES_SCRATCH`), automatically removed during cleanup |
 | `LANES_CHECK_CMD` | empty | Command run by `chk-run.sh` before PR creation (e.g., `pnpm lint && pnpm typecheck && pnpm build`). If `.lanes/check.sh` exists in the repo, that script takes priority |
 | `CLAUDE_MODEL` / `CODEX_MODEL` / `GEMINI_MODEL` | empty | Leave empty to use each CLI's default model, or set an explicit model name |
+| `LANES_REVIEW_ENGINE` | empty | Reviewer chosen by `run-review.sh` when `--engine` is not given: empty = the profile's reviewer, or `codex` / `claude` / `gemini` (`gemini` needs `gemini` in `LANES_TOOLS`) |
+| `GEMINI_REVIEW_MODEL` / `GEMINI_REVIEW_EFFORT` | empty / empty | Model and effort for the Gemini review (`run-gemini-review.sh`), separate from `GEMINI_MODEL` / `GEMINI_EFFORT`. Empty omits `--model` / `--effort` |
 | `CLAUDE_EFFORT` / `CODEX_EFFORT` / `GEMINI_EFFORT` | `xhigh` / `xhigh` / `high` | Reasoning effort passed to each CLI (set to empty `""` to omit `--effort`). An environment variable of the same name overrides the config file; the launcher prints a one-line notice when that happens. Write the value literally (`CLAUDE_EFFORT="xhigh"`) to pin it. The model and effort configured for each lane are recorded in `logs/<label>.pid` (`model=` / `effort=`, written at launch) and in the evidence file |
 | `LANES_STALL_MINUTES` | `10` | Minutes without output before `lanes-status.sh` reports `STALLED` |
 | `LANES_NOTIFY` | `1` | Show a macOS notification when a lane finishes (`0` to disable) |
@@ -189,7 +192,8 @@ Based on `LANES_TOOLS`, `lanes/lanes-roles.sh` selects one of 4 profiles and rou
 | ④ `claude-only` | `claude` | Claude | Claude (separate read-only session) | **Weak** (`LANES_REVIEW_INDEPENDENT=0`) |
 
 - **Claude is required** in all profiles.
-- **Gemini (`agy`)** is used only for lightweight implementation tasks (recommended up to ~6 files / 400 lines with clear specs), never for review. When calling `run-impl.sh --engine gemini`, you must pass `--verify "<command>"` and `--allow-path <relative-path>`.
+- **Gemini (`agy`)** handles lightweight implementation tasks (recommended up to ~6 files / 400 lines with clear specs) and is never a profile's default reviewer. When calling `run-impl.sh --engine gemini`, you must pass `--verify "<command>"` and `--allow-path <relative-path>`.
+- **Choosing the reviewer**: `run-review.sh --engine codex|claude|gemini` (or `LANES_REVIEW_ENGINE`) overrides the profile's reviewer (`--engine` > `LANES_REVIEW_ENGINE` > profile). The Gemini review (`run-gemini-review.sh`, read-only via `agy --mode plan --sandbox --settings`) runs only when selected. **Do not review with the tool that implemented the change**: a worktree with a Gemini implementation record is refused (exit 2) unless you pass `--allow-same-engine` (recorded in the evidence). The Gemini review marks its reuse record as `IN_PROGRESS` right before starting `agy` and finalizes it only after every record is written, so an interrupted or failed run never reuses an old `CLEAN`. After P0/P1 fixes or for high-risk diffs, the profile's default reviewer is the safer choice.
 - **If you are unsure, start with ② (`claude-codex`)** so implementation and review use different tools.
 
 ### Why ③ and ④ have weak review independence

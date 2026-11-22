@@ -22,7 +22,7 @@ Mac で Claude / Codex / Gemini（Antigravity CLI `agy`）の CLI（コマンド
 | `<label>.json` | 生の出力。Claude は stream-json（1 行 1 イベント）で、実行中も増えるので「最後に出力した時刻」の判定に使う |
 | `<label>.stderr.log` | 標準エラー |
 | `<label>.prompt.md` | 実際に渡したプロンプトの全文（前置きテンプレを含む） |
-| `<label>.last.md` / `<label>.completion.json` | Codex レビューの最終本文と、完了イベント・受信時刻・本文の SHA-256（内容から作る指紋）の照合記録 |
+| `<label>.last.md` / `<label>.completion.json` | Codex レビューの最終本文と、完了イベント・受信時刻・本文の SHA-256（内容から作る指紋）の照合記録。Gemini レビューも `<label>.last.md`（最後の応答の本文だけ）を残す |
 | `<label>.evidence.md` | PR 本文に貼る証跡（実行条件・検証結果・判定） |
 | `<label>.pid` | 起動時に書く。pid・`lstart`（プロセス開始時刻）・開始時刻・レーン種別・worktree・CLI に渡す設定のモデルと effort（`model=` / `effort=`。空は CLI の既定。CLI を起動する前に止まったレーンにも残る）・子の pid と開始時刻・scratch のパス |
 | `<label>.done` | 終了時に書く。`EXIT:n`・`VERDICT:`・終了時刻・経過分・補足 |
@@ -65,16 +65,17 @@ print -r -- "構成 $LANES_PROFILE / 実装 $LANES_ROLE_IMPL / レビュー $LAN
 ```
 
 出す変数: `LANES_PROFILE`、`LANES_ROLE_IMPL`（`claude` か `claude gemini`）、`LANES_ROLE_REVIEW`（`codex` か `claude`）、`LANES_REVIEW_INDEPENDENT`（実装とは別の道具でレビューするなら `1`、同じ Claude の別セッションなら `0`）。
+Gemini レビュー（`run-gemini-review.sh`）は構成のレビュー役にはならず、`run-review.sh --engine gemini` か `LANES_REVIEW_ENGINE=gemini` で選んだときだけ動きます（構成に gemini があるときだけ）。`--print` はそのとき案内の行を足します（`--env` の出力は変わりません）。
 
 ### 入口（ふだんはこの 2 つだけ使えばよい）
 ```zsh
 # 実装。--engine を省くと構成どおり。gemini を選んだときは --verify / --allow-path も渡す
 zsh lanes/run-impl.sh <worktree> <prompt.md> [label] [--engine claude|gemini] [--dry-run] [--verify "<cmd>" --allow-path <相対パス> ... --no-push]
-# レビュー。構成に合うレビュー用ランチャへ振り分ける
-zsh lanes/run-review.sh <worktree> <prompt.md> [label] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--dry-run]
+# レビュー。構成に合うレビュー用ランチャへ振り分ける。--engine で選び直せる（--engine ＞ LANES_REVIEW_ENGINE ＞ 構成）
+zsh lanes/run-review.sh <worktree> <prompt.md> [label] [--engine codex|claude|gemini] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--allow-missing-checks] [--allow-same-engine] [--dry-run]
 ```
 どちらも役割に合うランチャ（下の表の `run-*.sh`）へ振り分けます。個別のランチャを直接呼んでもかまいません（構成に無い道具のランチャは exit 2 で止まります）。
-`run-review.sh` は①②（Codex レビュー）でも③④（Claude レビュー）でも、引数をそのまま振り分け先へ渡します。どちらのレビューも同じ `review-dedup.zsh` の仕組み（`--mode auto` の自動の full / delta / 同じ head の結果の再利用、`--round N` と round 3 以降の P2/P3 の後回し、`--force`、`--base` は commit に解決できるもの）と、親の `chk-run.sh` の記録による必須検証の使い回し（6 章）を持ちます。
+`run-review.sh` は①②（Codex レビュー）でも③④（Claude レビュー）でも、`--engine gemini`（Gemini レビュー）でも、引数をそのまま振り分け先へ渡します。どのレビューも同じ `review-dedup.zsh` の仕組み（`--mode auto` の自動の full / delta / 同じ head の結果の再利用、`--round N` と round 3 以降の P2/P3 の後回し、`--force`、`--base` は commit に解決できるもの）と、親の `chk-run.sh` の記録による必須検証の使い回し（6 章）を持ちます。
 
 Gemini と Claude の分け方の目安: 課金・認証・本番 DB・重い端末作業・重い設計判断は Claude。仕様が固まった小さめの作業（目安 6 ファイル・400 行まで）は Gemini に回せます。
 
@@ -84,7 +85,7 @@ zsh lanes/lanes-doctor.sh [--quiet] [<worktree>]
 ```
 `LANES_TOOLS` の各道具が入っているか、**サブスク（定額プラン）のアカウントでログインしているか**（API キーでの起動になっていないか）を確かめ、足りないものを全部並べて exit 2 で止まります（揃っていれば 0）。
 ログインの見方: Claude は `claude auth status`、Codex は `codex login status`、Gemini（`agy`）はログイン確認のコマンドが無いので、ログイン情報の置き場所 `~/.gemini/antigravity-cli` の有無です。
-Gemini を含む構成では、`run-gemini.sh` が必須にしている macOS の端末サンドボックス（`/usr/bin/sandbox-exec`）があって実際に有効にできるかも見ます。ほかに python3 / git / zsh（必須）と gh（任意。無ければ注意だけ）も見ます。
+Gemini を含む構成では、`run-gemini.sh` が必須にしている macOS の端末サンドボックス（`/usr/bin/sandbox-exec`）があって実際に有効にできるかも見ます。Gemini レビューを使うとき（`LANES_REVIEW_ENGINE=gemini` か `--review-engine gemini`）だけ、構成に gemini があるかと、`agy --help` に `--sandbox`・`--settings`・`--mode plan` があるか（Gemini レビューが読み取り専用を強制するのに要る）も見ます（既定の設定の点検結果は変わりません）。`run-review.sh` から来た起動前点検は、振り分けたレビュー役を `--review-engine` に渡して回します。ほかに python3 / git / zsh（必須）と gh（任意。無ければ注意だけ）も見ます。
 作業ツリーを渡すと、ランチャが記録を書く `logs/` が git に無視されているか（`.gitignore` か `.git/info/exclude`）も見ます。無視されていなければ注意だけ出します（失敗にはしない）。git の作業ツリーでない場所を渡すと NG です。
 各ランチャも冒頭で、自分が使う道具だけ同じ点検を通します。テスト用に点検を飛ばす抜け道は用意していません（テストはスタブの CLI で確かめます）。
 
@@ -94,11 +95,12 @@ Gemini を含む構成では、`run-gemini.sh` が必須にしている macOS �
 | スクリプト | 使い方 | 何をするか |
 |---|---|---|
 | `run-impl.sh` | `<worktree> <prompt.md> [label] [--engine claude\|gemini] [--dry-run] [gemini 用の --verify/--allow-path/--no-push]` | 構成に合う実装ランチャ（`run-claude.sh` / `run-gemini.sh`）へ振り分ける |
-| `run-review.sh` | `<worktree> <prompt.md> [label] [--mode auto\|full\|delta] [--base <sha\|branch>] [--round N] [--force] [--dry-run]` | 構成に合うレビュー用ランチャ（`run-codex-review.sh` / `run-claude-review.sh`）へ振り分ける |
+| `run-review.sh` | `<worktree> <prompt.md> [label] [--engine codex\|claude\|gemini] [--mode auto\|full\|delta] [--base <sha\|branch>] [--round N] [--force] [--allow-missing-checks] [--allow-same-engine] [--dry-run]` | 構成に合うレビュー用ランチャ（`run-codex-review.sh` / `run-claude-review.sh`）へ振り分ける。`--engine`（または設定の `LANES_REVIEW_ENGINE`）で選んだときは `run-gemini-review.sh` などへ。構成に無い道具・知らない値は `exit 2` |
 | `run-claude.sh` | `<worktree> <prompt.md> [label] [--dry-run]` | Claude の実装レーン。許可モード `CLAUDE_IMPL_PERMISSION_MODE`（既定 `acceptEdits`）と確認なしで使うツール `CLAUDE_IMPL_ALLOWED_TOOLS` を明示して渡す。前置き `templates/claude-impl-preamble.md`（自己レビューは最大 2 回・指示範囲外のファイルを触らない）を自動で付ける（`CLAUDE_NO_PREAMBLE=1` で無効） |
-| `run-gemini.sh` | `<worktree> <prompt.md> [label] --verify "<cmd>" --allow-path <相対パス> [--allow-path ...] [--no-push] [--dry-run]` | Gemini の実装レーン（レビューには使わない）。詳細は下 |
+| `run-gemini.sh` | `<worktree> <prompt.md> [label] --verify "<cmd>" --allow-path <相対パス> [--allow-path ...] [--no-push] [--dry-run]` | Gemini の実装レーン（この worktree は Gemini でレビューしない）。詳細は下 |
 | `run-codex-review.sh` | `<worktree> <prompt.md> [label] [--mode auto\|full\|delta] [--base <sha\|branch>] [--round N] [--force] [--dry-run]` | Codex の `exec review --json` によるレビュー（`-c sandbox_mode="read-only"` で読み取り専用を強制・子の push は止める）。既定 `--mode auto` |
 | `run-claude-review.sh` | `<worktree> <prompt.md> [label] [--mode auto\|full\|delta] [--base <sha\|branch>] [--round N] [--force] [--dry-run]` | Claude によるレビュー（別セッション・読み取り専用）。テンプレ `templates/claude-review-{full,delta}.md` を自動で前置き。既定 `--mode auto`（Codex レビューと同じ仕組み） |
+| `run-gemini-review.sh` | `<worktree> <prompt.md> [label] [--mode auto\|full\|delta] [--base <sha\|branch>] [--round N] [--force] [--allow-missing-checks] [--allow-same-engine] [--dry-run]` | Gemini（`agy`）によるレビュー（明示したときだけ。`--mode plan`・`--sandbox`・`--settings` で読み取り専用を強制・子の push は止める）。テンプレは Claude レビューのものを役名だけ読み替えて流用し、出し方（`templates/codex-review-focus.md`）を付ける。既定 `--mode auto`（Codex・Claude レビューと同じ仕組み）。詳細は下 |
 | `run-codex.sh` | `<worktree> <prompt.md> [label] [--dry-run]` | Codex に実装させる場合のランチャ（明示して使うときだけ）。sandbox は `CODEX_IMPL_SANDBOX`（既定 `workspace-write`）を明示する |
 | `run-qa.sh` | `<worktree> <prompt.md> [label] [--dry-run]` | マージ後の bot QA（観点の洗い出し → bot でできる確認）。テンプレ `templates/qa-bot.md` を前置き。読み取り主体で、作業ツリーか git の管理フォルダ（共通の config・`config.worktree`・hooks・`info/attributes`・タグ・stash。Claude レビューと同じ `rvd_git_guard`）を変えたら `NEEDS_FIX`・`EXIT:4`。`CLEAN` は「人の QA 待ち」として報告するだけで、課題管理ツール（チケットの状態など）とは連携しない |
 
@@ -121,6 +123,20 @@ Gemini を含む構成では、`run-gemini.sh` が必須にしている macOS �
 - 異常終了でも、許可範囲の差分・今回のメッセージ・書き込み監査・`--verify` の成功が揃えば救済 commit しますが、終了コードは `3` のままで push しません。
 - 依存の自動用意: worktree の直下と `apps/*/`・`packages/*/` のロックファイル（依存の版を固定するファイル）を見て、`node_modules/.bin` が無い所だけ入れます（`npm ci` / `pnpm install --frozen-lockfile`。`yarn.lock` は案内のみ）。入れるのはサンドボックスの外で、ログは `$LANES_SCRATCH` の下です。
 - 変更なしの一時エラーだけ 1 回再試行します。前置きは `templates/gemini-impl-preamble.md`（`GEMINI_NO_PREAMBLE=1` で無効）。
+- `agy` の起動と見張りは `gemini-agy.zsh`（Gemini レビューと共通）。`agy` の出力（stream-json）は受け取り役（`gemini-stream-tee.py`）がパイプで受けて `logs/<label>.json` へそのまま書きます（`agy` の補助のプロセスが出力を持ち続けても、`agy` が終われば 2 秒で受け取りを終える）。
+
+#### `run-gemini-review.sh` の補足
+- 構成（`LANES_TOOLS`）に gemini が無ければ起動しません（`exit 2`）。モデルと effort は `GEMINI_REVIEW_MODEL` / `GEMINI_REVIEW_EFFORT`（既定は空＝付けない。実装用の `GEMINI_MODEL` / `GEMINI_EFFORT` とは別）。
+- 読み取り専用: `agy` を `--mode plan --sandbox --settings '<JSON>'` で起動し、`--dangerously-skip-permissions`・`accept-edits`・`auto` は使いません。`--settings` の拒否は固定（`_common.sh` の `lanes_gemini_review_settings`）で、MCP（`mcp(*)`）・ファイルの書き込み（`write_file(*)`・`write_file(/)`）・URL・commit や push などのコマンド（Claude レビューの固定の拒否の一覧のコマンドの分）です。`ANTIGRAVITY_HEADLESS=true`・stdin は `/dev/null`・`--add-dir` は scratch だけ・子の `GIT_CONFIG_GLOBAL` は scratch の最小 gitconfig・`GIT_OPTIONAL_LOCKS=0`・`GIT_PAGER=cat`・git の通信は止めます。macOS の端末サンドボックスを有効にできない・`agy --help` に `--sandbox` / `--settings` / `--mode`（plan）が無い（オプション名は単語として照合する。`--model` の説明の「plan」では通さない）・登録済みの linked worktree でない（`_common.sh` の `lanes_require_linked_worktree`）なら起動しません。親（ランチャ）は対象の worktree へ `cd` せず、子だけを worktree で起動します（`lanes_start_child_in`）。
+- 前後の比較: 作業ツリー（無視対象も）・指示と条件・git の管理フォルダ（設定・hooks・タグ・stash）・git の制御ファイル（`.git`・`commondir`・`gitdir`・`config`・hooks。子の後は git を呼ぶ前に比べ、変わっていれば git を実行せずに `EXIT:4`）。変わっていたら `NEEDS_FIX`・`EXIT:4`。
+- 書き込みの試み: stream-json の `step_update` のうち、ツール名に `write` / `replace` / `edit` / `delete` / `move` / `rename` / `create` / `append` / `copy` / `patch` を含む呼び出し（`run-gemini.sh` の監査と同じ判定。同じ `step_index` の経過は 1 件）が 1 件でもあれば `NEEDS_FIX`・`EXIT:4`。拒否されて書けなかった試みも数えます。証跡の「読み取り専用の確認」の行に件数とツール名が出ます。
+- 本文: 最後の `result`（`status=SUCCESS` の `response`）だけを `logs/<label>.last.md` と `logs/<label>.log` に書き、判定・指摘数・必須検証・解消宣言はこの本文だけを読みます。1 行目が `init` でない・`init` の重複・JSON の不正行・`result` の欠損・重複・終端でない `result`・`status=ERROR` は `VERDICT: NONE`。
+  共通の判定（最後の行の `VERDICT:`）が `NONE` のときだけ、本文の途中の独立した行の `VERDICT:`（コード・引用・表・字下げ・番号付きの行は除く。`NEEDS_FIX` があればそれ、無ければ最後のもの）を最後の行に置き直して、同じ判定にもう一度かけます（レビュー不能の文言・閉じていないコード・必須検証の不足・P0〜P2 の規則はそのまま効く）。
+- 再利用の記録（確認中の印）: 子を起動する直前に `logs/.<系列>.review-state` を `IN_PROGRESS`（`last_exit=-1`。`last_round` は前の値のまま）にし、公開ログ・後回し票・証跡が全部書けて、`agy` が 0 で終わり、判定が `CLEAN` / `NEEDS_FIX` のときだけ確定します。失敗・見張りの停止・中断・強制終了・書き込みの試み・記録の書き込みの失敗では `IN_PROGRESS` のまま残り、次の起動は前回の記録（古い `CLEAN`・過去の証跡）を使わずに full で回します（`review-dedup.zsh` の `rvd_prev_record`）。前回が `NEEDS_FIX` だったときの未解決指摘は `IN_PROGRESS` の記録に持ち越して引き継ぎます（`rvd_carried_record`）。
+- 見張りは `run-gemini.sh` と同じ（`gemini-agy.zsh`）: 出力が `GEMINI_REVIEW_NOOUTPUT_SEC`（既定 600 秒）止まれば `EXIT:8`、idle のまま子が無ければ `EXIT:3`、全体の上限は `GEMINI_REVIEW_PRINT_TIMEOUT`（既定 `45m`）。
+- 同じ道具でレビューしない: `logs/` に Gemini 実装の記録（`.pid` の `lane=gemini`・Gemini 実装の証跡の見出し。回転したものも）があれば、排他を取る前に止めます（`EXIT:2`。`.done` に理由と「Codex か Claude のレビューを使う」の案内）。候補の記録を読めないときも「記録あり」として止めます。`--allow-same-engine` を付けたときだけ回し、証跡に「同じ道具のレビュー」の行を残します。
+- 出力と終了コード: 出力は他のレビューと同じ（`logs/<label>.{log,json,stderr.log,prompt.md,evidence.md,last.md,pid,done}`・`.<系列>.review-state`・`<系列>.followups.md`）。証跡は「## Gemini レビュー証跡（<label>）」で、Claude レビューの行に「- レビューエンジン: gemini」と「- 読み取り専用の確認」の行を足したもの。終了コードは `agy` の rc（非 0 はそのまま）、見張りの停止は idle `3` / 無出力 `8`、書き込みの試み・作業ツリーや git の変更は `4`（`agy` の失敗の終了コードより優先。`agy` の終了コードは証跡と `.done` の `agy_rc=` に残る）、rc 0 で VERDICT が取れない・記録を書けないなら `3`、引数・前提の誤りは `2`、実行中の `logs/` の差し替えは `5`。
+- 限界: 子は同じ利用者の権限で動きます。閉じ込めをすり抜けて `logs/` の記録を書き換えるような細工までは防ぎません（ほかのレビュー役と同じ前提）。
 
 ### 監視
 | スクリプト | 使い方 | 何をするか |
@@ -149,6 +165,8 @@ Gemini を含む構成では、`run-gemini.sh` が必須にしている macOS �
 | `lanes.env` | 最初に `LANES_CONF` の設定ファイルを読み、空のキーを既定値で埋めて、`LANES_*` を export する（Python の部品と `chk-run.sh` に届けるため） |
 | `lanes-roles.sh` / `lanes-doctor.sh` | 役割の割り振り / 起動前点検（2 章） |
 | `review-dedup.zsh` | 同じレビューを繰り返さない仕組み（6 章） |
+| `gemini-agy.zsh` | `agy` の起動と見張り（子プロセスの記録・idle・無出力の停止）。`run-gemini.sh` と `run-gemini-review.sh` が使う |
+| `gemini-stream-tee.py` | `agy` の標準出力をパイプで受け取り、`logs/<label>.json` へそのまま書く受け取り役（`agy` が終われば、補助のプロセスが出力を持ち続けても 2 秒で終える）。`gemini-agy.zsh` が起動する |
 | `codex-review-output.py` | Codex レビューの JSON から最終本文と完了記録を作る |
 | `lanes_monitor.py` / `lanes_watch.py` | 監視の本体 |
 | `vercel_autoredeploy.py` | Vercel の自動再デプロイ（11 章・任意。`LANES_VERCEL_PROJECT` が空なら無効） |
@@ -222,16 +240,17 @@ zsh lanes/lanes-watch.sh --check
 |---|---|---|
 | `full` | 初回、重大（P0 / P1）の修正後、前回 `NEEDS_FIX` の後 | `--base`。無ければ `origin/$LANES_BASE_BRANCH` |
 | `delta` | 前回 `CLEAN` の後の軽い修正 | 前回の記録の HEAD（前回の記録が使えなければ `delta` を指定しても `full` に戻す） |
-| `auto`（既定。Codex・Claude とも） | いつでも | 下の条件で `full` / `delta` / 省略を自動で選ぶ |
+| `auto`（既定。Codex・Claude・Gemini とも） | いつでも | 下の条件で `full` / `delta` / 省略を自動で選ぶ |
 
 - 差分が認証・DB・決済・メールなどに触れると、テンプレの指示で delta でも full 相当へ格上げします。
-- `--base` の形: `run-codex-review.sh`・`run-claude-review.sh` とも commit に解決できるもの（枝名も可）。起動前に commit へ固定し、再利用の条件にも入れます。統合先の枝が無いリポでは `--base` が必須で、無ければ案内を出して `EXIT:2`。
+- `--base` の形: `run-codex-review.sh`・`run-claude-review.sh`・`run-gemini-review.sh` とも commit に解決できるもの（枝名も可）。起動前に commit へ固定し、再利用の条件にも入れます。統合先の枝が無いリポでは `--base` が必須で、無ければ案内を出して `EXIT:2`。
 
 ### 同じレビューを繰り返さない（`--mode auto`・`review-dedup.zsh`）
 - 状態は `logs/.<series>.review-state`（series = label の末尾 `-r<N>` を外したもの）に、HEAD・判定・条件の指紋・作業ツリーの写し・比較起点・本文をまとめて保存します（`NONE` は保存しない）。
 - 前回が `CLEAN`（`EXIT:0`）で、前後とも未保存の変更が無く、比較起点・案件指示・モード・モデル・effort・スクリプト・テンプレ・検証の設定（`LANES_CHECK_CMD` の値・対象の `.lanes/check.sh` の中身・`package.json` の scripts のうち typecheck / lint / test 系のもの）が同じときだけ、同じ HEAD なら省略（`--force` で強制実行）、進んでいれば前回 HEAD からの delta にします。どれかが変われば full。検証が未導入で `CLEAN` になった後に検証を足した（例: `LANES_CHECK_CMD` を設定した）ときも、同じ HEAD のまま前回の結果を使わずにレビューし直します。
 - 前回が `NEEDS_FIX` なら delta 指定でも full に戻し、前回の未解決の指摘を自動で引き継ぎます。全件の解消を確かめて独立した行 `RESOLVED_PREVIOUS_FINDINGS: YES` を出さない限り `NEEDS_FIX` のままです（コード例・引用・表の中や、`NO` との併記では解除しない）。
-- Codex レビュー（`run-codex-review.sh`）と Claude レビュー（`run-claude-review.sh`）は同じ仕組みです。レビュー役（codex / claude）も条件に入るので、構成を変えたら前回の結果は使いません。どちらのランチャも、子の実行中に再利用の記録が書き換えられたら元の中身に戻して不合格（`NEEDS_FIX`・`EXIT:4`）にします。
+- Codex レビュー（`run-codex-review.sh`）・Claude レビュー（`run-claude-review.sh`）・Gemini レビュー（`run-gemini-review.sh`）は同じ仕組みです。レビュー役（codex / claude / gemini）も条件に入るので、構成やレビュー役を変えたら前回の結果は使いません。Codex・Claude のランチャは、子の実行中に再利用の記録が書き換えられたら元の中身に戻して不合格（`NEEDS_FIX`・`EXIT:4`）にします。
+- Gemini レビューは、子を起動する直前に記録を `IN_PROGRESS`（確認中）にし、全部の記録が書けたときだけ確定します（5 章の `run-gemini-review.sh` の補足）。`IN_PROGRESS` のまま残った記録があれば、どのレビュー役も前回の記録として使いません（過去の証跡にも戻らない）。
 
 ### 必須検証の使い回し（親の `chk-run.sh` の記録）
 レビューのたびに、親が同じ HEAD で回した確認（型検査・lint・単体テスト）をレビュアーがもう一度回さないための仕組みです（`LANES_REVIEW_REUSE_CHECKS`。既定 `1`、`0` で問い合わせない）。
@@ -240,7 +259,7 @@ zsh lanes/lanes-watch.sh --check
   入力の指紋には作業ツリー（無視対象のファイルも含む）と環境変数が入るので、ランチャは scratch や git の通信止めを export する前に、`_common.sh` が外した API キーなども元に戻した環境で問い合わせます。**親は `chk-run.sh` とレビューを同じ環境（同じシェル）から呼び、その間に作業ツリーを変えないでください。** 変えると使い回さず、今までどおりレビューの中で回させます。
   ランチャの記録（`logs/` の直下の `.pid`・`.done`・ログ・証跡・起動ログなどのうち、ランチャが台帳 `logs/.lanes-records` に載せた持ち主のもの。7 章の `chk-run.sh`）は指紋に入りません。`detach-run.sh` が起動ログ（`logs/launch.log`）を先に書いても、前のレーンの記録が残っていても、記録と合います。台帳に無い名前のファイル（確認コマンドが読む `logs/input.json` など）は、記録に似た名前でも入力のままです。
   `detach-run.sh` は呼び出し元の環境変数をそのまま起動するコマンドへ渡すので、`detach-run.sh` を挟んで起動しても「同じ環境」として合います（12 章）。
-- 使い回せるとき: 指示書に「必須検証（typecheck / lint / unit）は親が同じ中身で実施済み（chk-run の記録: head・日時・確認コマンドの種類）。回さないこと。確かめたい点は該当テスト 1 本か小さな再現だけ」と入れ、必須検証は済んだものとして判定します（Codex: 成功確認 `COMPLETE` と同じ扱い。Claude: テンプレの「検証 1 に未実施があれば CLEAN を出さない」を適用しない）。レビュアーが自分で回したテストの「失敗」の報告だけは不合格にします。証跡には `- 必須検証: 親の chk-run の記録を使用（head・日時・確認コマンド）` を出します。
+- 使い回せるとき: 指示書に「必須検証（typecheck / lint / unit）は親が同じ中身で実施済み（chk-run の記録: head・日時・確認コマンドの種類）。回さないこと。確かめたい点は該当テスト 1 本か小さな再現だけ」と入れ、必須検証は済んだものとして判定します（Codex: 成功確認 `COMPLETE` と同じ扱い。Claude・Gemini: テンプレの「検証 1 に未実施があれば CLEAN を出さない」を適用しない）。レビュアーが自分で回したテストの「失敗」の報告だけは不合格にします。証跡には `- 必須検証: 親の chk-run の記録を使用（head・日時・確認コマンド）` を出します。
 - 使い回せないとき（記録が無い・tree が違う・確認コマンドや環境が変わった・未 commit の変更がある・確認コマンドを確実に解決できない書き方など）: 今までとまったく同じ動きです。証跡には `- 必須検証: レビューの中で回すよう指示（親の chk-run の記録は使わない: <理由>）` を出します（指示した事実だけです。回せたかどうかは、証跡の「必須検証の成功確認」の行が示します）。
 - 使い回しの有無と使った記録（head・日時・確認コマンドの種類）は再利用の条件に入ります。記録が変わったら（使い回しが無くなった・親が回し直した）同じ HEAD でも前回の結果を使いません。
   ランチャの記録は指紋に入らないので、レビュー自身が `logs/` に書いた後に同じ HEAD で呼び直しても、記録と合います（条件が同じなら前回の結果を使い、レビューし直しません）。
@@ -248,7 +267,7 @@ zsh lanes/lanes-watch.sh --check
 - 記録（`passed.tsv`）は作業ツリーの外にあります。Bash を持つレーン（Claude の実装・レビュー）は作業ツリーの外にも書けるので、記録を書き換えることはできてしまいます（`chk-run.sh` 自身の省略と同じ前提です）。最終の担保は CI です。
 
 ### round と GATE
-`--round N`（または label 末尾の `-r<N>`）を付けると、証跡と `.done` に `GATE:` と指摘数（P0〜P3）を書きます（Codex・Claude のレビューとも）。
+`--round N`（または label 末尾の `-r<N>`）を付けると、証跡と `.done` に `GATE:` と指摘数（P0〜P3）を書きます（Codex・Claude・Gemini のレビューとも）。
 | GATE | 条件 |
 |---|---|
 | `CLEAN` | 指摘なし |
@@ -257,7 +276,7 @@ zsh lanes/lanes-watch.sh --check
 | `STOP_P0P1` | 3 回目以降も P0 / P1 が残る。止めて報告 |
 | `ESCALATE` | 周回が `LANES_REVIEW_MAX_ROUNDS`（既定 5）を超えても `CLEAN` にならない（P0 / P1 が残っていても）。修正を続けず、人に「直して続けるか・締めるか」を返す。続けるなら上限を上げる。締めるなら残りを `.lanes/accepted-limitations.md`（受け入れ済みの限界）か後回し票へ |
 
-受け入れ済みの限界: 対象リポに `.lanes/accepted-limitations.md`（symlink は読まない）を置くと、Codex・Claude のどちらのレビューの指示書にも「ここに当てはまる指摘は P0〜P2 にしない（気づいたら P3 で一言）」として必ず入ります。中身はレビューの再利用の条件にも入るので、書き換えたら同じ HEAD でもレビューし直します。仕組み上防げないもの（例: Claude のレビューの子は同じ利用者の権限で Bash を使える）や、想定する脅威の外のものを書きます。
+受け入れ済みの限界: 対象リポに `.lanes/accepted-limitations.md`（symlink は読まない）を置くと、Codex・Claude・Gemini のどのレビューの指示書にも「ここに当てはまる指摘は P0〜P2 にしない（気づいたら P3 で一言）」として必ず入ります。中身はレビューの再利用の条件にも入るので、書き換えたら同じ HEAD でもレビューし直します。仕組み上防げないもの（例: Claude のレビューの子は同じ利用者の権限で Bash を使える）や、想定する脅威の外のものを書きます。
 
 後回し票の保存に失敗したら合格にせず `VERDICT: NONE`・`EXIT:3`・`GATE: FIX` です。修正レーンの指示書には「指摘箇所だけでなく、同じ種類の問題を差分全体から探してまとめて直す」と入れてください。
 
@@ -279,6 +298,7 @@ zsh lanes/lanes-watch.sh --check
 - Codex のレビュー: `-c sandbox_mode="read-only"` で読み取り専用を強制します（`CODEX_REVIEW_SANDBOX`。`read-only` か `workspace-write` だけ。利用者の `~/.codex/config.toml` が `danger-full-access` でも上書きします）。作業ツリーの変更と git の管理フォルダ側（`rvd_git_guard`）は Claude と同じ前後の比較で不合格にします。加えて、`workspace-write` の子は worktree の `.git` ファイルを書けるため、`run-codex.sh` と同じく git の制御ファイル（`.git`・`commondir`・`gitdir`・`config`・`config.worktree`・hooks）の指紋（`_common.sh` の `lanes_git_ctl_fingerprint`）を子の直後・git を呼ぶ前に比べ、違えば git を 1 回も呼ばずに `EXIT:4` で止めます（sandbox の種類によらず比べます）。再利用の記録（`logs/.<系列>.review-state`。今の系列だけでなく全部の系列）が子の実行中に増えた・変わった・消えたら、子の前の状態に戻して不合格にします。戻しきれなかったとき（消せない物を置かれた・`logs/` を書けなくされた）と、「使い回し禁止」の印が子の実行中に消されたときは、印を `logs/.review-reuse-blocked` と、`logs/` の外の `${XDG_STATE_HOME:-~/.local/state}/lanewright/reuse-blocked/<logs/ の実パスの指紋>` の両方に置きます。どちらか一方でもあれば、どの系列のレビューも前回の記録を使わず毎回 full で回します。印は `logs/.*.review-state` の中身を確かめてから、両方とも手で消してください（ランチャが場所を表示します）。限界: Claude のレビューの子は同じ利用者の権限で Bash を使えるので、`logs/` の外の印も消せます。ランチャは前後の比較で気づいて不合格にしますが、完全な閉じ込めではありません（Codex のレビューは読み取り専用で外へ書けません）。
 - `logs/` の差し替え: 起動時に `logs/` が symlink なら起動しません。子（エージェント・確認コマンド）が実行中に `logs/` を symlink や別のフォルダに差し替えたら、ランチャはそこへ `.done`・証跡を書かずに exit 5 で止めます（起動時に覚えたフォルダの識別子と比べます）。`logs/` の中のファイル 1 つずつを外向きの symlink・ハードリンク・特殊ファイルにされた場合も同じく止めます（起動時に残っていれば起動しません。中身を確かめてから消してください）。Codex レビューの本文と完了の証明は、子の起動前に開いたフォルダの中で一時ファイルに書いてから名前を置き換えます。Codex 実装の最終メッセージ（`-o`）は、子の書ける場所の外（`${XDG_STATE_HOME:-~/.local/state}/lanewright/out/`）に書かせ、子の後に `logs/` へ写します（強制終了したときはそこに小さなフォルダが残ることがあります。中身は最終メッセージだけで、消して構いません）。
 - Codex のレビューには、テンプレ（`templates/claude-review-{full,delta}.md` の役名を置き換えたもの）と `templates/codex-review-focus.md`（重い順に全件列挙・同じ種類は全箇所）を `developer_instructions` として渡します。
+- Gemini のレビュー（明示したときだけ）: `agy` を `--mode plan --sandbox --settings` で起動し、`--settings` の固定の拒否（MCP・ファイルの書き込み・URL・Claude レビューの固定の一覧のコマンドの分）で書き込みを止めます。前後の比較（作業ツリー・`rvd_git_guard`・git の制御ファイルを git を呼ぶ前に）に加えて、stream-json の書き込み系のツール呼び出しが 1 件でもあれば不合格にします。指示書は Codex と同じテンプレ（役名を Gemini に読み替え）と `templates/codex-review-focus.md`。限界: ターミナルのコマンドは scratch などに書けます。作業ツリーへの書き込みは前後の比較で気づいて不合格にする守りです。
 
 ## 7. ビルドの分担
 
@@ -329,14 +349,14 @@ zsh lanes/lanes-watch.sh --check
 - 使い回せる: 1 行目 `reuse=yes`、続けて `head=<記録の head 12 桁>` / `recorded=<記録の日時>` / `check=<.lanes/check.sh か LANES_CHECK_CMD>` を出して exit 0。
 - 使えない: `reuse=no reason=<理由>` を出して exit 1。理由は `no-check`（確認コマンドが未設定）/ `no-record`（同じ tree の記録が無い。`chk-run.sh` をまだ通していないか、通ったが記録できなかった。後者は `chk-run.sh` が `record=no reason=…` の行に理由を出している）/ `cache-link`（記録がリンク）/ `uncommitted`（未 commit の変更・変更検知を省く設定）/ `unresolvable`（確認コマンドや依存を確実に解決できない）/ `input-changed`（確認コマンド・環境変数・依存・ランチャの記録でない無視対象のファイルなどが記録と違う）/ `state-error`。
 - 使い方の誤り（worktree が無い・git の作業ツリーでない・余計な引数）は exit 2。
-- 入力の指紋には環境変数が入るので、`chk-run.sh` を回したのと同じ環境から呼びます。レビューの入口・ランチャだけが持つ制御の値（`LANES_ENTRY_PREFLIGHT`・`LANES_REVIEW_REUSE_CHECKS`・`LANES_REVIEW_REQUIRE_CHECKS`）は指紋に入れません。
+- 入力の指紋には環境変数が入るので、`chk-run.sh` を回したのと同じ環境から呼びます。レビューの入口・ランチャだけが持つ制御の値（`LANES_ENTRY_PREFLIGHT`・`LANES_REVIEW_REUSE_CHECKS`・`LANES_REVIEW_REQUIRE_CHECKS`・`LANES_REVIEW_ENGINE`）は指紋に入れません。
 
 ## 8. 全レーンで MCP を使わない
 
 レーンから本番の決済・DB などへ届く経路を断つため、すべてのランチャで MCP を遮断します。
 - **Claude**（`run-claude.sh` / `run-claude-review.sh` / `run-qa.sh`）: `--strict-mcp-config` でユーザー設定の MCP を読み込まない。
 - **Codex**（`run-codex-review.sh` / `run-codex.sh`）: `_common.sh` の `lanes_codex_no_mcp_args "$wt"` が実行場所の設定も含めてサーバーを列挙し、`-c features.apps=false` と全サーバーの `enabled=false` を `LANES_CODEX_NO_MCP_ARGS` 配列に入れ、`codex mcp list --json` で有効 0 件を確かめます。確かめられなければ起動しません。
-- **Gemini**（`run-gemini.sh`）: macOS の `sandbox-exec` と `agy` の `--sandbox` / `--settings` を起動前に確かめ、`mcp(*)` の呼び出し拒否を強制します（設定の読み込みそのものを隔離するのではなく、呼び出しを拒否する仕組みです）。
+- **Gemini**（`run-gemini.sh` / `run-gemini-review.sh`）: macOS の `sandbox-exec` と `agy` の `--sandbox` / `--settings`（レビューは `--mode plan` も）を起動前に確かめ、`mcp(*)` の呼び出し拒否を強制します（設定の読み込みそのものを隔離するのではなく、呼び出しを拒否する仕組みです）。
 
 ## 9. マージ後の後片付け
 
@@ -437,15 +457,15 @@ zsh lanes/prepare-screen-qa.sh <checkout> [label] [--url <preview-url>] [--viewp
 | 0 | 正常（cleanup は dry-run でも 0。`lanes-watch.sh` は WAKE 検知・時間上限・`WATCH OK`） |
 | 1 | `chk-run.sh`: 確認コマンドの失敗・fetch / merge の失敗・検証中の入力の変化 / `lanes-watch.sh --check`: `WATCH STALE`・`WATCH DEAD` / `after-develop-merge.sh`: QA worktree の準備失敗 |
 | 2 | 使い方・前提の誤り（引数不足、未ログイン・API キー起動、MCP 遮断の失敗、排他ロック取得不可、fetch 失敗、python3 なし、同じ label の二重起動、cwd が削除対象の中、`LANES_BASE_BRANCH` が枝名として不正、`chk-run.sh` の確認コマンドが未設定、`prepare-screen-qa.sh` の URL が決まらない） |
-| 3 | レビュー・QA・`run-codex.sh`: `VERDICT: NONE`（完走せず・解釈不能）または子の回収未確認 / `run-gemini.sh`: `agy` の異常終了・idle 強制停止（救済 commit でも 3・push なし） |
-| 4 | `run-gemini.sh`: 書き込み監査失敗・`--allow-path` 外の変更・`.git` ファイルの変更 / レビュー・QA: 実行中に作業ツリーや条件が変わった（または result イベント無し） / `run-codex.sh`: `VERDICT: NEEDS_FIX`・実行中に git の制御ファイル（`.git`・`commondir`・`gitdir`・`config`・`config.worktree`・hooks）が変わった（git を呼ばずに停止） / cleanup: 未 commit・未追跡ファイルで停止 |
+| 3 | レビュー・QA・`run-codex.sh`: `VERDICT: NONE`（完走せず・解釈不能）または子の回収未確認 / `run-gemini.sh`: `agy` の異常終了・idle 強制停止（救済 commit でも 3・push なし） / `run-gemini-review.sh`: idle 強制停止・stream-json の不備・記録（公開ログ・後回し票・証跡）を書けない（`VERDICT: NONE`。再利用の記録は `IN_PROGRESS` のまま） |
+| 4 | `run-gemini.sh`: 書き込み監査失敗・`--allow-path` 外の変更・`.git` ファイルの変更 / レビュー・QA: 実行中に作業ツリーや条件が変わった（または result イベント無し） / `run-gemini-review.sh`: 書き込み系のツールの呼び出し（試みを含む。`agy` の失敗の終了コードより優先）・git の制御ファイルの変更（git を呼ばずに停止） / `run-codex.sh`: `VERDICT: NEEDS_FIX`・実行中に git の制御ファイル（`.git`・`commondir`・`gitdir`・`config`・`config.worktree`・hooks）が変わった（git を呼ばずに停止） / cleanup: 未 commit・未追跡ファイルで停止 |
 | 5 | `run-gemini.sh`: 今回の `COMMIT_MSG.txt` 無し・commit 失敗 / レビュー・QA: Claude の `is_error` / cleanup・`after-develop-merge.sh`: 未マージ / 全ランチャ: 実行中に子が `logs/` を差し替えた（記録を書かずに止めるので `.done` は無く、`lanes-status.sh` は DEAD と出す） |
 | 6 | `run-gemini.sh`: push 失敗 / cleanup: `.env*` が本体と不一致 |
 | 7 | `run-gemini.sh`: `--verify` の失敗 / cleanup: 実行中レーン・一時 PostgreSQL の照合や停止の失敗・枝の先端の変化 |
-| 8 | `run-gemini.sh`: 無出力で停止（差分は `wip.patch`） / cleanup: scratch だけ保全（`after-develop-merge.sh` は QA へ進む） |
+| 8 | `run-gemini.sh`: 無出力で停止（差分は `wip.patch`） / `run-gemini-review.sh`: 無出力で停止（`GEMINI_REVIEW_NOOUTPUT_SEC`） / cleanup: scratch だけ保全（`after-develop-merge.sh` は QA へ進む） |
 | 10〜14 | `lanes-status.sh`: RUNNING 10 / STALLED 11 / DEAD 12 / FAILED 13 / NONE 14（DONE は 0） |
 | 129 / 130 / 143 | ランチャ・ウォッチが HUP / INT / TERM で終了（`.done` の補足に理由） |
-| その他 | CLI（claude / codex）の終了コードをそのまま返す（非 0 なら VERDICT は NONE） |
+| その他 | CLI（claude / codex / agy）の終了コードをそのまま返す（非 0 なら VERDICT は NONE） |
 
 `run-impl.sh` / `run-review.sh` は振り分け先のランチャの終了コードに従います。`lanes-doctor.sh` は揃っていれば 0、足りなければ 2 です。
 
@@ -461,6 +481,8 @@ zsh lanes/prepare-screen-qa.sh <checkout> [label] [--url <preview-url>] [--viewp
 | `LANES_RUNS_ROOT` / `LANES_ARCHIVE_ROOT` / `LANES_SCRATCH_ROOT` | `$HOME/dev/_runs` / 同じ / `$LANES_RUNS_ROOT/_scratch` | worktree・退避先・scratch |
 | `CLAUDE_BIN` `CODEX_BIN` `GEMINI_BIN` | `command -v claude` / `codex` / `agy` | 各 CLI のパス |
 | `CLAUDE_MODEL` `CODEX_MODEL` `GEMINI_MODEL` | 空 | 空なら `--model` を付けず CLI の既定モデル |
+| `GEMINI_REVIEW_MODEL` `GEMINI_REVIEW_EFFORT` | 空 / 空 | Gemini レビュー（`run-gemini-review.sh`）のモデルと effort（空なら付けない。実装用の `GEMINI_MODEL` / `GEMINI_EFFORT` とは別） |
+| `GEMINI_REVIEW_PRINT_TIMEOUT` `GEMINI_REVIEW_NOOUTPUT_SEC` | `45m` / `600` | Gemini レビューの全体の上限（`--print-timeout`）と、出力が止まったら止めるまでの秒数（`EXIT:8`） |
 | `CLAUDE_EFFORT` `CODEX_EFFORT` `GEMINI_EFFORT` | `xhigh` / `xhigh` / `high` | effort（考える深さ。空なら付けない。上限はモデルごとに違う）。そのレーンで渡す設定のモデルと effort は `logs/<label>.pid`（`model=` / `effort=`）と証跡に残る。起動ごとに変える書き方は `docs/config.md` |
 | `LANES_CHECK_CMD` | 空 | `chk-run.sh` の確認コマンド（`.lanes/check.sh` が優先。どちらも無ければ `chk-run.sh` は exit 2） |
 | `LANES_SCREEN_QA_MAP` | 空 | 画面 QA の対応表（`--url` / `--viewpoints` が優先） |
@@ -472,6 +494,7 @@ zsh lanes/prepare-screen-qa.sh <checkout> [label] [--url <preview-url>] [--viewp
 | `LANES_PROMPT_MAX_BYTES` | `200000` | プロンプトの上限（巨大な diff を埋め込む事故の検出） |
 | `LANES_REVIEW_REUSE_CHECKS` | `1` | 1 ならレビューランチャが `chk-run.sh --query` で問い合わせ、親の確認済みの記録があれば必須検証を回させない（6 章「必須検証の使い回し」）。0 なら問い合わせない |
 | `LANES_REVIEW_REQUIRE_CHECKS` | `0` | 1 なら、親の確認済みの記録を使えない（`no-record` / `uncommitted` / `input-changed`）とき、レビューの子を起動せずに止める（`EXIT:2`・`note=起動前の誤り`）。その起動だけ記録なしで回すなら `--allow-missing-checks`。0 なら今までどおり起動する（`docs/config.md`） |
+| `LANES_REVIEW_ENGINE` | 空 | `run-review.sh` が振り分けるレビュー役（空なら構成のレビュー役。`codex` / `claude` / `gemini`。`--engine` が勝つ。`chk-run.sh` の指紋には入らない） |
 
 数値のキー（`LANES_STALL_MINUTES` `LANES_NOTIFY` `LANES_PROMPT_MAX_BYTES` `LANES_DOWNLOADS_SCAN` `LANES_DETACH_QA` `LANES_REVIEW_REUSE_CHECKS` `LANES_REVIEW_REQUIRE_CHECKS`）は `lanes.env` が整数か確かめ、数字以外なら計算に使わずに exit 2 で止まります（0 / 1 のキーと 1 以上のキーの別は `docs/config.md`）。ランチャ（`run-*.sh`）では、その label の排他を取れれば今回の失敗（`EXIT:2`・`note=起動前の誤り: 設定の誤り: ...`）を `.done` に残すので、前回成功した label でも `lanes-status.sh` は `FAILED` を返します。
 
@@ -493,7 +516,7 @@ LANES_TEST_SOCKET_ROOT=/Users/you/tmp/s zsh selftest.sh   # TMPDIR が深いと�
 LANES_LINT_STRICT=1 zsh selftest.sh --test tests/test-lint.sh   # shellcheck が未導入なら赤にする（公開前の確認など）
 ```
 `selftest.sh` はスタブ（本物の代わりに決まった応答を返す偽物）の CLI を入れた一時 HOME で、指定した構成ごとに `lanes/tests/test-*.sh` と `tests/test-*.sh` を回し、最後に「構成 × テスト」の表を出します（`LANES_PRIVATE_DENYLIST` を渡せば `selftest.sh` の中の `test-no-private.sh` にも届きます）。
-- 構成ごとに回すのは、先頭の 15 行に `# selftest: 構成ごと` の行があるテスト（呼び出し元の `LANES_TOOLS` で結果が変わるもの。今は `test-common-security.sh` と `test-gemini-launcher.sh`）だけです。
+- 構成ごとに回すのは、先頭の 15 行に `# selftest: 構成ごと` の行があるテスト（呼び出し元の `LANES_TOOLS` で結果が変わるもの。今は `test-common-security.sh` と `test-gemini-launcher.sh`）だけです（`test-gemini-review.sh` は中で構成を固定・切り替えるので 1 回だけ）。
   それ以外（`LANES_TOOLS` を見ない、または `test-roles.sh` / `test-doctor.sh` のように中で変数を外して 4 構成を自分で試すもの）は最初の構成で 1 回だけ回し、2 つ目以降の構成の列には同じ結果を `＝緑` のように「＝」付きで流用します（合計の行の「流用」の数）。
   `--every-profile` を付けると、前と同じく全部のテストを構成ごとに回します。新しいテストが呼び出し元の `LANES_TOOLS` を読むなら、先頭のコメントに `# selftest: 構成ごと` の行を足してください。
 - 表の `緑(一部)` は、その構成では一部を停止の確認だけにしたもの・道具が無くて一部の検査を省いたもの（テストの出力の `LANES_PARTIAL: <理由>` の行。理由は表の下に並べます。例: shellcheck が未導入のときの `tests/test-lint.sh`）。

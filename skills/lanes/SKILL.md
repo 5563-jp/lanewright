@@ -77,6 +77,11 @@ zsh <kit>/lanes/detach-run.sh <launch.log> zsh <kit>/lanes/run-impl.sh <worktree
 # レビュー（構成に応じて Codex または Claude）
 zsh <kit>/lanes/detach-run.sh <launch.log> zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> rev-<票>-r<N> [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--dry-run]
 #   --round / --force と自動の full・delta 切り替えは、Codex レビュー・Claude レビューのどちらの構成でも使える（下の「VERDICT とレビュー full / delta」）
+
+# Gemini でレビュー（明示したときだけ。構成に gemini があるとき。label は既定のレビューと別の系列にする）
+zsh <kit>/lanes/detach-run.sh <launch.log> zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> grev-<票>-r<N> --engine gemini [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--dry-run]
+#   Gemini で実装した worktree では起動しない（exit 2。実装と同じ道具でレビューしない）。どうしても回すときだけ --allow-same-engine（証跡に残る）
+#   途中で終わった（FAILED・DEAD・中断）ら、同じ label で回し直す（再利用の記録は IN_PROGRESS のまま残り、古い CLEAN は使わずに full で回る）
 ```
 
 - **起動後 60 秒以内の確認**: `<kit>/lanes/lanes-status.sh <worktree> <label> --tail 20` を実行する。確認前に「起動した」と報告しない。`RUNNING` または `DONE` のときだけ「起動確認 OK: PID（プロセス識別番号） / ログパス」と報告する。
@@ -87,7 +92,7 @@ zsh <kit>/lanes/detach-run.sh <launch.log> zsh <kit>/lanes/run-review.sh <worktr
 ## VERDICT とレビュー full / delta・ビルドの分担
 
 - **VERDICT（合否判定・全構成共通）**: 独立行の `VERDICT: CLEAN` / `VERDICT: NEEDS_FIX` で判定する。出力の未完了・途切れは指摘数より優先して `VERDICT: NONE`（`EXIT:3`）、P0/P1 があれば明示 `CLEAN` より `NEEDS_FIX` を優先する。レビュアーや QA が作業ツリーを書き換えた場合は `VERDICT: NEEDS_FIX`（`EXIT:4`）。label には round 番号を末尾 `-r<N>` で入れる（`rev-<票>-r<N>`）。
-- **どの構成でも使える機能（Codex レビュー・Claude レビューとも。仕組みは `<kit>/lanes/review-dedup.zsh` の 1 つ）**:
+- **どの構成でも使える機能（Codex レビュー・Claude レビュー・Gemini レビューとも。仕組みは `<kit>/lanes/review-dedup.zsh` の 1 つ）**:
   - `--mode auto`（既定）で full / delta / 省略を自動で選ぶ。`--round N` も使える。
   - `full` になる条件: 初回、P0/P1 修正後、前回 `NEEDS_FIX` 後（未解決指摘を自動引き継ぎし、独立行 `RESOLVED_PREVIOUS_FINDINGS: YES` が出るまで `CLEAN` にしない）。
   - `delta`（前回合格した HEAD（ブランチ先端のコミット）からの差分レビュー）・省略になる条件: 前回 `CLEAN` かつ未保存変更なしで条件が一致するとき。同一 HEAD は再レビューせず前回判定を返す（`skip-same-head`。やり直すときだけ `--force`）。

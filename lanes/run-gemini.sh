@@ -500,7 +500,7 @@ files="$(git diff --stat "$head_before" HEAD 2>/dev/null | tail -1 | sed 's/^ */
   print -- "- 実行: $started 開始 / 約 ${elapsed} 分（${elapsed_s} 秒）"
   print -- "- ログ: $log / $json / $final"
   print -- "- 作業場所（scratch）: $scratch（${LANES_BASE_BRANCH:-develop} へのマージ後の cleanup で削除）"
-  print -- "- レビュー: このあと run-review.sh（構成のレビュー役。Gemini はレビューに使わない）"
+  print -- "- レビュー: このあと run-review.sh（構成のレビュー役。Gemini で実装した worktree は Gemini でレビューしない）"
 } > "$evidence"
 { print -- "----"; cat "$evidence"; print -- "finished: $(lanes_now)"; print -- "EXIT:$rc"; } >> "$log"
 cat "$evidence"
