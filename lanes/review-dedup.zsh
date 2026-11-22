@@ -1,9 +1,11 @@
-# review-dedup.zsh — run-codex-review.sh と run-claude-review.sh から source する。同じレビューの繰り返しを省く
+# review-dedup.zsh — run-codex-review.sh・run-claude-review.sh・run-gemini-review.sh から source する。同じレビューの繰り返しを省く
 #  - 系列（series）: label の末尾 -r<N> を外したもの（rev-wap83-r5 → rev-wap83）。round は -r<N> から取る
 #  - 前回 CLEAN・未保存変更なし・条件一致のときだけ delta または同一結果を再利用する
 #  - 前回 NEEDS_FIX は指摘本文を渡して full。旧記録も full で検証し直す
 #  - round 3 以降の P2/P3 は後回し票へ保存。必須検証の成功確認がある場合だけランチャが CLEAN にする
 #  - 必須検証の使い回し: 親が同じ中身で chk-run.sh を通した記録があれば、レビューの中で回させない（rvd_checks_query）
+#  - 確認中の印（Gemini レビュー）: 子を起動する直前に記録を IN_PROGRESS にし、全部の記録を書けたときだけ CLEAN / NEEDS_FIX で確定する。
+#    途中で失敗・中断・強制終了したら IN_PROGRESS のまま残り、次の起動は前回の結果（古い CLEAN を含む）を使わない（rvd_prev_record）
 # 依存なし（_common.sh を読まなくても使える。tests/test-review-dedup.sh が単体で試す）
 
 rvd_series() { if [[ "$1" =~ '^(.+)-r([0-9]+)$' ]]; then print -- "${match[1]}"; else print -- "$1"; fi; }
@@ -41,6 +43,9 @@ rvd_prev_record() {
   state="$(rvd_state_file "$logdir" "$series")"
   # 同じ label / round の再実行でも、最新の有効な結果を優先する。
   v="$(rvd_state_get "$state" last_verdict)"
+  # 確認中（IN_PROGRESS）のまま残った記録は、前のレビューが途中で終わった印。過去の証跡（<系列>-r<k>.evidence.md）にも戻らず、
+  # 前回の記録は無いものとする（古い CLEAN で省略・delta にしない）
+  [[ "$v" != IN_PROGRESS ]] || return 0
   [[ "$(rvd_state_get "$state" last_exit)" == 0 ]] || v=""
   if [[ "$v" == 'VERDICT: CLEAN' || "$v" == 'VERDICT: NEEDS_FIX' ]]; then print -r -- "$state"; return; fi
   for (( k = round - 1; k >= 1; k-- )); do
@@ -181,7 +186,7 @@ PY_GUARD
 # 起点・案件指示・設定・実装・テンプレの内容を条件に含める（値そのものは記録しない）。
 # 検証の設定（LANES_CHECK_CMD の値・対象の .lanes/check.sh の中身・package.json の scripts のうち検証に関わるもの）も含める。
 # 検証が「未導入」で CLEAN になった後に検証を足したら、同じ HEAD でも前回の結果を使わずにレビューし直す。
-# 必須検証の使い回しの有無と使った記録（rvd_checks_key）、レビュー役（codex / claude）も含める。
+# 必須検証の使い回しの有無と使った記録（rvd_checks_key）、レビュー役（codex / claude / gemini）も含める。
 # 記録が変わった（使い回しが無くなった・親が回し直した）ら、同じ HEAD でも前回の結果を使わない。
 # <root> <prompt> <base> <mode> <policy> <model> <effort> [worktree] [使い回しの鍵] [レビュー役]
 rvd_context() {
@@ -197,6 +202,10 @@ for p in [pathlib.Path(prompt), *[pathlib.Path(root) / f for f in
           ['review-dedup.zsh', 'run-codex-review.sh', 'run-claude-review.sh', '_common.sh', 'codex-review-output.py',
            'templates/claude-review-full.md', 'templates/claude-review-delta.md', 'templates/codex-review-focus.md']]]:
     h.update(p.read_bytes() + b'\0')
+# Gemini レビューは、そのランチャと agy の起動・見張り・受け取り役も条件に入れる（Codex・Claude の条件の中身は今までのまま）
+if kind == 'gemini':
+    for f in ['run-gemini-review.sh', 'gemini-agy.zsh', 'gemini-stream-tee.py']:
+        h.update((pathlib.Path(root) / f).read_bytes() + b'\0')
 # 検証の設定。名前は _common.sh の lanes_checks_present が見るものと同じ
 h.update(b'check-cmd:' + os.environ.get('LANES_CHECK_CMD', '').encode() + b'\0')
 if wt:
@@ -295,22 +304,81 @@ rvd_previous_followups() {
   }
 }
 
+# 記録（logs/.<系列>.review-state）の書き込みはこの 1 つだけ。標準入力の JSON（1 つのオブジェクト）を、同じフォルダの一時ファイルに
+# 書いてから名前を付け替える（os.replace）。途中で止まっても、前の記録か新しい記録のどちらかが丸ごと残る（書きかけは残らない）
+rvd_state_write() {   # <記録のファイル>
+  python3 -c '
+import json, os, sys
+f = sys.argv[1]
+record = json.loads(sys.stdin.read())
+if not isinstance(record, dict):
+    sys.exit(1)
+tmp = f + ".tmp." + str(os.getpid())
+try:
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    os.replace(tmp, f)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+' "$1"
+}
+
 # <logdir> <series> <round> <head> <verdict> <gate> <label> <context> <tree> <base> <report> [未解決本文] [前回の解消確認必須:0|1]
 rvd_save_state() {
   [[ "$5" == 'VERDICT: CLEAN' || "$5" == 'VERDICT: NEEDS_FIX' ]] || return 1
   local f; f="$(rvd_state_file "$1" "$2")"
-  python3 - "$f" "$3" "$4" "$5" "$6" "$7" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" "${13:-0}" <<'PY_SAVE'
-import json, os, pathlib, sys
-f, rnd, head, verdict, gate, label, context, tree, base, report, pending, blocking = sys.argv[1:]
+  python3 - "$3" "$4" "$5" "$6" "$7" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" "${13:-0}" <<'PY_SAVE' | rvd_state_write "$f"
+import json, pathlib, sys
+rnd, head, verdict, gate, label, context, tree, base, report, pending, blocking = sys.argv[1:]
 body = pathlib.Path(report).read_text(encoding='utf-8') if report else ''
 record = dict(last_round=rnd, last_head=head, last_verdict=verdict, last_gate=gate,
               last_label=label, last_context=context, last_tree=tree, last_base=base,
               last_report=(pending + '\n' if pending else '') + body,
               last_blocking_previous=blocking, last_exit=0)
-tmp = pathlib.Path(f + '.tmp.' + str(os.getpid()))
-tmp.write_text(json.dumps(record, ensure_ascii=False) + '\n', encoding='utf-8')
-os.replace(tmp, f)
+print(json.dumps(record, ensure_ascii=False))
 PY_SAVE
+}
+
+# 子を起動する直前に、系列の記録を「確認中」（last_verdict=IN_PROGRESS・last_exit=-1）に書き換える（Gemini レビュー）。
+# 確定（rvd_save_state）まで進めずに終わった（子の失敗・中断・強制終了・記録の書き込みの失敗）ら、この印のまま残り、
+# rvd_prev_record が前回の記録を返さない（古い CLEAN で同じ HEAD を省略しない・delta にしない）。
+# round の数え（last_round）は前の値のまま（無ければ round - 1。0 未満にしない）。同じ round を回し直せるようにする。
+# 前回が NEEDS_FIX なら、その未解決指摘の本文（last_report）と解消確認の要否（last_blocking_previous）だけは持ち越す
+# （last_carried_verdict。rvd_carried_record）。CLEAN は持ち越さない。
+# <logdir> <series> <round> <label> [前回の記録] [前回の判定]
+rvd_mark_in_progress() {
+  local logdir="$1" series="$2" round="$3" label="$4" record="${5:-}" prev_v="${6:-}" f last carry=0 blocking=0
+  f="$(rvd_state_file "$logdir" "$series")"
+  last="$(rvd_state_get "$f" last_round)"
+  [[ "$last" == <-> ]] || last=$(( round > 0 ? round - 1 : 0 ))
+  if [[ "$prev_v" == 'VERDICT: NEEDS_FIX' && -n "$record" ]]; then
+    carry=1; blocking="$(rvd_record_get "$record" blocking_previous)"
+  fi
+  # 持ち越す本文は標準入力で渡す（長くても引数の上限に当たらない）。読み終えてから記録を付け替えるので、同じ記録から持ち越すときも壊れない
+  { if (( carry )); then rvd_record_get "$record" report; fi } | python3 -c '
+import json, sys
+last, label, carry, blocking, started = sys.argv[1:6]
+report = sys.stdin.read() if carry == "1" else ""
+# 記録から読んだ本文は、読み出しが付けた最後の改行を 1 つ外す（持ち越すたびに改行が増えない）
+report = report[:-1] if report.endswith("\n") else report
+print(json.dumps(dict(last_round=last, last_head="", last_verdict="IN_PROGRESS", last_gate="", last_label=label,
+                      last_context="", last_tree="", last_base="", last_report=report,
+                      last_blocking_previous=blocking if carry == "1" else "0",
+                      last_carried_verdict="VERDICT: NEEDS_FIX" if carry == "1" else "",
+                      last_started=started, last_exit=-1), ensure_ascii=False))
+' "$last" "$label" "$carry" "${blocking:-0}" "$(date '+%Y-%m-%d %H:%M:%S %Z')" | rvd_state_write "$f"
+}
+# 確認中（IN_PROGRESS）のまま残った記録が、前回の NEEDS_FIX の未解決指摘を持ち越していれば、その記録のパスを出す（無ければ何も出さない）。
+# ランチャは前回の判定を NEEDS_FIX として扱い、full に戻して未解決指摘を引き継ぐ（rvd_unresolved_note・rvd_previous_followups がこの記録を読む）
+rvd_carried_record() {   # <logdir> <series>
+  local f; f="$(rvd_state_file "$1" "$2")"
+  [[ "$(rvd_state_get "$f" last_verdict)" == IN_PROGRESS && "$(rvd_state_get "$f" last_carried_verdict)" == 'VERDICT: NEEDS_FIX' ]] || return 0
+  [[ -n "$(rvd_state_get "$f" last_report)" ]] || return 0
+  print -r -- "$f"
 }
 
 # 未解決の本文を渡す。重大な指摘の解消確認と、round 3 以降の軽微な指摘の保存を区別する。

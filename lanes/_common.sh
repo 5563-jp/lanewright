@@ -5,6 +5,12 @@ if [ -z "${ZSH_VERSION:-}" ]; then
   printf '%s\n' 'ERROR: _common.sh は zsh から source すること' >&2
   return 2 2>/dev/null || exit 2
 fi
+# 入口（run-review.sh）が振り分けたレビュー役。設定ファイル（lanes.env が読む）が LANES_REVIEW_ENGINE を固定の値で書いていても、
+# 起動前点検（lanes_entry_preflight）は入口が実際に選んだレビュー役で回すよう、読む前に控える（export しない）
+typeset -g +x LANES_ENTRY_REVIEW_ENGINE=""
+if [[ "${LANES_ENTRY_PREFLIGHT:-0}" == 1 && "${parameters[LANES_REVIEW_ENGINE]-}" == *export* ]]; then
+  LANES_ENTRY_REVIEW_ENGINE="$LANES_REVIEW_ENGINE"
+fi
 source "$LANES_DIR/lanes.env"
 
 # サブスク限定ルール: API キー経由で起動させない（従量課金の API キーではなく、各 CLI のサブスクのログインで動かす）
@@ -170,7 +176,7 @@ lanes_resolve_bin() {
 }
 
 # 環境変数の effort が、設定ファイル（無ければ既定）と違う値で勝っているときだけ、注意を 1 行出す（stderr）。
-# <キー> = CLAUDE_EFFORT / CODEX_EFFORT / GEMINI_EFFORT。各ランチャが、自分の使うキーについて起動時に 1 回呼ぶ。
+# <キー> = CLAUDE_EFFORT / CODEX_EFFORT / GEMINI_EFFORT / GEMINI_REVIEW_EFFORT。各ランチャが、自分の使うキーについて起動時に 1 回呼ぶ。
 # 経緯: アプリから起動したシェルが CLAUDE_EFFORT を環境変数として持っていて、設定ファイルに書いた値が黙って負けたことがあった。
 # 勝つ順番（環境変数 > 設定ファイル > 既定）は変えない。知らせるだけで、CLI に渡す値も子の環境も変えない
 lanes_effort_override_note() {
@@ -178,7 +184,7 @@ lanes_effort_override_note() {
   (( ${+LANES_EFFORT_FROM_ENV[$key]} )) || return 0   # 環境変数で渡されていない（lanes.env が控えを作る）
   now="${(P)key}"
   # 環境変数が無かったら何になるか（設定ファイル、無ければ既定）を、子シェルで設定を読み直して確かめる。今のシェルの値は変えない
-  conf_value="$( { unset CLAUDE_EFFORT CODEX_EFFORT GEMINI_EFFORT LANES_DEFER_CONFIG_ERROR
+  conf_value="$( { unset CLAUDE_EFFORT CODEX_EFFORT GEMINI_EFFORT GEMINI_REVIEW_EFFORT LANES_DEFER_CONFIG_ERROR
                    source "$LANES_DIR/lanes.env" && print -r -- "value:${(P)key}" } 2>/dev/null )" || return 0
   conf_value="${conf_value##*$'\n'}"   # 設定ファイルが何か出力していても、最後の 1 行だけを見る
   [[ "$conf_value" == value:* ]] || return 0
@@ -208,10 +214,16 @@ lanes_require_tool() {
 # 入口は LANES_ENTRY_PREFLIGHT=1 を付けて振り分け先へ exec し、振り分け先が lanes_mark_start の後にこれを呼ぶ。
 # こうすると点検の失敗も今回の .done（EXIT:2）として残り、同じ label の前回の成功（DONE）と取り違えない。
 # 直接ランチャを呼んだときは何もしない（そのランチャ自身の道具の点検だけが走る）。子の CLI へ引き継がないよう外す。
+# --review-engine <codex|claude|gemini>: 点検で前提にするレビュー役（lanes-doctor.sh --review-engine）。省いたときは、入口（run-review.sh）が
+# 振り分けたレビュー役（_common.sh が設定を読む前に控えた LANES_ENTRY_REVIEW_ENGINE）。どちらも無ければ設定の LANES_REVIEW_ENGINE
 lanes_entry_preflight() {
+  local engine="${LANES_ENTRY_REVIEW_ENGINE:-}"
+  if [[ "${1:-}" == --review-engine ]]; then engine="${2:-}"; fi
   [[ "${LANES_ENTRY_PREFLIGHT:-0}" == 1 ]] || return 0
   unset LANES_ENTRY_PREFLIGHT
-  zsh -f "$LANES_DIR/lanes-doctor.sh" --quiet || lanes_die "起動前点検（lanes-doctor.sh）で足りないものがある → 起動しない"
+  local -a opts; opts=(--quiet)
+  if [[ -n "$engine" ]]; then opts+=(--review-engine "$engine"); fi
+  zsh -f "$LANES_DIR/lanes-doctor.sh" "${opts[@]}" || lanes_die "起動前点検（lanes-doctor.sh）で足りないものがある → 起動しない"
 }
 
 # <worktree> <gitdir> <共通の管理フォルダ> → git の制御ファイルの指紋（子の実行の前後で比べる）。
@@ -258,6 +270,27 @@ lanes_require_worktree() {
   [[ -d "$wt" ]] || lanes_die "worktree が無い: $wt"
   git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || lanes_die "git 作業ツリーじゃない: $wt"
   git -C "$wt" rev-parse --verify -q HEAD >/dev/null 2>&1 || lanes_die "commit が 1 つも無い（HEAD 無し）: $wt"
+}
+
+# 専用の linked worktree（git worktree add で作ったもの）であること（Gemini レビュー用。run-gemini.sh と同じ考え方）。
+# .git が symlink でない普通のファイルで、管理領域（git-dir）が共通の管理領域（git-common-dir）の worktrees/ の下にあり、
+# git worktree list に登録されていること。本体 checkout・管理領域を外に置いた本体・submodule では lanes_die（exit 2）。
+# 確かめた管理領域は LANES_WT_GITDIR / LANES_WT_GITCOMMON に入れる（実体のパス）
+lanes_require_linked_worktree() {   # <worktree>
+  local wt="${1:A}" gd gc list entry found=0
+  [[ -f "$wt/.git" && ! -L "$wt/.git" ]] || lanes_die "本体 checkout（.git がディレクトリ）またはリンクの .git では起動しない。git worktree add で専用 worktree を作ってから渡す: $wt"
+  gd="$(git -C "$wt" rev-parse --path-format=absolute --git-dir 2>/dev/null)" || gd=""
+  gc="$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || gc=""
+  [[ -n "$gd" && -n "$gc" && -d "$gd" && -d "$gc" ]] || lanes_die "git の管理領域を確かめられない: $wt"
+  gd="${gd:A}"; gc="${gc:A}"
+  [[ "$gd" != "$gc" && "${gd:h}" == "$gc/worktrees" ]] \
+    || lanes_die "専用の linked worktree ではない（管理領域: $gd）→ 起動禁止。git worktree add で専用 worktree を作ってから渡す: $wt"
+  list="$(git -C "$wt" worktree list --porcelain -z 2>/dev/null)" || lanes_die "git worktree list を読めない: $wt"
+  for entry in "${(@0)list}"; do
+    if [[ "$entry" == "worktree "* && "${${entry#worktree }:A}" == "$wt" ]]; then found=1; fi
+  done
+  (( found )) || lanes_die "git worktree list にこの worktree が登録されていない → 起動禁止: $wt"
+  typeset -g LANES_WT_GITDIR="$gd" LANES_WT_GITCOMMON="$gc"
 }
 
 lanes_require_prompt() {
@@ -386,6 +419,84 @@ lanes_check_gemini_subscription() {
   lanes_resolve_bin GEMINI_BIN agy
   unset AGY_ADC_AUTH GOOGLE_APPLICATION_CREDENTIALS GOOGLE_GENAI_USE_VERTEXAI GOOGLE_CLOUD_PROJECT
   [[ "$(lanes_gemini_auth_state)" == subscription ]] || lanes_die "agy のログイン情報が無い（~/.gemini/antigravity-cli）→ 起動禁止。対話モードの agy でサブスクのアカウントにログインする"
+}
+
+# ---- CLI の --help の読み方（オプション名は単語として照合する）----
+# 部分一致（*--mode*）だと --model の行にも当たる。オプション名の前後が英数字・_・- でないときだけ、そのオプションの行として数える。
+# Gemini レビュー（run-gemini-review.sh）と起動前点検（lanes-doctor.sh）が同じ関数を使う
+lanes_help_has_option() {   # <help の本文> <オプション名（--sandbox など）> → 0 = その名前のオプションがある
+  local line re="(^|[^A-Za-z0-9_-])${2}([^A-Za-z0-9_-]|\$)"
+  for line in "${(@f)1}"; do [[ "$line" =~ $re ]] && return 0; done
+  return 1
+}
+# agy の --mode の行（オプション名として --mode がある行）に、選択肢 plan が単語としてあるか（planning などは数えない）
+lanes_agy_help_mode_has_plan() {   # <help の本文> → 0 = plan モードがある
+  local line opt='(^|[^A-Za-z0-9_-])--mode([^A-Za-z0-9_-]|$)' word='(^|[^A-Za-z0-9_-])plan([^A-Za-z0-9_-]|$)'
+  for line in "${(@f)1}"; do [[ "$line" =~ $opt && "$line" =~ $word ]] && return 0; done
+  return 1
+}
+
+# ---- Gemini レビュー（run-gemini-review.sh）の読み取り専用の担保（外から上書きできない部分）----
+# agy に起動単位で渡す設定（--settings。利用者の設定ファイルは変えない。deny は利用者の許可設定より優先される）を 1 行の JSON で出す。
+# 拒否（permissions.deny）:
+#   mcp(*)                        … MCP（外部サービスにつなぐ追加の道具）の呼び出しすべて
+#   write_file(*) / write_file(/) … ファイルの書き込み（作成・編集・削除・移動を含む書き込みの権限）すべて
+#   read_url(*) / execute_url(*)  … URL の読み込み・実行（コードを外へ送る経路を減らす。Claude レビューも Web の道具を持たない）
+#   command(...)                  … Claude レビューの固定の拒否の一覧（LANES_CLAUDE_REVIEW_DENY_BASE）のコマンド（Bash(...)）の分を
+#                                   agy の書き方に直したもの（commit・push・stash・ref の操作・PR のマージ・デプロイ・別のエージェントの起動など）
+# 残りは run-gemini.sh と同じ（作業場所の外を触らせない・端末サンドボックスを有効にする・既定のモデル提供元・クレジットを使わない）。
+# 外から足す・外す設定キーは持たない（環境変数や設定ファイルで緩められない）
+lanes_gemini_review_settings() {
+  python3 -I - "$LANES_CLAUDE_REVIEW_DENY_BASE" <<'PY_GEM_SETTINGS'
+import json, re, sys
+deny = ["mcp(*)", "write_file(*)", "write_file(/)", "read_url(*)", "execute_url(*)"]
+for item in sys.argv[1].split(","):
+    m = re.fullmatch(r"Bash\((.+?)[ \t]*\*\)", item.strip())
+    if m:
+        rule = "command(" + m.group(1).strip() + ")"
+        if rule not in deny:
+            deny.append(rule)
+print(json.dumps({"permissions": {"deny": deny}, "allowNonWorkspaceAccess": False, "enableTerminalSandbox": True,
+                  "modelProvider": "", "useG1Credits": False}, ensure_ascii=False, separators=(",", ":")))
+PY_GEM_SETTINGS
+}
+
+# 同じ道具でレビューしないための確かめ。logs/ に、その種別（.pid の lane=）の実装レーンの記録が 1 本でもあれば 0 を返し、
+# 見つけた記録の名前を REPLY に入れる。無ければ 1。
+# 見るもの: logs/ の直下の <label>.pid（回転した .prev-* も）の「lane=<lane>」の行と、<label>.evidence.md（回転したものも）の
+# 1 行目の見出し（「## Gemini 実装証跡（」など）。symlink・普通のファイルでないものは読まない。
+# 候補（.pid・証跡）を読めないときは「記録あり」として扱う（確かめられないまま同じ道具でレビューしない。REPLY に「（読めない）」を付ける）
+lanes_has_impl_lane() {   # <logdir> <lane（gemini / codex / claude）>
+  local found rc=0
+  typeset -g REPLY=""
+  [[ -d "$1" && ! -L "$1" ]] || return 1
+  found="$(python3 -I - "$1" "$2" <<'PY_IMPL_LANE'
+import os, re, stat, sys
+d, lane = sys.argv[1:3]
+heads = {"gemini": "## Gemini 実装証跡（", "codex": "## Codex 実装証跡（", "claude": "## Claude 実装証跡（"}
+pid_re = re.compile(r".+\.pid")
+evidence_re = re.compile(r".+\.evidence(?:\.prev-[0-9]{8}-[0-9]{6}(?:-[0-9]+)?)?\.md")
+for e in sorted(os.scandir(d), key=lambda e: e.name):
+    is_pid = bool(pid_re.fullmatch(e.name))
+    is_evidence = bool(evidence_re.fullmatch(e.name)) and lane in heads
+    if not (is_pid or is_evidence):
+        continue
+    try:
+        if not stat.S_ISREG(e.stat(follow_symlinks=False).st_mode):
+            continue
+        with open(e.path, encoding="utf-8", errors="replace") as f:
+            hit = (any(line.rstrip("\r\n") == "lane=" + lane for line in f) if is_pid
+                   else f.readline().startswith(heads[lane]))
+    except OSError:
+        print(e.name + "（読めない）"); sys.exit(0)
+    if hit:
+        print(e.name); sys.exit(0)
+sys.exit(1)
+PY_IMPL_LANE
+)" || rc=$?
+  REPLY="$found"
+  (( rc == 0 )) && return 0
+  return 1
 }
 
 # 「枝 @ HEAD (origin/<統合先の枝> @ SHA)」。統合先は LANES_BASE_BRANCH
@@ -974,8 +1085,19 @@ lanes_start_child() {
   lanes_record_child "$LANES_CHILD"
 }
 
+# lanes_start_child と同じ。ただし作業場所（cwd）を <dir> にするのは監督役とその子だけ（呼び出し元のシェルは移らない）。
+# 子シェルで cd してから exec で監督役に置き換わるので、LANES_CHILD は監督役の pid（lanes_start_child と同じ扱い）。
+# 監督役の python は -I で動かす（作業場所の中の同じ名前のモジュール（json.py など）を読まない）
+lanes_start_child_in() {   # <dir> <コマンド...>
+  local dir="$1"; shift
+  ( builtin cd -q -- "$dir" && exec python3 -I -c "$LANES_PROCESS_GUARD" supervise "$@" ) <&0 &
+  typeset -g LANES_CHILD=$!
+  typeset -g LANES_MANAGED_CHILD_PID="$LANES_CHILD"
+  lanes_record_child "$LANES_CHILD"
+}
+
 # 記録用: このレーンが CLI に渡す設定のモデルと effort（考える深さ）を LANES_REC_MODEL / LANES_REC_EFFORT に入れる。
-# <lane> = lanes_mark_start に渡す名前（claude / claude-review / qa / codex / codex-review / gemini）。知らない名前は 1 を返す。
+# <lane> = lanes_mark_start に渡す名前（claude / claude-review / qa / codex / codex-review / gemini / gemini-review）。知らない名前は 1 を返す。
 # 空（引数を付けない＝CLI の既定に任せる）は空のまま。後から「どの設定で回したか」を集計できるように .pid と証跡に残す。
 # 値は設定を読み終えた時点のもの（ランチャが CLI に渡す値と同じ変数）。改行は 1 行の記録を壊すので空白にする
 lanes_lane_model_effort() {
@@ -984,6 +1106,7 @@ lanes_lane_model_effort() {
     claude|claude-review|qa) m="${CLAUDE_MODEL:-}"; e="${CLAUDE_EFFORT:-}" ;;
     codex|codex-review)      m="${CODEX_MODEL:-}";  e="${CODEX_EFFORT:-}" ;;
     gemini)                  m="${GEMINI_MODEL:-}"; e="${GEMINI_EFFORT:-}" ;;
+    gemini-review)           m="${GEMINI_REVIEW_MODEL:-}"; e="${GEMINI_REVIEW_EFFORT:-}" ;;
     *) return 1 ;;
   esac
   typeset -g LANES_REC_MODEL="${${m//$'\n'/ }//$'\r'/ }" LANES_REC_EFFORT="${${e//$'\n'/ }//$'\r'/ }"

@@ -56,6 +56,10 @@ GEMINI_EFFORT="${GEMINI_EFFORT-high}"
 #   CLAUDE_EFFORT="xhigh"
 # 固定すると、その場だけの上書き（CLAUDE_EFFORT=low zsh run-impl.sh ...）は効かなくなる
 # 例（架空のモデル名）: CLAUDE_MODEL="${CLAUDE_MODEL:-my-claude-model}"
+# Gemini レビュー（run-gemini-review.sh。明示したときだけ使う）のモデルと effort。実装用の GEMINI_MODEL / GEMINI_EFFORT とは別に決める。
+# 既定は両方空（--model / --effort を付けず CLI の既定に任せる）。書き方は上と同じ
+# GEMINI_REVIEW_MODEL="${GEMINI_REVIEW_MODEL:-}"
+# GEMINI_REVIEW_EFFORT="${GEMINI_REVIEW_EFFORT-}"
 
 # ---- 実装・レビューの許可（AI に何を確認なしでさせるか）----
 # ランチャは非対話で動かすので、許すものを毎回明示して渡す（~/.claude/settings.json や ~/.codex/config.toml に任せない）。
@@ -96,6 +100,12 @@ LANES_VERCEL_SCOPE="${LANES_VERCEL_SCOPE:-}"
 # 0（既定）なら今までどおり、レビューの中で必須検証を回させる。レビューを読み取り専用で回す構成（既定）では回せないことが多いので、
 # chk-run.sh を必ず通す運用なら 1 を勧める
 # LANES_REVIEW_REQUIRE_CHECKS="${LANES_REVIEW_REQUIRE_CHECKS:-0}"
+# run-review.sh が振り分けるレビュー役。空（既定）なら構成のレビュー役（codex か claude）。codex / claude / gemini を書くとそちらへ振り分ける。
+# gemini は構成に gemini があるときだけ（run-gemini-review.sh。Gemini で実装した worktree には使わない）。起動ごとに選ぶなら run-review.sh --engine の方が勝つ
+# LANES_REVIEW_ENGINE="${LANES_REVIEW_ENGINE:-}"
+# Gemini レビューの全体の上限（agy の --print-timeout）と、出力が止まったら止めるまでの秒数（EXIT:8）
+# GEMINI_REVIEW_PRINT_TIMEOUT="${GEMINI_REVIEW_PRINT_TIMEOUT:-45m}"
+# GEMINI_REVIEW_NOOUTPUT_SEC="${GEMINI_REVIEW_NOOUTPUT_SEC:-600}"
 
 # ---- そのほか ----
 # 1 なら後片付けのとき ~/Downloads に置き忘れたレビュー出力を警告する
