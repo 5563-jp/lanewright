@@ -59,7 +59,7 @@ elif [[ -n "${LANES_REVIEW_ENGINE:-}" ]]; then engine="$LANES_REVIEW_ENGINE"; en
 else engine="$LANES_ROLE_REVIEW"
 fi
 if [[ "$engine" != claude ]] && ! lanes_roles_has_tool "$engine"; then
-  die "この構成（$LANES_PROFILE / LANES_TOOLS=\"$LANES_TOOLS_NORMALIZED\"）に $engine が無いので、レビュー役に $engine（$engine_from）は使えない。構成に $engine を足すか、--engine を外して構成のレビュー役（$LANES_ROLE_REVIEW）で回す"
+  die "この構成（$LANES_PROFILE / LANES_TOOLS=\"$LANES_TOOLS_NORMALIZED\"）に $engine が無いので、レビュー役に $engine（$engine_from）は使えない。構成に $engine を足すか、$engine_from の指定を外して構成のレビュー役（$LANES_ROLE_REVIEW）で回す"
 fi
 if [[ "$engine" != gemini ]] && (( allow_same )); then
   die "--allow-same-engine は Gemini レビュー（--engine gemini）用のオプション。$engine でレビューするなら外す"
