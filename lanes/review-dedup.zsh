@@ -606,8 +606,9 @@ rvd_review_lock() {   # <logdir> [logs/ の識別子（dev:inode。_common.sh �
   [[ -d "$1" && ! -L "$1" ]] || return 2
   lock="$(rvd_lock_file "$1")" || return 2
   ( umask 077; mkdir -p -- "${lock:h}" ) 2>/dev/null || return 2
-  [[ ! -L "$lock" && ( ! -e "$lock" || -f "$lock" ) ]] || return 2
-  { exec {lfd}>>"$lock" } 2>/dev/null || return 2
+  # symlink を辿らずに開く（無ければ作る。symlink に差し替えられていたら開かず、行き先にファイルを作らない）
+  zmodload zsh/system 2>/dev/null || return 2
+  sysopen -a -w -o creat,nofollow -m 600 -u lfd -- "$lock" 2>/dev/null || return 2
   { exec {fd}<"$1" } 2>/dev/null || { exec {lfd}>&-; return 2; }
   python3 -I -c '
 import fcntl, os, stat, sys
