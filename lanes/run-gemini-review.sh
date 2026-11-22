@@ -13,9 +13,13 @@
 #   子（agy）を起動する直前に、その系列の記録を「確認中」（IN_PROGRESS）に書き換える（rvd_mark_in_progress。前回の未解決指摘の
 #   本文を読み切ってから書き換える）。確定するのは agy が 0 で終わり、VERDICT が CLEAN か NEEDS_FIX で、読み取り専用の監査を通り、
 #   公開ログ（<label>.last.md と <label>.log）が書けたときだけ。確定の順番は、書く先（.done・証跡・ログ・後回し票・記録）の確認 →
-#   ログの末尾 → 再利用の記録（rvd_save_state）→ 証跡（<label>.evidence.md）→ 後回し票（該当時）→ 終了記録（.done を読み戻して確かめる）。
-#   合格の証跡と標準出力の表示は全部が書けてから出す。途中で失敗したら確定した分（再利用の記録・後回し票）を戻し、証跡・ログの末尾を
-#   失敗（VERDICT: NONE・EXIT:3）で書き直す（合格の表示を残さない）。後回し票は確定まで scratch の写しに足すだけ（失格の回は公開しない）。
+#   ログの末尾 → 証跡（<label>.evidence.md）→ 後回し票（該当時）→ 終了記録（.done。一時ファイルから置き換えて読み戻す）→
+#   再利用の記録（rvd_save_state。最後）→ 標準出力の合格の表示。次の起動が前回の結果を使える（省略・delta）のは、成果物が全部揃った後だけ。
+#   途中で失敗したら公開した分を取り下げる（再利用の記録は確認中へ・後回し票は公開前の中身へ・証跡とログの末尾と .done は
+#   VERDICT: NONE・EXIT:3 へ書き直す。合格の表示を残さない）。後回し票は確定まで scratch の写しに足すだけ（失格の回は公開しない）。
+#   同じ head の結果を使う（skip-same-head）ときも、ログ → 証跡 → .done（読み戻す）の全部が書けてから合格を表示する。
+#   同じ logs/ のレビュー（Codex・Claude・Gemini。label を問わない）は共通の排他（logs/.review.lock）で 1 本ずつにする（_common.sh の
+#   lanes_review_lock）。別のレビューが実行中なら、その記録にも再利用の記録にも触らずに止める（exit 2。今回の label には EXIT:2 を残す）。
 #   agy の失敗・見張りの停止・中断・強制終了・書き込みの試みや作業ツリーの変更（EXIT:4）・記録の書き込みの失敗では確定しない
 #   （IN_PROGRESS のまま残る）。次の起動は前回の記録を使わない（古い CLEAN で省略・delta にしない。rvd_prev_record）。
 #   前回が NEEDS_FIX だったときの未解決指摘だけは、IN_PROGRESS の記録に持ち越して次の起動へ引き継ぐ（rvd_carried_record）。
@@ -172,16 +176,24 @@ case "$mode:$decided" in
   *:same) mode=full; (( force )) || skip_same=1 ;;
   *) mode=full ;;   # 明示の delta も、前回の記録が使えなければ（初回・前回 NEEDS_FIX・条件変更・未保存変更・前回が途中で終わった）全体を見る
 esac
-# 記録の公開（証跡・後回し票）。<公開先>、中身は標準入力。公開先と同じフォルダの一時ファイルに書き切ってから名前を付け替える
-# （mv。書きかけ・欠けた中身を公開先に残さない）。公開先が symlink・フォルダ・普通のファイルでない物なら書かない（辿らない・中へ入れない）。
+# 記録の公開（ログ・証跡・後回し票）。<公開先>、中身は標準入力。公開先と同じフォルダの一時ファイルに書き切ってから名前を付け替える
+# （_common.sh の lanes_replace_file。書きかけ・欠けた中身を公開先に残さない。置いた後に読み戻して確かめる）。
+# 公開先が symlink・フォルダ・普通のファイルでない物なら書かない（辿らない・中へ入れない）。
 # 0 = 公開できた。子（agy）の起動前か、子と孫の回収が済んだ後だけで使う
 publish_to() {
-  local dst="$1" tmp="${1:h}/.${1:t}.tmp.$$"
+  local dst="$1"
   [[ ! -L "$dst" && ( ! -e "$dst" || -f "$dst" ) ]] || return 1
-  rm -f -- "$tmp" 2>/dev/null || true
-  if [[ ! -e "$tmp" && ! -L "$tmp" ]] && cat > "$tmp" && mv -f -- "$tmp" "$dst"; then return 0; fi
-  rm -f -- "$tmp" 2>/dev/null || true
-  return 1
+  lanes_replace_file "${dst:h}" "${dst:t}"
+}
+# 合格の証跡を取り下げる。<失敗の証跡の本文>。失敗の証跡で置き換え、置き換えられなければ証跡を消す（合格の証跡を残さない）。
+# 消せない（フォルダなど・権限）ときはその旨を出す
+withdraw_evidence() {
+  if print -r -- "$1" | publish_to "$evidence"; then return 0; fi
+  if [[ -f "$evidence" && ! -L "$evidence" ]]; then rm -f -- "$evidence" 2>/dev/null || true; fi
+  if [[ -f "$evidence" && ! -L "$evidence" ]]; then
+    ( print -u2 -- "→ 証跡（${evidence:t}）を失敗の中身に書き直せず、消せもしない。PR に貼らない（手で消す）: $evidence" ) || true
+  fi
+  return 0
 }
 unresolved_note=""
 if [[ "$prev_v" == 'VERDICT: NEEDS_FIX' ]]; then
@@ -200,7 +212,9 @@ if (( skip_same )); then
   fi
   for f in "$log" "$json" "$err" "$evidence" "$body_log"; do lanes_rotate_log "$f"; done
   [[ "$(rvd_snapshot "$wt")" == "$tree" && "$(review_context)" == "$context" ]] || lanes_die "省略判定中に内容・指示が変化した。再実行する"
-  # 証跡は変数に作ってから 1 回で書く。証跡・ログのどちらかを書けなければ、前回の結果を使ったことにしない（EXIT:3・VERDICT: NONE）
+  # 証跡は変数に作ってから 1 回で書く。順番は通常の確定と同じ: ログ → 証跡 → 終了記録（.done。一時ファイルから置き換え、読み戻して
+  # 確かめる）→ 標準出力の表示。どれかを書けなければ、前回の結果を使ったことにしない（EXIT:3・VERDICT: NONE）。書いた分は失敗の中身に
+  # 書き直す（合格の証跡・ログ・.done を残さない）。ログ・証跡はどちらも一時ファイルから置き換える（同じ名前のフォルダなどがあれば書かない）
   ev_text="$(
     print -- "## Gemini レビュー証跡（$label）"
     print -- "- $prev_v"
@@ -212,14 +226,33 @@ if (( skip_same )); then
     print -- "- 実行: $(lanes_now) / 約 0 分 / EXIT:0"
     print -- "- HEAD: ${prev_head:0:12} → ${prev_head:0:12} / 作業ツリー差分行 0"
   )" || ev_text=""
-  if [[ -n "$ev_text" ]] && print -r -- "$ev_text" | publish_to "$evidence" \
-      && print -r -- "$ev_text"$'\n'"EXIT:0"$'\n'"$prev_v" > "$log"; then
-    print -r -- "$ev_text"
+  skip_fail=""
+  if [[ -z "$ev_text" ]]; then
+    skip_fail="証跡（${evidence:t}）を作れない"
+  elif ! print -r -- "$ev_text"$'\n'"EXIT:0"$'\n'"$prev_v" | publish_to "$log"; then
+    skip_fail="ログ（${log:t}）"
+  elif ! print -r -- "$ev_text" | publish_to "$evidence"; then
+    skip_fail="証跡（${evidence:t}）"
+  else
     lanes_mark_done 0 "$prev_v" "skip-same-head round=$round"
-    exit 0
+    if (( LANES_DONE_OK )); then
+      print -r -- "$ev_text"
+      exit 0
+    fi
+    skip_fail="終了記録（${LANES_DONEFILE:t}）"
   fi
-  print -u2 -- "→ 記録を書けなかった（証跡 ${evidence:t}・ログ ${log:t}）。前回の結果を使ったことにしない。logs/ の権限・空きを確かめて回し直す"
-  lanes_mark_done 3 "VERDICT: NONE" "skip-same-head round=$round / 記録を書けない"
+  print -u2 -- "→ 記録を書けなかった（$skip_fail）。前回の結果を使ったことにしない。logs/ の権限・空きを確かめて回し直す"
+  fail_text="## Gemini レビュー証跡（$label）"$'\n'"- VERDICT: NONE"$'\n'"- レビューエンジン: gemini"
+  fail_text+=$'\n'"- モード: skip-same-head（前回 round と同じ head ${prev_head:0:12}。前回の $prev_v は使わない）/ round=$round"
+  fail_text+=$'\n'"- 実行: $(lanes_now) / 約 0 分 / EXIT:3"$'\n'"- 記録の確定: できなかった（記録を書けない: $skip_fail）"
+  withdraw_evidence "$fail_text"
+  print -r -- "$fail_text"$'\n'"EXIT:3"$'\n'"VERDICT: NONE" | publish_to "$log" || print -u2 -- "→ ログ（${log:t}）も書けない"
+  if (( ${LANES_DONE_WRITTEN:-0} )); then
+    lanes_rewrite_done 3 "VERDICT: NONE" "skip-same-head round=$round / 記録を書けない: $skip_fail"
+  else
+    lanes_mark_done 3 "VERDICT: NONE" "skip-same-head round=$round / 記録を書けない: $skip_fail"
+  fi
+  print -r -- "$fail_text"
   exit 3
 fi
 if (( dry )); then
@@ -676,22 +709,20 @@ evidence_text() {
   print -- "- ログ: $log（本文）/ $body_log（最後の応答）/ $json（生）/ $final（渡した全文）"
   print -- "- 作業場所（scratch）: $scratch（${LANES_BASE_BRANCH:-develop} へのマージ後の cleanup で削除）"
 }
-# 終了記録（.done）を今回の値で書けたか（普通のファイルで、1 行目が EXIT:<n>・2 行目が判定）。lanes_mark_done は書けなくても止まらない
-done_written() {
-  local f="${LANES_DONEFILE:-}" first="" second=""
-  [[ -n "$f" && -f "$f" && ! -L "$f" ]] || return 1
-  { IFS= read -r first && IFS= read -r second; } < "$f" || return 1
-  [[ "$first" == "EXIT:$1" && "$second" == "$2" ]]
-}
-
 # ---- 記録の確定 ----
 # 確定するのは、agy が 0 で終わり、VERDICT が CLEAN か NEEDS_FIX で、ここまでの記録（公開ログ・後回し票の写し）が全部書けたときだけ。
-# 順番: 書く先の確認 → ログの末尾（確定見込みの判定）→ 再利用の記録（rvd_save_state）→ 証跡 → 後回し票 → 終了記録（.done。読み戻して確かめる）
-# 合格の証跡と標準出力の表示は、全部が書けてから出す。途中で失敗したら、確定した分（再利用の記録・後回し票）を元に戻し、
-# 証跡を失敗（VERDICT: NONE・EXIT:3 と理由）で書き直し、ログの末尾にも失敗の判定を足す（合格の表示を残さない）
+# 順番: 書く先の確認 → ログの末尾（確定見込みの判定）→ 確認中の記録の写し → 証跡（<label>.evidence.md）→ 後回し票（該当時）
+#       → 終了記録（.done。一時ファイルから置き換え、読み戻して確かめる）→ 再利用の記録（rvd_save_state）→ 標準出力の合格の表示。
+# 再利用の記録を最後に確定するのは、次の起動が前回の結果を使える（同じ HEAD の省略・delta）ようになるのを、PR に貼る証跡・後回し票・
+# 終了記録が全部揃った後だけにするため。それより前に止まったら（中断・強制終了を含む）、記録は確認中（IN_PROGRESS）のまま残り、
+# 次の起動は前回の結果を使わずに回す。終了記録を置いた後・再利用の記録の確定の前に中断されたときは、終了記録・証跡は合格のまま
+# （レビューは終わっていて、成果物も揃っている）で、再利用の記録だけが確認中のまま残る（次の起動は省略せずに回す。安全側）。
+# 途中で失敗したら、公開した分を取り下げる: 再利用の記録は確認中の写しへ戻し（戻せなければ消す）、後回し票は公開前の中身へ戻し、
+# 証跡を失敗（VERDICT: NONE・EXIT:3 と理由）で書き直し（書き直せなければ消す）、ログの末尾に失敗の判定を足し、合格で置いた終了記録も
+# EXIT:3・VERDICT: NONE で書き直す（_common.sh の lanes_rewrite_done。書き直せなければ消す）。合格の表示は残さない
 statef="$(rvd_state_file "$logdir" "$series")"
 final_rc=$rc; done_verdict="$verdict"; done_note="gemini rc=$rc agy_rc=$agy_rc gate=$gate $sevsum"
-fail_reason=""; tail_written=0; state_saved=0; done_lost=0; inprog_copy=""; ev_text=""
+fail_reason=""; tail_written=0; state_tried=0; inprog_copy=""; ev_text=""
 finalize=0
 (( rc == 0 )) && [[ "$verdict" == 'VERDICT: CLEAN' || "$verdict" == 'VERDICT: NEEDS_FIX' ]] && finalize=1
 if (( finalize )); then
@@ -712,26 +743,25 @@ elif (( finalize )); then
     fail_reason="記録を書けない: ログの末尾（${log:t}）"
   else
     tail_written=1
-    # 確定に失敗したら戻せるよう、確認中（IN_PROGRESS）の記録を先に写しておく
+    # 確定に失敗したら戻せるよう、確認中（IN_PROGRESS）の記録を先に写しておく（写せなければ何も公開しない）
     if ! { inprog_copy="$(mktemp "${LANES_SCRATCH%/}/review-state.XXXXXX")" && cat -- "$statef" > "$inprog_copy"; }; then
       fail_reason="記録を確定できない: 確認中の再利用の記録（${statef:t}）を写せない"
-    elif ! rvd_save_state "$logdir" "$series" "$round" "$head_after_full" "$verdict" "$gate" "$label" "$context" "$snapshot_after" "$review_base" "$log" "$pending_note" "$blocking_previous"; then
-      fail_reason="記録を確定できない: 再利用の記録（${statef:t}）"
+    elif ! print -r -- "$ev_text" | publish_to "$evidence"; then
+      fail_reason="記録を書けない: 証跡（${evidence:t}）"
+    elif [[ -n "$fu_stage" ]] && ! publish_to "$fu_pub" < "$fu_stage"; then
+      fail_reason="記録を書けない: 後回し票（${fu_pub:t}）"
     else
-      state_saved=1
-      if ! print -r -- "$ev_text" | publish_to "$evidence"; then
-        fail_reason="記録を書けない: 証跡（${evidence:t}）"
-      elif [[ -n "$fu_stage" ]] && ! publish_to "$fu_pub" < "$fu_stage"; then
-        fail_reason="記録を書けない: 後回し票（${fu_pub:t}）"
+      [[ -z "$fu_stage" ]] || fu_published=1
+      lanes_mark_done "$final_rc" "$done_verdict" "$done_note"
+      if (( ! LANES_DONE_OK )); then
+        fail_reason="記録を書けない: 終了記録（${LANES_DONEFILE:t}）"
       else
-        [[ -z "$fu_stage" ]] || fu_published=1
-        lanes_mark_done "$final_rc" "$done_verdict" "$done_note" || true
-        if done_written "$final_rc" "$done_verdict"; then
+        state_tried=1
+        if rvd_save_state "$logdir" "$series" "$round" "$head_after_full" "$verdict" "$gate" "$label" "$context" "$snapshot_after" "$review_base" "$log" "$pending_note" "$blocking_previous"; then
           print -r -- "$ev_text"
           exit $final_rc
         fi
-        # 終了記録を書けなかった（.done は書き直せない）。ここまでの確定を戻し、終了記録の無い実行を次の起動が再利用しないようにする
-        done_lost=1; fail_reason="記録を書けない: 終了記録（${LANES_DONEFILE:t}）"
+        fail_reason="記録を確定できない: 再利用の記録（${statef:t}）"
       fi
     fi
   fi
@@ -740,8 +770,9 @@ if [[ -n "$fail_reason" ]]; then
   print -u2 -- "→ $fail_reason。再利用の記録は確定しない（次の起動は前回の結果を使わずに回す）。logs/ の権限・空きを確かめて回し直す"
   (( final_rc != 0 )) || final_rc=3
   done_verdict="VERDICT: NONE"; done_note+=" / $fail_reason"
-  # 確定まで進めた分を元に戻す。再利用の記録は確認中へ（戻せなければ消す＝次の起動は前回の記録を使わない）、後回し票は公開前の中身へ
-  if (( state_saved )) && ! rvd_state_write "$statef" < "$inprog_copy" 2>/dev/null; then
+  # 確定を試みた再利用の記録は、確認中の写しへ戻す（置き換えは丸ごとなので、戻せば途中の中身は残らない）。戻せなければ消す
+  # （次の起動は前回の記録を使わない）
+  if (( state_tried )) && ! rvd_state_write "$statef" < "$inprog_copy" 2>/dev/null; then
     if rm -f -- "$statef" 2>/dev/null; then
       print -u2 -- "→ 再利用の記録（${statef:t}）を確認中へ戻せないので消した（次の起動は前回の記録を使わずに full で回す。前回の未解決指摘は引き継がれない）"
     else
@@ -758,7 +789,7 @@ fi
 fu_skip_note="（確定しなかったので保存していない）"
 ev_text="$(evidence_text "$done_verdict" "$final_rc" "$fail_reason")" \
   || ev_text="## Gemini レビュー証跡（$label）"$'\n'"- $done_verdict"$'\n'"- 実行: $started 開始 / EXIT:$final_rc${fail_reason:+ / 記録の確定: できなかった（$fail_reason）}"
-print -r -- "$ev_text" | publish_to "$evidence" || print -u2 -- "→ 証跡（${evidence:t}）を書けない"
+withdraw_evidence "$ev_text"
 if (( tail_written )); then
   # 先に書いた確定見込みの判定は採用しない（ログの最後の行を今回の結果にする）
   tail_text="[run-gemini-review] $(lanes_now) 記録の確定に失敗（$fail_reason）→ 上の判定は採用しない"$'\n'"EXIT:$final_rc"$'\n'"$done_verdict"
@@ -766,6 +797,11 @@ else
   tail_text=$'\n'"----"$'\n'"$ev_text"$'\n'"finished: $(lanes_now)"$'\n'"EXIT:$final_rc"$'\n'"$done_verdict"
 fi
 print -r -- "$tail_text" >> "$log" || print -u2 -- "→ ログの末尾（${log:t}）を書けない"
+# 終了記録: まだ置いていなければ今回の結果で置く。合格で置いた後に確定に失敗したなら、今回の結果で書き直す
+if (( ${LANES_DONE_WRITTEN:-0} )); then
+  lanes_rewrite_done "$final_rc" "$done_verdict" "$done_note"
+else
+  lanes_mark_done "$final_rc" "$done_verdict" "$done_note"
+fi
 print -r -- "$ev_text"
-(( done_lost )) || lanes_mark_done "$final_rc" "$done_verdict" "$done_note" || true
 exit $final_rc
