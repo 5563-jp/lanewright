@@ -436,6 +436,8 @@ def main_only(name):
     return wt, first
 def dry(script, wt, label, *args):
     env = dict(os.environ, RVD_CAPTURE=str(root / 'unused.json'), RVD_PROMPT=str(prompt), RVD_WT=str(wt), CHK_CACHE=str(root / 'chk-cache' / 'passed.tsv'))
+    # 本物の起動（launch）と同じく、呼び出し元の確認コマンドの設定を持ち込まない（再利用の条件に入るので、持ち込むと同じ HEAD でも full になる）
+    env.pop('LANES_CHECK_CMD', None)
     return subprocess.run(['zsh', '-f', str(lanes / script), str(wt), str(prompt), label, *args, '--dry-run'],
                           env=env, capture_output=True, text=True, timeout=30)
 wt, first = main_only('main-only')
