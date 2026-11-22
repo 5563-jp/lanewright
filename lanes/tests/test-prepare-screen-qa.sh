@@ -107,7 +107,12 @@ chk = os.path.join(lanes_dir, "chk-run.sh")
 with open(chk, "r", encoding="utf-8") as f:
     src = f.read()
 # 親の python3 は -I（作業場所のモジュールを読まない）で起動している。その呼び出しの直後から切り出す
-py_code = src.split("python3 -I - \"$wt\" \"$o\" \"$cache\" \"$lanes_dir\" \"$port\" \"$generated_def\" \"${output_names[@]}\" <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+# （引数は chk-run.sh の read_state() と同じ並び。7 番目の read_mode は full（既定）か input）
+read_state_call = "python3 -I - \"$wt\" \"$o\" \"$cache\" \"$lanes_dir\" \"$port\" \"$generated_def\" \"$read_mode\" \"${output_names[@]}\" <<'PY'\n"
+assert src.count(read_state_call) == 1, "chk-run.sh の read_state() の呼び出しが見つからない（引数の並びが変わった）"
+py_code = src.split(read_state_call, 1)[1].split("\nPY\n", 1)[0]
+# 再利用の判定（cache_fp）まで計算させる。input は入力の指紋で止まり cache_fp を出さない
+read_mode = "full"
 # 生成物の定義は chk-run.sh と同じ取り方（_common.sh の lanes_generated_def）で受け取る（ここに写しを書かない）
 generated_def = subprocess.check_output(
     ["zsh", "-fc", 'source "$LANES_DIR/_common.sh"; lanes_generated_def'],
@@ -142,7 +147,7 @@ tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=wt, text
 env = {**os.environ, "CHK_CACHE": cache, "LANES_CHECK_CMD": "./node_modules/.bin/cli", "CHK_CHECK_SRC": "LANES_CHECK_CMD", "LANES_CHK_ENV_LOADED": "1"}
 output_names = ["fetch.log", "merge.log", "check.log", "check-state.json"]
 r_fp = subprocess.run(
-    ["python3", "-", wt, out, cache, lanes_dir, "4173", generated_def, *output_names],
+    ["python3", "-", wt, out, cache, lanes_dir, "4173", generated_def, read_mode, *output_names],
     input=py_code, text=True, capture_output=True, env=env, errors="replace"
 )
 assert r_fp.returncode == 0, r_fp.stderr
@@ -180,7 +185,7 @@ for rel in generated + inputs:
         f.write("v1\n")
 genv = {**env, "LANES_CHECK_CMD": "true"}
 def gstate():
-    r = subprocess.run(["python3", "-", gwt, out, cache, lanes_dir, "4173", generated_def, *output_names],
+    r = subprocess.run(["python3", "-", gwt, out, cache, lanes_dir, "4173", generated_def, read_mode, *output_names],
                        input=py_code, text=True, capture_output=True, env=genv, errors="replace")
     assert r.returncode == 0, r.stderr
     st = dict(line.split("=", 1) for line in r.stdout.strip().splitlines())

@@ -282,20 +282,37 @@ CODEX_REVIEW_SANDBOX=workspace-write STUB_RUN="mkdir -p '$cdx_common/info' && pr
 grep -q 'VERDICT: NEEDS_FIX' "$wt/logs/$LAST_LABEL.done" || fail "Codex レビュー中の info/attributes の変更で NEEDS_FIX にならない"
 rm -f -- "$cdx_common/info/attributes"
 pass "Codex レビューの実行中の git 管理フォルダ側の変更（info/attributes）も NEEDS_FIX・EXIT:4"
-# 再利用の記録（logs/.<series>.review-state）を子が偽造したら、元の中身に戻して不合格にする（次の auto で偽の CLEAN を使わない）
+# 再利用の記録（logs/.<series>.review-state）を子が偽造したら、元の中身に戻したうえで前回の CLEAN を失効させて不合格にする
+# （次の auto で偽の CLEAN も、書き込みの試みで不合格になった回より前の CLEAN も使わない）
 rs_run() { local want="$1" rc=0; shift
   LANES_TOOLS="claude codex" CODEX_REVIEW_SANDBOX=workspace-write zsh -f "$LANES_DIR/run-codex-review.sh" "$wt" "$T/prompt.md" "$@" > "$T/rs.out" 2>&1 || rc=$?
   (( rc == want )) || { cat "$T/rs.out" >&2; fail "run-codex-review.sh $* expected=$want got=$rc"; }; }
 forge='{"last_round": "0", "last_head": "forged", "last_verdict": "VERDICT: CLEAN"}'
 rs_run 0 rstate
 state="$wt/logs/.rstate.review-state"; [[ -f "$state" ]] || fail "1 回目のレビューの記録が無い"
-state_save="$(<"$state")"
+# 対照: 偽造の前は、同じ HEAD の通常の起動が前回の CLEAN を使って省略する（下の「偽造の後は使わない」が空振りでないことの確認）
+rs_run 0 rstate --dry-run
+grep -q '同じ head をもう一度レビューしない' "$T/rs.out" || fail "偽造の前の同じ HEAD で前回の CLEAN を使う省略にならない（対照が崩れた）"
+cp -p "$state" "$T/rstate.save"
 STUB_RUN="printf '%s\n' '$forge' > '$state'" rs_run 4 rstate --force
-[[ "$(<"$state")" == "$state_save" ]] || fail "子が偽造した再利用の記録を元に戻さない"
+# 子の前の中身に戻したうえで、last_exit を今回の終了コード（4）にし、失効の理由（last_invalidated）を足しただけ（ほかの値は子の前と同じ）
+python3 -I - "$state" "$T/rstate.save" <<'PY2' || fail "子が偽造した再利用の記録を元に戻して前回の CLEAN を失効させない"
+import json, sys
+now, before = (json.load(open(p, encoding="utf-8")) for p in sys.argv[1:3])
+rest = lambda d: {k: v for k, v in d.items() if k not in ("last_exit", "last_invalidated")}
+assert before.get("last_verdict") == "VERDICT: CLEAN" and before.get("last_exit") == 0, before
+assert now.get("last_exit") == 4 and "last_invalidated" in now, now
+assert rest(now) == rest(before), (now, before)
+PY2
 grep -q 'VERDICT: NEEDS_FIX' "$wt/logs/rstate.done" || fail "再利用の記録の偽造で NEEDS_FIX にならない"
+# 偽造の後の通常の起動（--force なし）は、同じ HEAD でも失効した前回の CLEAN を使わずにレビューし直す
+: > "$STUB_LOG"
+rs_run 0 rstate
+! grep -q 'skip-same-head' "$wt/logs/rstate.done" && grep -q '"review"' "$STUB_LOG" \
+  || fail "偽造の後の通常の起動が、同じ HEAD で失効した前回の CLEAN を使った（レビューし直さない）"
 STUB_RUN="printf '%s\n' '$forge' > '$wt/logs/.rstate2.review-state'" rs_run 4 rstate2
 [[ ! -e "$wt/logs/.rstate2.review-state" ]] || fail "前回の記録が無いのに、子が作った偽の記録を残した"
-pass "Codex レビューの子が再利用の記録を偽造したら、元に戻して（無ければ消して）EXIT:4"
+pass "Codex レビューの子が再利用の記録を偽造したら、元に戻して前回の CLEAN を失効させ（無ければ消して）EXIT:4。次の通常の起動は前回の CLEAN を使わない"
 
 # ---- 7. 入口の振り分け（--dry-run で行き先だけ見る）----
 entry() {   # <期待 rc> <構成> <入口> [引数...]
