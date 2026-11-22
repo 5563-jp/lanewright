@@ -297,8 +297,8 @@ cp -p "$state" "$T/rstate.save"
 STUB_RUN="printf '%s\n' '$forge' > '$state'" rs_run 4 rstate --force
 # 子の前の中身に戻したうえで、last_exit を今回の終了コード（4）にし、失効の理由（last_invalidated）を足しただけ（ほかの値は子の前と同じ）
 python3 -I - "$state" "$T/rstate.save" <<'PY2' || fail "子が偽造した再利用の記録を元に戻して前回の CLEAN を失効させない"
-import json, sys
-now, before = (json.load(open(p, encoding="utf-8")) for p in sys.argv[1:3])
+import json, pathlib, sys
+now, before = (json.loads(pathlib.Path(p).read_text(encoding="utf-8")) for p in sys.argv[1:3])
 rest = lambda d: {k: v for k, v in d.items() if k not in ("last_exit", "last_invalidated")}
 assert before.get("last_verdict") == "VERDICT: CLEAN" and before.get("last_exit") == 0, before
 assert now.get("last_exit") == 4 and "last_invalidated" in now, now
