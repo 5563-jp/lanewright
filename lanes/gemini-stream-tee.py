@@ -14,10 +14,19 @@
 - agy の標準入力は /dev/null、標準エラーはこの受け取り役と同じ先（ランチャの logs/<label>.stderr.log）。ほかの番号は渡さない。
 - 終了コードは agy のまま（シグナルで止まったら 128+番号）。準備に失敗したら agy を起動せずに 3。
   コマンドの引数（指示書の全文を含む）は、エラーにも書き出さない。
+- agy の終了は、標準出力のパイプの終端とは別に見張る。agy が起動した補助のプロセスが標準出力を受け継いだまま残ると、agy が
+  終わってもパイプは閉じない（読み続けると、正常な result が届いていても無出力で止まり、外側の監督役も子孫の回収に進めない）。
+  agy が終わったら、受け取り済みの出力を最大 DRAIN_SEC 秒だけ回収してから終わる（パイプの終端が先に来ればそこで終わる）。
+  この受け取り役が終わると、外側の監督役（_common.sh の LANES_PROCESS_GUARD）が残った子孫を止めて回収する。
 """
 import os
+import selectors
 import subprocess
 import sys
+import time
+
+# agy の終了後に、パイプに残った出力を回収する上限（秒）。agy が終わる前に書いた分はパイプの中にあるので、すぐに読み終わる
+DRAIN_SEC = 2.0
 
 
 def write_all(fd, data):
@@ -60,7 +69,25 @@ def main():
         return 3
     private_ok = True
     src = child.stdout.fileno()
+    sel = selectors.DefaultSelector()
+    sel.register(src, selectors.EVENT_READ)
+    exited_at = None
     while True:
+        # agy の終了をパイプの終端とは別に見る（補助のプロセスがパイプを持ち続けても、agy が終われば終わる）
+        if exited_at is None and child.poll() is not None:
+            exited_at = time.monotonic()
+        if exited_at is None:
+            wait = 0.5
+        else:
+            wait = DRAIN_SEC - (time.monotonic() - exited_at)
+            if wait <= 0:
+                break
+        try:
+            ready = sel.select(wait)
+        except InterruptedError:
+            continue
+        if not ready:
+            continue
         try:
             chunk = os.read(src, 1 << 16)
         except InterruptedError:
@@ -78,6 +105,8 @@ def main():
             except OSError:
                 os.close(public)
                 public = None
+    sel.close()
+    # 読み口を閉じる（残った補助のプロセスがこのパイプへ書いても、もう受け取らない）
     child.stdout.close()
     rc = child.wait()
     if public is not None:

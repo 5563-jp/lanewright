@@ -135,7 +135,9 @@ if (( dry )); then lanes_dry_run_target "$wt" "$logdir" "$label" "$final"; fi
 if (( dry )); then scratch="$(lanes_scratch_path "$wt" "$label")"; else lanes_scratch_prepare "$wt" "$label" gemini; scratch="$LANES_SCRATCH"; fi
 
 lanes_require_prompt "$prompt"
+# agy の場所はここで絶対パスに確定する（_common.sh の lanes_resolve_bin。下の --help の点検と、子の作業場所で起動する cmd に同じ値を使う）
 lanes_check_gemini_subscription
+[[ "$GEMINI_BIN" == /* ]] || lanes_die "agy の場所を絶対パスで確かめられない: $GEMINI_BIN"
 # --sandbox が無効になる環境では走らせない。対象は Mac の端末サンドボックス。
 [[ "$(uname -s)" == Darwin && -x /usr/bin/sandbox-exec ]] || lanes_die "端末サンドボックスを強制できない環境 → 起動禁止"
 /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny file-write*)' /usr/bin/true 2>/dev/null \
@@ -198,13 +200,13 @@ if (( ! dry )); then archive_message; fi
   print -- "# 案件固有の指示"
   print -- ""
   cat "$prompt"
-} > "$final"
+} | lanes_write_new_at "${final:h}" "${final:t}" || lanes_die "結合した指示書を書けない: $final"
 
 # 設定は起動単位で渡す。利用者の許可設定より deny が優先され、設定ファイルを変更しない。
 gem_settings='{"permissions":{"deny":["mcp(*)"]},"allowNonWorkspaceAccess":false,"enableTerminalSandbox":true,"modelProvider":"","useG1Credits":false}'
 # 環境変数の effort が設定ファイルと違う値で勝っていたら知らせる（渡す値は変えない）
 lanes_effort_override_note GEMINI_EFFORT
-cmd=("$GEMINI_BIN")
+cmd=("$GEMINI_BIN")   # 点検（--help）したのと同じ絶対パス
 if [[ -n "$GEMINI_MODEL" ]]; then cmd+=(--model "$GEMINI_MODEL"); fi
 if [[ -n "$GEMINI_EFFORT" ]]; then cmd+=(--effort "$GEMINI_EFFORT"); fi
 cmd+=(--mode accept-edits --sandbox --settings "$gem_settings"
@@ -212,7 +214,7 @@ cmd+=(--mode accept-edits --sandbox --settings "$gem_settings"
 # agy を新しいプロセスグループで起動する（止めるときにグループごと止められるように）
 if (( dry )); then
   print -- "[dry-run] scratch: $scratch"
-  print -- "[dry-run] （子だけ cd ${(q)wt}）ANTIGRAVITY_HEADLESS=true TMPDIR=${(q)scratch}/ LANES_SCRATCH=${(q)scratch} GIT_DIR=${(q)gitdir} GIT_WORK_TREE=${(q)wt} GIT_CONFIG_GLOBAL=${(q)scratch}/gitconfig lanes_start_child_in ${(q)wt} python3 -I gemini-stream-tee.py ${(q)logdir} ${(q)json:t} -- ${(q)cmd[@]} -p \"\$(<${(q)final})\" < /dev/null >（親専用の写し）2> ${(q)err}"
+  print -- "[dry-run] （子だけ cd ${(q)wt}）ANTIGRAVITY_HEADLESS=true TMPDIR=${(q)scratch}/ LANES_SCRATCH=${(q)scratch} GIT_DIR=${(q)gitdir} GIT_WORK_TREE=${(q)wt} GIT_CONFIG_GLOBAL=${(q)scratch}/gitconfig lanes_start_child_in ${(q)wt} ${(q)LANES_PYTHON3} -I gemini-stream-tee.py ${(q)logdir} ${(q)json:t} -- ${(q)cmd[@]} -p \"\$(<${(q)final})\" < /dev/null >（親専用の写し）2> ${(q)err}"
   print -- "[dry-run] 見張り: idle（root agent idle）の後 子が無く json が ${idle_grace} 秒動かなければ異常終了 / 出力 ${noout_sec} 秒なしで EXIT:8 / --print-timeout $print_timeout / 確認間隔 ${poll} 秒"
   print -- "[dry-run] 必須検証（サンドボックス外・commit 前）: $verify"
   print -- "[dry-run] 終了後: 子孫を停止 → 書き込み・保存範囲検査 → 必須検証 → 今回の COMMIT_MSG.txt と許可範囲の変更だけを commit（異常終了の救済は EXIT:3・push なし）"
@@ -267,8 +269,8 @@ out, wt, scr, body_out = sys.argv[1:5]
 allow_incomplete = sys.argv[5] == '1'
 srcs = sys.argv[6:]
 wt = os.path.realpath(wt); scr = os.path.realpath(scr)
-status, body, error, turns, usage, asks = "NONE", "", "", 0, {}, 0
-outside, suspect, writes, invalid = [], [], set(), []
+status, body, error, turns, usage = "NONE", "", "", 0, {}
+outside, suspect, writes, invalid, asks = [], [], set(), [], set()
 WRITE_HINT = ("write", "replace", "edit", "delete", "move", "rename", "create", "append", "copy", "patch")
 GONE_HINT = ("delete", "move", "rename")   # 消す・動かす系は「外に無い」こと自体が書き込みの証拠なので実在を問わない
 PATH_KEYS = ("file", "path", "dir", "directory", "target", "destination")
@@ -279,17 +281,25 @@ def resolve(p):
     return os.path.realpath(p if os.path.isabs(p) else os.path.join(wt, p))
 def inside(rp):
     return rp == wt or rp.startswith(wt + os.sep) or rp == scr or rp.startswith(scr + os.sep)
-for src in srcs:
+for src_index, src in enumerate(srcs):
+    # バイト列のまま改行ごとに区切って、1 行ずつ UTF-8 として読む（末尾の文字切れなどの不正行は監査の不備として数え、その前後の
+    # 正常な行の書き込み先は失わない。全体を一度に読むと、1 か所の文字切れで全部の行を捨てて、外への書き込みを見落とす）
     try:
-        lines = open(src, encoding="utf-8").read().splitlines()
-    except (OSError, UnicodeError):
+        with open(src, "rb") as f:
+            lines = f.read().split(b"\n")
+    except OSError:
         invalid.append('ログを読み取れない'); continue
+    if lines and lines[-1] == b"":
+        lines.pop()
     if not lines:
         invalid.append('ログが空'); continue
     results = 0
     last_event = None
     inits, first_init = 0, False
-    for index, line in enumerate(lines):
+    for index, raw_line in enumerate(lines):
+        try: line = raw_line.decode("utf-8")
+        except UnicodeError:
+            invalid.append('文字コードの不正行（末尾の文字切れなど）'); continue
         try: d = json.loads(line)
         except (ValueError, TypeError):
             invalid.append('JSON の不正行'); continue
@@ -319,7 +329,10 @@ for src in srcs:
         name = su.get("tool_name") or ""
         if not isinstance(name, str) or (su['step_type'] == 'tool' and not name.strip()):
             invalid.append('ツール名の形式が不正'); continue
-        if name.startswith("ask_"): asks += 1
+        if name.startswith("ask_"):
+            # 同じ呼び出しの経過の記録（何度も届く step_update）は 1 回に数える（Gemini レビューの監査と同じ。1 回目と再実行は分けて数える）
+            key = next((str(su[k]) for k in ("step_index", "step_id", "id", "tool_call_id") if k in su), None)
+            asks.add((src_index, key if key is not None else name + "\0" + json.dumps(su.get("tool_info"), sort_keys=True, ensure_ascii=False)))
         if su.get("step_type") != "tool" or not any(h in name.lower() for h in WRITE_HINT): continue
         info = su.get('tool_info')
         params = info.get('parameters') if isinstance(info, dict) else None
@@ -362,7 +375,7 @@ with new_file(body_out) as f:
     f.write(body or "(応答なし)")
 with new_file(out) as f:
     one = " ".join(str(error).split())[:300]
-    f.write(f"status={status}\nturns={turns}\nusage={json.dumps(usage)}\nask_tools={asks}\nwrites={len(writes)}\nerror={one}\n")
+    f.write(f"status={status}\nturns={turns}\nusage={json.dumps(usage)}\nask_tools={len(asks)}\nwrites={len(writes)}\nerror={one}\n")
     for o in sorted(set(outside)): f.write(f"outside={o}\n")
     for s in sorted(set(suspect)): f.write(f"suspect={s}\n")
     f.write(f"audit_errors={len(invalid)}\n")
