@@ -70,7 +70,10 @@ gem_kill_all() { lanes_kill_child; }
 # （lanes_record_child は起動時の中身＋今の子だけを書き直すので、前の子の記録は残らない）
 gem_record_child() { lanes_record_child "$1"; }
 
-mtime_of() { local m; m="$(stat -f %m "$1" 2>/dev/null)" || m=0; print -- "${m:-0}"; }
+# 更新時刻は zsh 組み込みの zstat で取る（PATH に依らない。GNU の stat が先にあると stat -f %m は時刻を返さず、出力が増えていても
+# 無出力の見張りが止めてしまう。lanes-status.sh と同じ）。zstat だけを読み込む（外の stat コマンドを組み込みで隠さない）
+zmodload -F zsh/stat b:zstat
+mtime_of() { local m; m="$(zstat +mtime "$1" 2>/dev/null)" || m=0; [[ "$m" == <-> ]] || m=0; print -- "$m"; }
 idle_count() { local n; n="$(grep -c 'root agent idle' "$1" 2>/dev/null)" || n=0; print -- "${n:-0}"; }
 
 # agy を 1 回走らせて見張る。<json> <stderr>。結果: GEM_RC / GEM_IDLE_KILLED / GEM_NOOUT / GEM_SECS
