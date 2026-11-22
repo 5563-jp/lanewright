@@ -19,6 +19,9 @@
 #      その後の起動は古い CLEAN（記録・過去の証跡）を使わない。前回 NEEDS_FIX の未解決指摘は引き継ぐ。成功したときだけ確定する
 #  13. 本文の途中の独立した行の VERDICT（共通の判定の規則は維持。Claude レビューは今までどおり）
 #  14. 生死の見張り（lanes-status / lanes-monitor）・起動前点検（lanes-doctor.sh）・役割の表示（lanes-roles.sh --print）
+#  15. 記録の確定と安全の直し（round 1 の指摘）: 今回の NEEDS_FIX を前回分の後回しで上書きしない・確定に失敗したら合格の証跡を残さない・
+#      dry-run の書き込み先・前回の本文を読み切ってから IN_PROGRESS・親の python を worktree から切り離す・失格の回の後回し票・
+#      壊れた行の前の書き込みの記録・HEAD を読めない・.done を書けない・点検の codex・GNU の stat
 set -euo pipefail
 # git の環境変数を外し、一時リポの外へ git が上っていかないようにする（本物のリポを書き換えない）
 source "${0:A:h}/_git-isolate.sh"; lanes_test_git_isolate
@@ -28,7 +31,7 @@ scratch_base="${LANES_SCRATCH:-${TMPDIR:-}}"
 T="$(mktemp -d "${scratch_base%/}/test-gemrev.XXXXXX")"; T="${T:A}"
 trap 'st=$?; (( st != 0 )) || rm -rf -- "$T"' EXIT
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$LANES_DIR" "$T" <<'PY'
-import json, os, pathlib, re, signal, subprocess, sys, time
+import json, os, pathlib, re, shutil, signal, subprocess, sys, time
 lanes, T = map(pathlib.Path, sys.argv[1:3])
 stubs = lanes / 'tests' / 'stubs'
 fixtures = lanes / 'tests' / 'fixtures' / 'gemini-review'
@@ -77,6 +80,13 @@ if mut == 'commit':
 if mut == 'git-config': git('config', 'core.hooksPath', 'x')
 if mut == 'git-tag': git('tag', 'tag-by-review')
 if mut == 'gitlink': pathlib.Path('.git').write_text('gitdir: /nonexistent/elsewhere\n')
+lbl = os.environ.get('GT_LABEL', '')
+if mut == 'lose-head':
+    # 今の枝の参照を消す（レビューの後に HEAD を読めなくなる形）
+    git('update-ref', '-d', subprocess.check_output(['git', 'symbolic-ref', 'HEAD'], text=True).strip())
+if mut == 'plant-done-dir' and lbl: os.mkdir(f'logs/{lbl}.done')
+# 公開ログを読めなくする（書けるが読めない）。ランチャの再利用の記録の確定（本文の読み込み）だけを失敗させる
+if mut == 'log-unreadable' and lbl: os.chmod(f'logs/{lbl}.log', 0o200)
 if mut == 'hold':
     # 補助のプロセスが標準出力を受け継いだまま残る（agy が終わってもパイプが閉じない形）
     subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
@@ -104,6 +114,11 @@ if mut in ('write-tool', 'write-tools'):
     tool(4, 'write_file', 'ACTIVE', {'Path': 'x.txt'}); tool(4, 'write_file', 'ERROR', {'Path': 'x.txt'})
     if mut == 'write-tools':
         tool(5, 'edit_file', 'ERROR', {'Path': 'a.txt'}); tool(6, 'delete_file', 'ERROR', {'Path': 'a.txt'})
+if events == 'write_badutf8': tool(4, 'write_file', 'ERROR', {'Path': 'x.txt'})
+if events == 'drip':
+    # 出力を 1 秒ごとに少しずつ出し続ける（無出力の見張りが止めてはいけない形）
+    for i in range(int(os.environ.get('GT_SLEEP', '6'))):
+        ev({'event': 'step_update', 'step_update': {'step_index': 100 + i, 'state': 'DONE', 'step_type': 'system_message'}}); time.sleep(1)
 if events == 'idle':
     print('root agent idle', file=sys.stderr, flush=True); time.sleep(int(os.environ.get('GT_SLEEP', '8')))
 if events == 'sleep': time.sleep(int(os.environ.get('GT_SLEEP', '8')))
@@ -112,6 +127,9 @@ if events == 'bad_tool': ev({'event': 'step_update', 'step_update': {'step_type'
 if events != 'missing_result':
     ev({'event': 'result', 'result': {'status': 'ERROR' if events == 'error_status' else 'SUCCESS', 'response': body,
                                       'num_turns': 1, 'usage': {}}})
+if events == 'write_badutf8':
+    # 最後の行の文字が途中で切れた（UTF-8 の不完全なバイト列で終わる）
+    sys.stdout.buffer.write(b'{"event":"step_update","note":"\xe3\x81'); sys.stdout.flush()
 if events == 'dup_result': ev({'event': 'result', 'result': {'status': 'SUCCESS', 'response': body}})
 if events == 'nonterminal': ev({'event': 'step_update', 'step_update': {'step_index': 9, 'state': 'DONE', 'step_type': 'system_message'}})
 sys.exit(rc)
@@ -155,14 +173,14 @@ def make_env(body='問題なし\nVERDICT: CLEAN', mutation='', events='', rc=0, 
     if replay: e['GT_REPLAY'] = str(replay)
     e.update(env or {})
     return e
-def run(script, wt, label, *args, timeout=120, **kw):
+def run(script, wt, label, *args, timeout=120, cwd=None, **kw):
     capture.unlink(missing_ok=True)
     e = make_env(**kw)
     r = subprocess.run(['zsh', '-f', str(lanes / script), str(wt), str(prompt), *([label] if label else []), *args],
-                       env=e, capture_output=True, text=True, timeout=timeout)
+                       env=e, capture_output=True, text=True, timeout=timeout, cwd=cwd)
     cap = json.loads(capture.read_text()) if capture.exists() else None
     donef = pathlib.Path(wt) / 'logs' / (label + '.done') if label else None
-    done = donef.read_text() if donef and donef.exists() else ''
+    done = donef.read_text() if donef and donef.is_file() and not donef.is_symlink() else ''
     return r, cap, done
 def gem(wt, label, *args, **kw): return run('run-gemini-review.sh', wt, label, *args, **kw)
 def out(r): return f'rc={r.returncode}\n--- stdout\n{r.stdout[-2500:]}\n--- stderr\n{r.stderr[-2500:]}'
@@ -561,6 +579,157 @@ pr = roles({'LANES_TOOLS': 'claude gemini', 'LANES_REVIEW_ENGINE': 'gemini'})
 check('役割の表示: LANES_REVIEW_ENGINE=gemini の振り分け先と独立性を出す', 'run-gemini-review.sh へ振り分ける' in pr and '指定のレビュー役（LANES_REVIEW_ENGINE=gemini）の独立性: あり' in pr, pr)
 pr = roles({'LANES_TOOLS': 'claude codex'})
 check('役割の表示: gemini の無い構成では Gemini レビューの案内を出さない', 'Gemini レビュー' not in pr, pr)
+
+# ---- 15. 記録の確定と安全の直し ----
+# 15-1. round 3 以降、前回が P2 だけでも、今回の本文が重大度を読み取れない NEEDS_FIX なら、前回分の後回しで CLEAN にしない
+wt, first = repo('defer-new')
+r, cap, done = gem(wt, 'x-r2', body='- [P2] a.txt:1 前回の軽微な指摘\nVERDICT: NEEDS_FIX')
+check('用意: round 2 は P2 だけの NEEDS_FIX で確定', state(wt, 'x')['last_verdict'] == 'VERDICT: NEEDS_FIX', done)
+r, cap, done = gem(wt, 'x-r3', body='a.txt:5 に今回見つけた新しい問題がある（重大度の印なし）\n' + skip_line + '\nVERDICT: NEEDS_FIX')
+check('round 3: 前回が P2 だけでも、今回の本文が重大度を読み取れない NEEDS_FIX なら NEEDS_FIX のまま（後回し票も作らない）',
+      r.returncode == 0 and 'VERDICT: NEEDS_FIX' in done and note_gate(done) == 'FIX' and not (wt / 'logs/x.followups.md').exists(), out(r) + done)
+wt, first = repo('defer-ok')
+gem(wt, 'y-r2', body='- [P2] a.txt:1 前回の軽微な指摘\nVERDICT: NEEDS_FIX')
+r, cap, done = gem(wt, 'y-r3', body='新しい指摘なし\n' + skip_line + '\nVERDICT: CLEAN')
+fu = wt / 'logs/y.followups.md'
+check('round 3: 今回が CLEAN なら、前回の P2 を後回し票へ移して通す（今までどおり）',
+      r.returncode == 0 and 'VERDICT: CLEAN' in done and note_gate(done) == 'MERGE_WITH_FOLLOWUP' and fu.exists() and '前回の軽微な指摘' in fu.read_text(), out(r) + done)
+
+# 15-2. 再利用の記録を確定できなければ、証跡・ログの末尾・標準出力に合格を残さない（.done と同じ NONE / EXIT:3）
+wt, first = repo('fin-fail')
+r, cap, done = gem(wt, 'ff', mutation='log-unreadable', env={'GT_LABEL': 'ff'})
+logf = wt / 'logs/ff.log'; logf.chmod(0o644)
+ev_text, log_text = evidence(wt, 'ff'), logf.read_text()
+check('確定に失敗したら、.done・証跡・ログの末尾はどれも VERDICT: NONE / EXIT:3（合格の証跡を残さない）',
+      r.returncode == 3 and 'EXIT:3' in done and 'VERDICT: NONE' in done
+      and '- VERDICT: NONE' in ev_text and '- VERDICT: CLEAN' not in ev_text and 'EXIT:3' in ev_text and '記録の確定: できなかった' in ev_text
+      and log_text.rstrip().endswith('EXIT:3\nVERDICT: NONE') and '上の判定は採用しない' in log_text and '- VERDICT: CLEAN' not in r.stdout,
+      out(r) + done + ev_text + log_text[-600:])
+check('確定に失敗したら、再利用の記録は IN_PROGRESS のまま', state(wt, 'ff')['last_verdict'] == 'IN_PROGRESS', json.dumps(state(wt, 'ff'), ensure_ascii=False))
+r, cap, done = gem(wt, 'ff')
+check('次の通常の起動は回して CLEAN で確定する', r.returncode == 0 and cap is not None and state(wt, 'ff')['last_verdict'] == 'VERDICT: CLEAN'
+      and evidence(wt, 'ff').count('- VERDICT: CLEAN') == 1 and '- VERDICT: CLEAN' in r.stdout, out(r))
+# 同じ head の結果を使うときも、証跡を書けなければ合格にしない
+(wt / 'logs/ff.evidence.md').unlink(); (wt / 'logs/ff.evidence.md').mkdir()
+r, cap, done = gem(wt, 'ff')
+check('skip-same-head でも証跡を書けなければ EXIT:3・VERDICT: NONE（前回の結果を使ったことにしない）',
+      r.returncode == 3 and cap is None and 'VERDICT: NONE' in done and '記録を書けない' in done and '- VERDICT: CLEAN' not in r.stdout, out(r) + done)
+(wt / 'logs/ff.evidence.md').rmdir()
+
+# 15-3. dry-run でも書き込み先を確かめ、リンクを辿らない（Gemini レビュー・Gemini 実装）
+wt, first = repo('dry-link')
+elsewhere = T / 'dry-elsewhere'; elsewhere.mkdir()
+(wt / 'logs').symlink_to(elsewhere)
+r, cap, done = gem(wt, 'dl', '--dry-run')
+check('dry-run: logs/ が symlink なら書かない（EXIT:2・リンク先に何も作らない）', r.returncode == 2 and cap is None and list(elsewhere.iterdir()) == [], out(r))
+(wt / 'logs').unlink(); (wt / 'logs').mkdir()
+victim = T / 'dry-victim.txt'; victim.write_text('元の中身')
+(wt / 'logs/dp.dry-run.prompt.md').symlink_to(victim)
+r, cap, done = gem(wt, 'dp', '--dry-run')
+dp = wt / 'logs/dp.dry-run.prompt.md'
+check('dry-run: 既存の <label>.dry-run.prompt.md が symlink でもリンク先を上書きせず、普通のファイルとして新しく書く',
+      r.returncode == 0 and victim.read_text() == '元の中身' and not dp.is_symlink() and dp.read_text().startswith('# レビュー本線（Gemini）'), out(r))
+(wt / 'logs/gi.dry-run.prompt.md').symlink_to(victim)
+gi = subprocess.run(['zsh', '-f', str(lanes / 'run-gemini.sh'), str(wt), str(prompt), 'gi', '--verify', 'true', '--allow-path', 'owned.txt', '--dry-run'],
+                    env=make_env(), capture_output=True, text=True, timeout=120)
+check('Gemini 実装の dry-run も同じく、symlink の書き先を辿らずに普通のファイルとして書く',
+      gi.returncode == 0 and victim.read_text() == '元の中身' and not (wt / 'logs/gi.dry-run.prompt.md').is_symlink()
+      and '案件固有の検証指示（テスト）' in (wt / 'logs/gi.dry-run.prompt.md').read_text(), out(gi))
+shutil.rmtree(wt / 'logs'); (wt / 'logs').symlink_to(elsewhere)
+gi = subprocess.run(['zsh', '-f', str(lanes / 'run-gemini.sh'), str(wt), str(prompt), 'gi', '--verify', 'true', '--allow-path', 'owned.txt', '--dry-run'],
+                    env=make_env(), capture_output=True, text=True, timeout=120)
+check('Gemini 実装の dry-run も logs/ が symlink なら書かない（EXIT:2）', gi.returncode == 2 and list(elsewhere.iterdir()) == [], out(gi))
+(wt / 'logs').unlink()
+
+# 15-4. 前回の指摘本文を読み切ってから IN_PROGRESS に置き換える（読めなければ元の記録を残して 1）
+ld = T / 'mark-logs'; ld.mkdir()
+orig = json.dumps({'last_round': '1', 'last_verdict': 'VERDICT: NEEDS_FIX', 'last_exit': 0, 'last_report': '- [P1] a.txt:1 未解決の重大な指摘\n',
+                   'last_blocking_previous': '0', 'last_label': 's-r1'}, ensure_ascii=False) + '\n'
+for kind, override in (('読み出しの失敗', 'rvd_record_get() { [[ "$2" == report ]] && { print -n -- "途中まで"; return 1; }; rvd_state_get "$1" "last_$2"; }'),
+                       ('空の本文', 'rvd_record_get() { [[ "$2" == report ]] && { print -- "  "; return 0; }; rvd_state_get "$1" "last_$2"; }')):
+    (ld / '.s.review-state').write_text(orig)
+    probe = subprocess.run(['zsh', '-fc', 'source "$1/review-dedup.zsh"; eval "$3"; rvd_mark_in_progress "$2" s 2 s-r2 "$2/.s.review-state" "VERDICT: NEEDS_FIX"; print -r -- "rc=$?"',
+                            '_', str(lanes), str(ld), override], env=BASE, capture_output=True, text=True)
+    check(f'rvd_mark_in_progress: 前回の本文が{kind}なら 1 を返し、元の NEEDS_FIX の記録を壊さない',
+          probe.stdout.strip().endswith('rc=1') and (ld / '.s.review-state').read_text() == orig, probe.stdout + probe.stderr + (ld / '.s.review-state').read_text())
+(ld / '.s.review-state').write_text(orig)
+probe = subprocess.run(['zsh', '-fc', 'source "$1/review-dedup.zsh"; rvd_mark_in_progress "$2" s 2 s-r2 "$2/.s.review-state" "VERDICT: NEEDS_FIX"; print -r -- "rc=$?"',
+                        '_', str(lanes), str(ld)], env=BASE, capture_output=True, text=True)
+st = json.loads((ld / '.s.review-state').read_text())
+check('rvd_mark_in_progress: 読めたときは今までどおり IN_PROGRESS に本文を持ち越す',
+      probe.stdout.strip().endswith('rc=0') and st['last_verdict'] == 'IN_PROGRESS' and st['last_report'] == '- [P1] a.txt:1 未解決の重大な指摘\n', probe.stdout + probe.stderr)
+
+# 15-5. 親の python はレビュー対象の worktree の中のモジュールを読まない（worktree の中から起動しても）
+wt, first = repo('isolate')
+marker = T / 'planted-import-marker'
+(wt / 'json.py').write_text(f'open({str(marker)!r}, "w").write("imported")\n')
+for how, script, extra in (('直接', 'run-gemini-review.sh', ()), ('入口（--engine gemini）', 'run-review.sh', ('--engine', 'gemini'))):
+    r, cap, done = run(script, wt, 'iso-' + script[4:8], *extra, cwd=wt, env={'LANES_REVIEW_REUSE_CHECKS': '0'})
+    check(f'{how}: worktree の中から起動しても、親の python が worktree の json.py を読まない',
+          r.returncode == 0 and cap is not None and 'VERDICT: CLEAN' in done and not marker.exists(), out(r) + done)
+marker.unlink(missing_ok=True)
+
+# 15-6. 監査で失格（EXIT:4）の回の指摘は、後回し票に書かない（次の回で重ならない）
+wt, first = repo('fu-audit')
+body3 = '- [P2] 今回の残件\n' + skip_line + '\nVERDICT: NEEDS_FIX'
+fu = wt / 'logs/h.followups.md'
+r, cap, done = gem(wt, 'h-r3', mutation='write-tool', body=body3)
+check('round 3 の P2 でも、書き込みの試みで失格（EXIT:4）なら後回し票に書かない', r.returncode == 4 and not fu.exists(), out(r) + done)
+r, cap, done = gem(wt, 'h-r3', body=body3)
+check('監査を通った回だけ後回し票に公開し、失格の回の分は重ならない',
+      r.returncode == 0 and fu.read_text().count('## round 3') == 1 and fu.read_text().count('今回の残件') == 1, out(r) + (fu.read_text() if fu.exists() else ''))
+wt, first = repo('fu-prev')
+gem(wt, 'p-r2', body='- [P2] a.txt:1 前回の軽微な指摘\nVERDICT: NEEDS_FIX')
+fu = wt / 'logs/p.followups.md'
+r, cap, done = gem(wt, 'p-r3', mutation='write-tool', body='新しい指摘なし\n' + skip_line + '\nVERDICT: CLEAN')
+check('前回分の後回しも、失格（EXIT:4）の回は後回し票に書かない', r.returncode == 4 and not fu.exists(), out(r) + done)
+r, cap, done = gem(wt, 'p-r3', body='新しい指摘なし\n' + skip_line + '\nVERDICT: CLEAN')
+check('次の通常の起動で、前回分を 1 回だけ後回し票へ公開して通す',
+      r.returncode == 0 and note_gate(done) == 'MERGE_WITH_FOLLOWUP' and fu.read_text().count('前回の軽微な指摘') == 1, out(r) + done)
+
+# 15-7. 最後の行の文字が途中で切れても、その前の書き込みの試みを捨てない（EXIT:4 を優先）
+wt, first = repo('badutf8')
+r, cap, done = gem(wt, 'u8', events='write_badutf8')
+ev_text = evidence(wt, 'u8')
+check('末尾が不完全な UTF-8 でも、先の write_file を数えて不合格（EXIT:4・書き込みの試み 1 件・文字コードの不正行）',
+      r.returncode == 4 and 'VERDICT: NEEDS_FIX' in done and '書き込みの試み 1 件' in ev_text and '文字コードの不正行' in ev_text, out(r) + ev_text)
+
+# 15-8. レビューの後に HEAD を読めなくても、git のエラーで落ちずに変更として不合格（EXIT:4）
+wt, first = repo('lose-head')
+r, cap, done = gem(wt, 'lh', mutation='lose-head')
+check('レビューの後に HEAD を読めなければ NEEDS_FIX・EXIT:4（証跡に「読めない」）',
+      r.returncode == 4 and 'VERDICT: NEEDS_FIX' in done and 'EXIT:4' in done and 'HEAD を読めない' in r.stderr and '（読めない）' in evidence(wt, 'lh')
+      and state(wt, 'lh')['last_verdict'] == 'IN_PROGRESS', out(r) + done)
+
+# 15-9. 終了記録（.done）を書けないときは確定しない（起動前に分かれば止める・実行中に置かれたら確定しない）
+wt, first = repo('done-dir')
+r, cap, done = gem(wt, 'dd', mutation='plant-done-dir', env={'GT_LABEL': 'dd'})
+check('実行中に .done の名前にフォルダを置かれたら確定しない（EXIT:3・IN_PROGRESS・証跡は NONE）',
+      r.returncode == 3 and state(wt, 'dd')['last_verdict'] == 'IN_PROGRESS' and '- VERDICT: NONE' in evidence(wt, 'dd')
+      and '- VERDICT: CLEAN' not in r.stdout, out(r))
+(wt / 'logs/dd.done').rmdir()
+r, cap, done = gem(wt, 'dd')
+check('用意: 次の通常の起動は CLEAN で確定', r.returncode == 0 and state(wt, 'dd')['last_verdict'] == 'VERDICT: CLEAN', out(r))
+(wt / 'logs/dd.done').unlink(); (wt / 'logs/dd.done').mkdir()
+r, cap, done = gem(wt, 'dd', '--force')
+check('起動の前から .done の名前がフォルダなら、記録に触らずに止める（EXIT:2・agy 未起動・前の CLEAN の記録はそのまま）',
+      r.returncode == 2 and cap is None and state(wt, 'dd')['last_verdict'] == 'VERDICT: CLEAN' and '終了記録の書き込み先' in r.stderr, out(r))
+(wt / 'logs/dd.done').rmdir()
+
+# 15-10. 起動前点検: Codex の構成の不一致も NG（run-review.sh と同じ判定）
+d = doctor('--review-engine', 'codex', env={'LANES_TOOLS': 'claude'})
+check('点検: claude だけの構成で --review-engine codex は NG（exit 2・指定の出どころを出す）', d.returncode == 2 and 'codex が無い' in d.stdout and '--review-engine' in d.stdout, d.stdout)
+d = doctor('--quiet', env={'LANES_TOOLS': 'claude', 'LANES_REVIEW_ENGINE': 'codex'})
+check('点検: LANES_REVIEW_ENGINE=codex でも同じく NG（--quiet でも exit 2）', d.returncode == 2 and 'LANES_REVIEW_ENGINE' in d.stdout, d.stdout)
+d = doctor('--review-engine', 'claude', env={'LANES_TOOLS': 'claude'})
+check('点検: claude はどの構成でも通る', d.returncode == 0, d.stdout)
+
+# 15-11. PATH の先に GNU 風の stat があっても、出力が続いている agy を無出力として止めない（zsh 組み込みの zstat）
+gnu = T / 'gnu-stat-bin'; gnu.mkdir()
+(gnu / 'stat').write_text('#!/bin/sh\necho "stat: GNU 風の偽物（-f %m を受け付けない）" >&2\nexit 1\n'); (gnu / 'stat').chmod(0o755)
+wt, first = repo('gnu-stat')
+r, cap, done = gem(wt, 'gs', events='drip', env={'PATH': f'{gnu}{os.pathsep}{BASE["PATH"]}', 'GEMINI_REVIEW_NOOUTPUT_SEC': '3', 'GT_SLEEP': '7'})
+check('GNU 風の stat が先にあっても、出力が続く間は止めない（CLEAN・EXIT:0）', r.returncode == 0 and 'VERDICT: CLEAN' in done and '更新なし' not in (wt / 'logs/gs.log').read_text(), out(r) + done)
 
 print(f'PASS: {passed} 件 / EXIT:0')
 PY
