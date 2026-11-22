@@ -181,8 +181,12 @@ mkdir -p "$logdir"
 (( ! dry )) || lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
 # レーン専用の作業場所（TMPDIR / LANES_SCRATCH）。agy に書かせてよいのはここだけ（--add-dir）。マージ後 cleanup が消す
 if (( dry )); then scratch="$(lanes_scratch_path "$wt" "$label")"; else lanes_scratch_prepare "$wt" "$label" gemini-review; scratch="$LANES_SCRATCH"; fi
+# 親は子の起動前に / へ移る（下）ので、子へ渡す場所（--add-dir・TMPDIR・GIT_CONFIG_GLOBAL）は絶対パスでなければならない
+[[ "$scratch" == /* ]] || lanes_die "scratch の置き場所が絶対パスでない: $scratch（LANES_SCRATCH_ROOT を絶対パスで書く）"
 
 lanes_check_gemini_subscription
+# agy も絶対パスで起動する（親は / へ移り、子は worktree で起動するので、相対パスのままだと別の場所を指す。symlink はたどらない）
+[[ "$GEMINI_BIN" == /* ]] || GEMINI_BIN="${GEMINI_BIN:a}"
 # --sandbox が無効になる環境では走らせない。対象は Mac の端末サンドボックス（run-gemini.sh と同じ確認）
 [[ "$(uname -s)" == Darwin && -x /usr/bin/sandbox-exec ]] || lanes_die "端末サンドボックスを強制できない環境 → 起動禁止"
 /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny file-write*)' /usr/bin/true 2>/dev/null \
@@ -319,7 +323,12 @@ writes, write_tools, invalid = set(), set(), []
 results, last_event, events, inits, first_init = 0, None, 0, 0, False
 try:
     with open(src, "rb") as f:
-        lines = f.read().decode("utf-8").splitlines()
+        raw = f.read()
+    # 行の区切りは \n だけ（str.splitlines は本文の中の U+2028 などでも割ってしまい、正しい JSON を不正な行にする）
+    parts = raw.split(b"\n")
+    if parts and parts[-1] == b"":
+        parts.pop()
+    lines = [p.decode("utf-8") for p in parts]
 except (OSError, UnicodeError):
     lines = None; invalid.append("ログを読み取れない")
 if lines is not None and not lines:
@@ -412,7 +421,7 @@ invalid_n="$(audit_get invalid)"; [[ "$invalid_n" == <-> ]] || invalid_n=0; inva
 [[ -n "$audit_out" ]] || { conv_rc=4; invalid_n=1; invalid_kinds="監査を実行できない"; }
 # 記録の書き込みの失敗（公開ログ・後回し票・証跡）。1 つでもあれば記録を確定しない（IN_PROGRESS のまま）
 typeset -a write_failed; write_failed=()
-[[ "$(audit_get written)" == 1 ]] || write_failed+=("公開ログ（${body_log:t}・${log:t}）")
+[[ "$(audit_get written)" != 0 ]] || write_failed+=("公開ログ（${body_log:t}・${log:t}）")
 # 必須検証の仕組みの有無をランチャ側で見て判定へ渡す（仕組みがあるのに「該当なし（未導入）」・NA と書いた項目は未実施と同じ扱い）
 checks_present="$(lanes_checks_present "$wt")" || checks_present=""
 export LANES_CHECKS_PRESENT="$checks_present"

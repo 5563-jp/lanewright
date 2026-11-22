@@ -300,6 +300,8 @@ check('実機の形: 拒否された write_file・edit_file も書き込みの�
 r, cap, done = gem(wt, 'w5', replay=fixtures / 'read-only-commands.jsonl')
 check('実機の形: 読み取りのコマンドだけなら本文の VERDICT を採用（CLEAN）', r.returncode == 0 and 'VERDICT: CLEAN' in done, out(r))
 check('最後の応答の本文だけを last.md に残す', (wt / 'logs/w5.last.md').read_text() == '問題なし\nVERDICT: CLEAN')
+r, cap, done = gem(wt, 'w6', body='問題なし\u2028続きの文\nVERDICT: CLEAN')
+check('本文の中の行区切りの文字（U+2028）で stream-json の 1 行を割らない（CLEAN）', r.returncode == 0 and 'VERDICT: CLEAN' in done, out(r) + done)
 
 # ---- 7. JSON の不備・失敗・見張り ----
 wt, first = repo('broken')
@@ -384,6 +386,11 @@ wt, first = repo('same-other')
 (wt / 'logs').mkdir(); (wt / 'logs/rev.pid').write_text('pid=1\nlane=gemini-review\n'); (wt / 'logs/q.pid').write_text('pid=1\nlane=qa\n')
 r, cap, done = gem(wt, 's7')
 check('Gemini レビュー・QA の記録は Gemini 実装に数えない', r.returncode == 0 and cap is not None, out(r))
+wt, first = repo('same-unreadable')
+(wt / 'logs').mkdir(); bad = wt / 'logs' / 'old.pid'; bad.write_text('pid=1\nlane=claude\n'); bad.chmod(0)
+r, cap, done = gem(wt, 's8')
+check('候補の .pid を読めなければ「記録あり（読めない）」として起動しない（EXIT:2）', r.returncode == 2 and cap is None and '読めない' in done, out(r) + done)
+bad.chmod(0o644)
 
 # ---- 11. 同じ head の結果の再利用と delta・前回 NEEDS_FIX・dry-run ----
 wt, first = repo('dedup')

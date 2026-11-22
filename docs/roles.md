@@ -24,7 +24,7 @@
 
 ```sh
 zsh <kit>/lanes/lanes-roles.sh --print   # 今の構成と割り振りを表示（--env なら KEY=value の形）
-zsh <kit>/lanes/lanes-doctor.sh [<worktree>]   # 起動前点検。--quiet なら問題が無いとき何も出さない。worktree を渡すと logs/ が無視されているかも見る
+zsh <kit>/lanes/lanes-doctor.sh [--review-engine codex|claude|gemini] [<worktree>]   # 起動前点検。--quiet なら問題が無いとき何も出さない。worktree を渡すと logs/ が無視されているかも見る。--review-engine gemini なら Gemini レビューの点検も
 zsh <kit>/lanes/run-impl.sh <worktree> <prompt.md> [label] [--engine claude|gemini] [--dry-run] \
     [gemini 用: --verify "<検証コマンド>" --allow-path <相対パス> ... --no-push]
 zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> [label] [--engine codex|claude|gemini] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--dry-run]

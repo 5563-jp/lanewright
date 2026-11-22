@@ -81,7 +81,7 @@ Gemini と Claude の分け方の目安: 課金・認証・本番 DB・重い端
 
 ### 起動前点検 `lanes-doctor.sh`
 ```zsh
-zsh lanes/lanes-doctor.sh [--quiet] [<worktree>]
+zsh lanes/lanes-doctor.sh [--quiet] [--review-engine codex|claude|gemini] [<worktree>]
 ```
 `LANES_TOOLS` の各道具が入っているか、**サブスク（定額プラン）のアカウントでログインしているか**（API キーでの起動になっていないか）を確かめ、足りないものを全部並べて exit 2 で止まります（揃っていれば 0）。
 ログインの見方: Claude は `claude auth status`、Codex は `codex login status`、Gemini（`agy`）はログイン確認のコマンドが無いので、ログイン情報の置き場所 `~/.gemini/antigravity-cli` の有無です。

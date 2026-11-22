@@ -465,7 +465,7 @@ PY_GEM_SETTINGS
 # 見つけた記録の名前を REPLY に入れる。無ければ 1。
 # 見るもの: logs/ の直下の <label>.pid（回転した .prev-* も）の「lane=<lane>」の行と、<label>.evidence.md（回転したものも）の
 # 1 行目の見出し（「## Gemini 実装証跡（」など）。symlink・普通のファイルでないものは読まない。
-# 候補（.pid・証跡）を読めないときは「記録あり」として扱う（確かめられないまま同じ道具でレビューしない。REPLY に「（読めない）」を付ける）
+# logs/ の一覧や候補（.pid・証跡）を読めないときは「記録あり」として扱う（確かめられないまま同じ道具でレビューしない。REPLY に「（読めない）」を付ける）
 lanes_has_impl_lane() {   # <logdir> <lane（gemini / codex / claude）>
   local found rc=0
   typeset -g REPLY=""
@@ -476,7 +476,11 @@ d, lane = sys.argv[1:3]
 heads = {"gemini": "## Gemini 実装証跡（", "codex": "## Codex 実装証跡（", "claude": "## Claude 実装証跡（"}
 pid_re = re.compile(r".+\.pid")
 evidence_re = re.compile(r".+\.evidence(?:\.prev-[0-9]{8}-[0-9]{6}(?:-[0-9]+)?)?\.md")
-for e in sorted(os.scandir(d), key=lambda e: e.name):
+try:
+    entries = sorted(os.scandir(d), key=lambda e: e.name)
+except OSError:
+    print("logs/ の一覧（読めない）"); sys.exit(0)
+for e in entries:
     is_pid = bool(pid_re.fullmatch(e.name))
     is_evidence = bool(evidence_re.fullmatch(e.name)) and lane in heads
     if not (is_pid or is_evidence):
