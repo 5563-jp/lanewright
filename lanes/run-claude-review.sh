@@ -74,9 +74,17 @@ series="$(rvd_series "$label")"
 # logs/ がまだ無い初回は .done を作らない）。道具・指示書の点検（下の lanes_require_tool など）より先なので、そちらの誤りは chk-run.sh を通した後に出る
 if rvd_checks_block "$allow_missing"; then lanes_die "$RVD_CHECKS_BLOCK"; fi
 (( dry )) || lanes_mark_start "$logdir" "$label" claude-review "$wt" "file:.$series.review-state" "file:$series.followups.md" "file:.review-reuse-blocked"
+if (( ! dry )); then
+  # 同じ worktree のレビューは 1 本ずつ（review-dedup.zsh の rvd_review_lock。並行すると、後から終わった方が先に終わった方の
+  # 再利用の記録を子の改ざんとして巻き戻す）。前回の記録を読む所から最後の保存まで、logs/ に排他をかける（終了まで持つ）
+  rvd_review_lock_or_die "$logdir" "$LANES_LOGDIR_ID"
+  # 前のレビューが子の後の確認の前に終わっていたら（「確認中」の印が残っている）、記録を子の前に戻し、その系列の CLEAN を失効させる
+  rvd_inflight_recover "$logdir" || true
+fi
 lanes_require_tool claude run-claude-review.sh
-# 入口（run-review.sh）から来たときの起動前点検は、このランチャのレビュー役（claude）で回す（設定の LANES_REVIEW_ENGINE に引きずられない）
-LANES_REVIEW_ENGINE=claude lanes_entry_preflight
+# 入口（run-review.sh）から来たときの起動前点検は、このランチャのレビュー役（claude）で回す（設定の LANES_REVIEW_ENGINE に引きずられない。
+# 点検は設定ファイルを読み直すので、環境変数ではなく引数で渡す＝設定ファイルに値をそのまま書いた LANES_REVIEW_ENGINE にも上書きされない）
+lanes_entry_preflight claude
 lanes_require_prompt "$prompt"
 round="$(rvd_round "$logdir" "$series" "$label" "$round")"
 [[ "$round" == <-> && ${#round} -le 6 ]] || lanes_die "round が不正"
@@ -94,6 +102,10 @@ decided="$(rvd_decide_mode "$wt" "$prev_head" "$prev_v" "$context" "$(rvd_record
 if rvd_reuse_blocked "$logdir"; then
   decided=full
   print -u2 -- "注意: logs/.review-reuse-blocked がある（前のレビューで再利用の記録を戻しきれなかった）。前回の記録を使わず full でレビューする。logs/.*.review-state を確かめてから印を消す"
+elif (( dry )) && rvd_inflight_present "$logdir"; then
+  # dry-run は排他を取らず後始末もしない。途中で終わったレビューの印があるうちは、前回の記録を使う前提で見せない
+  decided=full
+  print -u2 -- "注意: 前のレビューが子の後の確認の前に終わった印がある（次の本番の起動が後始末する）。dry-run は前回の記録を使わない full として見せる"
 fi
 skip_same=0
 case "$mode:$decided" in
@@ -153,6 +165,26 @@ delta_note=""
 LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" python3 -I - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" "$(rvd_checks_rule)" "$delta_note" "$unresolved_note" <<'PY'
 import os, sys, pathlib
 tpl, case, out, wt, branch, head, base, mode, date, checks_rule, delta_note, unresolved = sys.argv[1:13]
+def write_new(path, text, encoding="utf-8"):
+    # logs/ を symlink を辿らずに開き、その中で一時ファイルに書いてから名前を付け替える（既存の名前が symlink・ハードリンクでも
+    # 先を書き換えない。前回の dry-run の指示書は、新しい指示書を書き終えるまで残る）
+    d, name = os.path.split(path)
+    dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    tmp = f".{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666, dir_fd=dfd)
+        try:
+            with os.fdopen(fd, "w", encoding=encoding) as fh:
+                fh.write(text)
+            os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=dfd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(dfd)
 t = pathlib.Path(tpl).read_text(encoding="utf-8")
 for k, v in {"WORKTREE": wt, "BRANCH": branch, "HEAD": head, "BASE": base, "MODE": mode, "DATE": date}.items():
     t = t.replace("{{" + k + "}}", v)
@@ -160,7 +192,7 @@ c = pathlib.Path(case).read_text(encoding="utf-8")
 extra = [p.rstrip() for p in (delta_note, unresolved, os.environ.get("LANES_ACCEPTED_NOTE", "")) if p.strip()]
 rule = checks_rule.rstrip()
 extra.append(rule if rule.startswith("#") else "# 必須検証の成功行\n- " + rule)
-pathlib.Path(out).write_text(t.rstrip() + "\n\n---\n\n# 案件固有の指示（司令塔が記入）\n\n" + c.rstrip()
+write_new(out, t.rstrip() + "\n\n---\n\n# 案件固有の指示（司令塔が記入）\n\n" + c.rstrip()
                              + "\n\n---\n\n" + "\n\n".join(extra) + "\n", encoding="utf-8")
 PY
 
@@ -195,6 +227,15 @@ state_file="$(rvd_state_file "$logdir" "$series")"
 states_before="$(rvd_states_snapshot "$logdir")" || lanes_die "レビュー前の再利用の記録の確認に失敗"
 # 「使い回し禁止」の印の有無も覚える（子が印を消したら改ざんとして扱う）
 blocked_before=0; rvd_reuse_blocked "$logdir" && blocked_before=1
+# 子の起動前に「確認中」の印（覚えた再利用の記録）を logs/ の外へ置く。子の後の確認（記録の復元・印の確認・変更の判定）が全部済んだら
+# 消す（inflight_done）。途中で終わったら、次のレビューが印を見つけて後始末する（review-dedup.zsh の rvd_inflight_recover）
+print -r -- "$states_before" | rvd_inflight_begin "$logdir" "$series" "$label" \
+  || lanes_die "途中で終わったときの後始末の印（$(rvd_inflight_file "$logdir")）を置けない → 起動しない。${XDG_STATE_HOME:-~/.local/state}/lanewright/ の権限を確かめる"
+inflight_done() {
+  rvd_inflight_end "$logdir" && return 0
+  ( print -u2 -- "→ 「確認中」の印（$(rvd_inflight_file "$logdir")）を消せない。次のレビューは今回を途中で終わったものとして後始末する" ) || true
+  return 0
+}
 started="$(lanes_now)"; t0=$(date +%s)
 
 # レビューの子から push（と fetch）をできなくする。Bash の先頭一致の拒否は `git -C . push` などを通すため、git 側で止める
@@ -331,13 +372,20 @@ snapshot_after="$(rvd_snapshot "$wt")" || snapshot_after=ERROR
 conditions_after="$(review_context)" || conditions_after=ERROR
 # 設定（core.hooksPath など）・hooks・タグ・stash の書き換えも、作業ツリーの変更と同じく不合格にする
 guard_after="$(rvd_git_guard "$wt")" || guard_after=ERROR
+# 親の chk-run の記録を使い回したときは、確認コマンドの入力（未追跡の logs/input.json・依存・環境変数など）がレビュー中に変わって
+# いないかを、問い合わせたときと同じ環境で照合し直す（rvd_snapshot は未追跡の logs/ を見ないので、ここで見る。review-dedup.zsh の rvd_checks_recheck）
+checks_after_rc=0; rvd_checks_recheck "$LANES_DIR" "$wt" || checks_after_rc=$?
 dirty=0
 if [[ "$snapshot_after" == ERROR || "$snapshot_before" != "$snapshot_after" || "$conditions_after" != "$context" \
-    || "$guard_after" == ERROR || "$guard_before" != "$guard_after" ]] || (( state_tampered )); then
+    || "$guard_after" == ERROR || "$guard_before" != "$guard_after" ]] || (( state_tampered || checks_after_rc != 0 )); then
   dirty=1; verdict="VERDICT: NEEDS_FIX"
   [[ "$gate" == STOP_P0P1 ]] || gate=FIX
   (( rc != 0 )) || rc=4
+  (( checks_after_rc != 1 )) || print -u2 -- "→ Claude レビューの実行中に、使い回した親の chk-run の記録の入力（確認コマンドが読むファイル・依存・環境変数など）が変わった。不合格（NEEDS_FIX）にする"
+  (( checks_after_rc != 2 )) || print -u2 -- "→ 使い回した親の chk-run の記録の入力を、レビューの後に照合し直せない（chk-run.sh --query-input の失敗）。不合格（NEEDS_FIX）にする"
 fi
+# 子の後の確認（記録の復元・印の確認・変更の判定）が全部済んだので、「確認中」の印を消す
+inflight_done
 (( rc != 0 )) || [[ "$verdict" == 'VERDICT: CLEAN' || "$verdict" == 'VERDICT: NEEDS_FIX' ]] || rc=3
 # 周回の上限を超えて CLEAN にならなければ ESCALATE（人に返す）。続けるなら人が直して LANES_REVIEW_MAX_ROUNDS を上げる
 gate="$(rvd_escalate "$round" "$verdict" "$gate")"
