@@ -178,7 +178,9 @@ if [[ "$prev_v" == 'VERDICT: NEEDS_FIX' ]]; then
   # 未解決のある系列では明示 delta も全体へ戻す。
   mode=full; base="$review_base"; skip_same=0
   [[ -n "$(rvd_record_get "$record" report)" ]] || lanes_die "前回の未解決指摘本文が無い。復元してから再レビューする"
-  unresolved_note="$(rvd_unresolved_note "$record" "$round")"
+  # 本文を途中までしか読めなかったら（読み取りの失敗）、欠けた未解決指摘のまま回さない（記録は変えていない）
+  unresolved_note="$(rvd_unresolved_note "$record" "$round")" \
+    || lanes_die "前回の未解決指摘本文を読み切れない（読み取りの失敗）。記録は変えていない。logs/ の権限を確かめてから再レビューする"
 fi
 
 if (( skip_same )); then

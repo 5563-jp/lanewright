@@ -57,6 +57,8 @@ rvd_prev_record() {
   done
   return 0
 }
+# 旧形式（<系列>-r<k>.evidence.md）の本文（report）は対応する .log を読む。読み取りの失敗（途中まで読めたときも）は、その終了コードを
+# 返す（部分の本文を読み切った本文として扱わない。rvd_mark_in_progress が欠けた未解決指摘で記録を置き換えない）。.log が無ければ空で 0
 rvd_record_get() {
   local f="$1" key="$2"
   [[ -n "$f" ]] || return 0
@@ -64,7 +66,7 @@ rvd_record_get() {
   case "$key" in
     head) rvd_evidence_head "$f" ;;
     verdict) rvd_evidence_verdict "$f" ;;
-    report) [[ -f "${f%.evidence.md}.log" ]] && cat "${f%.evidence.md}.log" ;;
+    report) [[ -f "${f%.evidence.md}.log" ]] || return 0; cat -- "${f%.evidence.md}.log"; return ;;
   esac
   return 0
 }
