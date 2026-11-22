@@ -21,7 +21,10 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   - 守りの強さは Codex・Claude のレビューと同じ: 親の chk-run の記録の使い回し・`LANES_REVIEW_REQUIRE_CHECKS=1` の起動前の停止・API キーを外す・MCP 拒否・子の git の通信止め・
     子の前後の比較（作業ツリー・git の管理フォルダ・git の制御ファイルを git を呼ぶ前に・全部の系列の再利用の記録・「使い回し禁止」の印。変わっていれば `NEEDS_FIX`・`EXIT:4`）。
     加えて、stream-json の書き込み系のツール呼び出し（拒否されて書けなかった試みも含む）が 1 件でもあれば `NEEDS_FIX`・`EXIT:4`（証跡に件数。`agy` の失敗の終了コードより優先し、`agy` の終了コードは証跡に別に書く）。
-    「使い回し禁止」の印は置き場所（`logs/` の中と外）ごとに前後を比べる。書き込みの試み・改ざんで不合格にしたら、その系列の前回の `CLEAN` を失効させる（次の通常の起動で古い合格を返さない）。
+    「使い回し禁止」の印は置き場所（`logs/` の中と外）ごとに前後を比べる。書き込みの試み・改ざんで不合格にしたら、見つけた直後（証跡を書く前）に、その系列の前回の `CLEAN` を失効させる
+    （次の通常の起動で古い合格を返さない。証跡の書き込みで止まっても残さない）。監査は親専用の写しをバイト列のまま行ごとに読む（末尾の文字切れでも、それまでの書き込みの試みを失わない）。
+  - `agy` は点検の前に絶対パスへ直し、点検と起動に同じ実行ファイルを使う。受け取り役は `agy` の終了をパイプの終端とは別に見張る（補助のプロセスが標準出力を持ち続けても止まらない）。
+    見張りは子の起動前に開いた番号から出力の更新と idle の行を読む（標準エラーのファイルを名前付きパイプに差し替えられても止まらない）。公開ログとの照合は 1 MiB ずつ読み比べる。
   - 周回の仕組み（`review-dedup.zsh` の full / delta / 同じ HEAD の省略・未解決指摘の引き継ぎ・round 3 以降の P2/P3 の後回し・`ESCALATE`）と、
     VERDICT・P0〜P3・GATE の判定は Claude レビューと同じ順番・同じ条件（同じ本文なら同じ判定になることをテストで確かめた）。
   - **実装と同じ道具でレビューしない**: Gemini で実装した worktree（`logs/` に Gemini 実装の記録がある）では起動しない（`EXIT:2`。Codex か Claude のレビューを案内する）。
@@ -58,6 +61,24 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 - `run-review.sh` は、優先順位を解決した後のレビュー役を振り分け先と起動前点検に渡す（設定が `LANES_REVIEW_ENGINE=gemini` でも、`--engine codex` / `claude` の起動を使わない Gemini の点検で止めない）。
 - `run-codex-review.sh` は、テンプレの役名を Codex に読み替えてから worktree のパス・枝名を埋め込む（`Claude` を含むパス・枝名を書き換えない）。
 - `lanes-roles.sh --print` の「レビューの独立性」は、`LANES_REVIEW_ENGINE` で選んだレビュー役に合わせて出す（`--env` は構成の既定のまま）。
+- Codex・Claude・Gemini のレビュー: **同じ worktree のレビューは 1 本ずつ**（前回の記録を読む所から最後の保存まで `logs/` に排他のロックをかけ、取れなければ `EXIT:2`）。
+  並行すると、後から終わった方が先に終わった方の正規の再利用の記録を子の改ざんとして巻き戻していた。並行して見たいときは worktree を分ける。
+- Codex・Claude・Gemini のレビュー: 子の起動前に `logs/` の外（`${XDG_STATE_HOME:-~/.local/state}/lanewright/review-inflight/`）へ「確認中」の印を置き、子の後の確認が済んだら消す。
+  途中で終わった（終了シグナル・`kill -9` など）レビューの印が残っていたら、次のレビューが再利用の記録を子の前の中身に戻し、その系列の前回の `CLEAN` を再利用しない。
+- Codex・Claude・Gemini のレビュー: 親の chk-run の記録を使い回したときは、子の後にも同じ環境で確認コマンドの入力を照合し直す（新しい `chk-run.sh <worktree> --query-input <port> <outdir>`。
+  生成物は比べない）。レビュー中に未追跡の `logs/input.json` などが変わっていたら `NEEDS_FIX`・`EXIT:4`。`chk-run.sh --query` の答えに `port=` / `outdir=` / `input=` の行を足した。
+- `LANES_REVIEW_REQUIRE_CHECKS=1` は、問い合わせそのものの失敗（`query-failed`。終了コードが 0・1 以外・答えの形の崩れ）でも子を起動せずに止める（前は止めなかった）。
+- `chk-run.sh` は、回すときも問い合わせのときも、最初の git の呼び出しの前に git の場所の環境変数を全部外す（前は `GIT_DIR`・`GIT_WORK_TREE`・`GIT_INDEX_FILE` だけ。
+  `GIT_COMMON_DIR`・`GIT_OBJECT_DIRECTORY` などが残ると、レビューの問い合わせが別の参照・オブジェクトを見ていた）。
+- `lanes-doctor.sh --review-engine codex|claude|gemini`: レビューのランチャが確定したレビュー役を渡し、設定ファイルを読んだ後に当てる
+  （設定ファイルに `LANES_REVIEW_ENGINE=gemini` と値をそのまま書いていても、`--engine codex` / `claude` の起動を使わない Gemini の点検で止めない）。
+- `LANES_SCRATCH_ROOT` の相対指定は `lanes.env` で絶対パスに直す（`chk-run.sh` も同じ設定を読むので、親の検証とレビューの問い合わせで指紋がそろい、記録を使い回せる）。
+- 全ランチャ: CLI の実行ファイル（`CLAUDE_BIN` / `CODEX_BIN` / `GEMINI_BIN`）と親の `python3` は、作業場所を移る前に絶対パスで確定する
+  （相対パス・名前だけの指定・PATH の `.` で、点検と起動が別のファイルを指したり、作業ツリーの同名のファイルを選んだりしない。`chk-run.sh` の `python3` も同じ）。
+- Gemini で実装した記録の確かめ: 記録の名前（`.pid`・証跡）なのに普通のファイルでない物（フォルダ・symlink など）は「記録なし」にせず「確かめられない」として止める（`--allow-same-engine` で回せる）。
+- dry-run（Codex・Claude・Gemini のレビューと Gemini 実装）は、前回の指示書を先に消さず、確かめが通った後に `logs/` の中で新しい指示書を書いてから名前を付け替える（途中の確かめで止まっても前回の指示書が残る）。
+- Gemini レビュー: 次回へ引き継ぐ本文（再利用の記録の未解決指摘）は、親が受信した最後の応答（`last.md`）だけにする（表示用の `logs/<label>.log` の見張りの行・証跡を入れない）。
+  承認・質問ツールの回数は呼び出し単位で数える（`run-gemini.sh` も）。`run-gemini.sh` の監査も、ログを行ごとに読む（末尾の文字切れで外への書き込みを見落とさない）。
 - `run-gemini.sh` も、登録済みの linked worktree だけで起動し、`agy` の出力を受け取り役で受けて、子の回収後に受け取った中身と突き合わせる（消された・書き換えられた → `EXIT:4`）。1 行目が `init` でない記録は監査の不備として扱う。
 
 ## [0.1.7] - Cloudflare Workers + vinext の構成の生成物があっても確認の結果を記録する / Record checks with Cloudflare Workers + vinext generated output

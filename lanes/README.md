@@ -81,8 +81,9 @@ Gemini と Claude の分け方の目安: 課金・認証・本番 DB・重い端
 
 ### 起動前点検 `lanes-doctor.sh`
 ```zsh
-zsh lanes/lanes-doctor.sh [--quiet] [<worktree>]
+zsh lanes/lanes-doctor.sh [--quiet] [--review-engine codex|claude|gemini] [<worktree>]
 ```
+`--review-engine` は、レビューのランチャが起動前点検に自分のレビュー役を渡すためのものです（設定ファイルを読んだ後に `LANES_REVIEW_ENGINE` へ当てる。設定ファイルに `LANES_REVIEW_ENGINE=gemini` と値をそのまま書いていても、`run-review.sh --engine codex` / `claude` の起動を使わない Gemini の点検で止めない）。
 `LANES_TOOLS` の各道具が入っているか、**サブスク（定額プラン）のアカウントでログインしているか**（API キーでの起動になっていないか）を確かめ、足りないものを全部並べて exit 2 で止まります（揃っていれば 0）。
 ログインの見方: Claude は `claude auth status`、Codex は `codex login status`、Gemini（`agy`）はログイン確認のコマンドが無いので、ログイン情報の置き場所 `~/.gemini/antigravity-cli` の有無です。
 Gemini を含む構成では、`run-gemini.sh` が必須にしている macOS の端末サンドボックス（`/usr/bin/sandbox-exec`）があって実際に有効にできるかも見ます。`LANES_REVIEW_ENGINE=gemini` のときだけ、構成に gemini があるかと、`agy --help` に `--sandbox`・`--settings`・`--mode plan` があるか（Gemini レビューが読み取り専用を強制するのに要る）も見ます（既定の設定の点検結果は変わりません）。ほかに python3 / git / zsh（必須）と gh（任意。無ければ注意だけ）も見ます。
@@ -131,9 +132,12 @@ Gemini を含む構成では、`run-gemini.sh` が必須にしている macOS �
 - 親（ランチャ）は対象の worktree へ `cd` しません（子だけを worktree で起動する）。親の `python3` は `-I`（作業場所や `PYTHON*` の環境変数を見ない）で動かすので、レビュー対象に `json.py` のような標準ライブラリと同じ名前のファイルがあっても読みません。呼び出し元の `GIT_DIR` などは外し、git から見た最上位が渡した worktree であることを確かめます。
 - 読み取り専用: `agy` を `--mode plan --sandbox --settings '<JSON>'` で起動し、`--dangerously-skip-permissions`・`accept-edits`・`auto` は使いません。`--settings` の拒否は固定（`_common.sh` の `lanes_gemini_review_settings`）で、MCP（`mcp(*)`）・ファイルの書き込み（`write_file(*)`・`write_file(/)`）・URL・commit や push などのコマンド（Claude レビューの固定の拒否の一覧のコマンドの分）です。`ANTIGRAVITY_HEADLESS=true`・stdin は `/dev/null`・`--add-dir` は scratch だけ・子の `GIT_CONFIG_GLOBAL` は scratch の最小 gitconfig・`GIT_OPTIONAL_LOCKS=0`・`GIT_PAGER=cat`・git の通信は止めます。macOS の端末サンドボックスを有効にできない・`agy --help` に `--sandbox` / `--settings` / `--mode`（plan）が無い（オプション名は単語として照合する。`--model` の説明の「plan」では通さない）・登録済みの linked worktree でない（本体 checkout・管理領域を外に置いた本体・submodule）なら起動しません。
 - 前後の比較（Codex レビューと同じ）: 作業ツリー（無視対象も）・指示と条件・git の管理フォルダ（設定・hooks・タグ・stash）・git の制御ファイル（`.git`・`commondir`・`gitdir`・`config`・hooks。子の後は git を呼ぶ前に比べ、変わっていれば git を実行せずに `EXIT:4`）・再利用の記録・「使い回し禁止」の印（`logs/` の中と外を置き場所ごとに。片方だけの削除・実行中の新設も）・公開用の `logs/<label>.json`（受け取った中身と違えば）。変わっていたら `NEEDS_FIX`・`EXIT:4`。実行中に `logs/` そのものを差し替えられたら、記録を書かずに `EXIT:5` で止め、`logs/` の外に「使い回し禁止」の印を置きます。
-- 書き込みの試み・改ざんで不合格（`EXIT:4`）にしたら、その系列の前回の `CLEAN` を失効させます（次の通常の起動で同じ HEAD の省略・delta に使わない。前回が `NEEDS_FIX` の記録は未解決の指摘を引き継ぐためそのまま残す）。
+- 書き込みの試み・改ざんで不合格（`EXIT:4`）にしたら、見つけた直後（証跡を書く・表示する前）に、その系列の前回の `CLEAN` を失効させます（次の通常の起動で同じ HEAD の省略・delta に使わない。前回が `NEEDS_FIX` の記録は未解決の指摘を引き継ぐためそのまま残す）。証跡の書き込みで止まっても古い合格は残りません。
+- 監査は親専用の写しをバイト列のまま行ごとに読みます。末尾の文字切れなどの不正行は監査の不備（`VERDICT: NONE` の理由）として数え、それまでに数えた書き込みの試みは失いません（`EXIT:4` と前回の `CLEAN` の失効が優先）。
+- `agy`（`GEMINI_BIN`）は点検の前に絶対パスへ直し、点検（`--help`）と起動に同じ実行ファイルを使います（相対パス・名前だけの指定も。名前だけなら PATH から探す）。監督役・受け取り役の `python3` も起動時に絶対パスで確定します（PATH に `.` などがあっても、作業ツリーの同名のファイルを選ばない）。
+- 受け取り役は `agy` の終了を標準出力のパイプの終端とは別に見張ります（`agy` が起動した補助のプロセスが標準出力を持ち続けても、`agy` の終了から最大 2 秒で受け取りを終え、残った子孫は監督役が止める）。見張りは出力の更新と idle の行を、子の起動前に開いた番号から読みます（`logs/` の名前を開き直さないので、子が標準エラーのファイルを名前付きパイプに差し替えても止まらない）。
 - 書き込みの試み: stream-json の `step_update` のうち、ツール名に `write` / `replace` / `edit` / `delete` / `move` / `rename` / `create` / `append` / `copy` / `patch` を含む呼び出し（`run-gemini.sh` の監査と同じ判定。同じ `step_index` の経過は 1 件）が 1 件でもあれば `NEEDS_FIX`・`EXIT:4`。拒否されて書けなかった試みも数えます。証跡の「読み取り専用の確認」の行に件数とツール名が出ます。
-- 本文: 最後の `result`（`status=SUCCESS` の `response`）だけを `logs/<label>.last.md` と `logs/<label>.log` に書き、判定・指摘数・必須検証・解消宣言はこの本文だけを読みます。読むのは、受け取り役（`gemini-stream-tee.py`）が `agy` の標準出力をパイプで直接受け取った親専用の写しです（子が書ける `logs/<label>.json` は判定の正本にしません。子の回収後に受け取った中身で置き換えます）。1 行目が `init` でない（先頭の欠落・`result` だけ残った記録）・`init` の重複・JSON の不正行・`result` の欠損・重複・終端でない `result`・`status=ERROR` は `VERDICT: NONE`。
+- 本文: 最後の `result`（`status=SUCCESS` の `response`）だけを `logs/<label>.last.md` と `logs/<label>.log` に書き、判定・指摘数・必須検証・解消宣言はこの本文だけを読みます。次回へ引き継ぐ本文（再利用の記録の未解決指摘）も `last.md` だけです（`logs/<label>.log` は見張りの行・証跡を含む表示用）。読むのは、受け取り役（`gemini-stream-tee.py`）が `agy` の標準出力をパイプで直接受け取った親専用の写しです（子が書ける `logs/<label>.json` は判定の正本にしません。子の回収後に受け取った中身で置き換えます）。1 行目が `init` でない（先頭の欠落・`result` だけ残った記録）・`init` の重複・JSON の不正行・`result` の欠損・重複・終端でない `result`・`status=ERROR` は `VERDICT: NONE`。
 - 見張りは `run-gemini.sh` と同じ（`gemini-agy.zsh`）: 出力が `GEMINI_REVIEW_NOOUTPUT_SEC`（既定 600 秒）止まれば `EXIT:8`、idle のまま子が無ければ `EXIT:3`、全体の上限は `GEMINI_REVIEW_PRINT_TIMEOUT`（既定 `45m`）。
 - 同じ道具でレビューしない: `logs/` に Gemini 実装の記録（`.pid` の `lane=gemini`・Gemini 実装の証跡の見出し。回転したものも）があれば、排他を取る前に止めます（`EXIT:2`。`.done` に理由と「Codex か Claude のレビューを使う」の案内）。候補の記録を読めない（確かめられない）ときも「記録なし」とは扱わずに止めます。`--allow-same-engine` を付けたときだけ回し、証跡に「同じ道具のレビュー」の行を残します。
 - 出力と終了コード: 出力は他のレビューと同じ（`logs/<label>.{log,json,stderr.log,prompt.md,evidence.md,last.md,pid,done}`・`.<系列>.review-state`・`<系列>.followups.md`）。証跡は「## Gemini レビュー証跡（<label>）」で、行の並びと文言は Claude レビューと同じに「- レビューエンジン: gemini」と「- 読み取り専用の確認」の行を足したもの。終了コードは `agy` の rc（非 0 はそのまま）、見張りの停止は idle `3` / 無出力 `8`、改ざん・書き込みの試みは `4`（`agy` の失敗の終了コードより優先。`agy` の終了コードは証跡の「読み取り専用の確認」の行と `.done` の `agy_rc=` に残る）、rc 0 で VERDICT が取れなければ `3`、引数・前提の誤りは `2`、実行中の `logs/` の差し替えは `5`。
@@ -151,7 +155,7 @@ Gemini を含む構成では、`run-gemini.sh` が必須にしている macOS �
 ### 確認・後片付け・QA の準備
 | スクリプト | 使い方 | 何をするか |
 |---|---|---|
-| `chk-run.sh` | `<worktree> <port> <outdir> [--merge <ref>] [--force]` / `<worktree> --query` | 統合直前の最終確認（7 章）。対象リポの `.lanes/check.sh`（優先）か `LANES_CHECK_CMD` を 1 本回し、`check=<rc>（出どころ）` を出す。`--query` は回さずに記録を使い回せるかだけ答える（レビューランチャが使う） |
+| `chk-run.sh` | `<worktree> <port> <outdir> [--merge <ref>] [--force]` / `<worktree> --query` / `<worktree> --query-input <port> <outdir>` | 統合直前の最終確認（7 章）。対象リポの `.lanes/check.sh`（優先）か `LANES_CHECK_CMD` を 1 本回し、`check=<rc>（出どころ）` を出す。`--query` は回さずに記録を使い回せるかだけ答え、`--query-input` は回さずに入力の指紋だけ答える（どちらもレビューランチャが使う） |
 | `cleanup-after-merge.sh` | `<worktree> [--apply]` | マージ後の後片付けと残骸の退避（9 章）。既定は dry-run（表示だけ） |
 | `cleanup-merged-worktrees.sh` | `<本体 checkout> [--apply]` | リポ全体の worktree に `cleanup-after-merge.sh` を回し、worktree の無いマージ済みローカル枝（`origin/$LANES_BASE_BRANCH` 基準。`main` / `master` / 統合先は除く）も消す。既定 dry-run。個別の停止があれば非 0 |
 | `after-develop-merge.sh` | `<feature-worktree> [--apply] [--skip-qa] [--no-deps] [--qa-prompt <path>] [--label <label>] [--repo owner/name] [--main-checkout <path> --feature-head <sha>]` | 統合後の入口。取り込み固定 → QA 用 worktree → 後片付け → QA 起動（9 章）。既定 dry-run。統合先は `LANES_BASE_BRANCH`（ファイル名は互換のため `develop` のまま） |
@@ -250,6 +254,8 @@ zsh lanes/lanes-watch.sh --check
 - 前回が `CLEAN`（`EXIT:0`）で、前後とも未保存の変更が無く、比較起点・案件指示・モード・モデル・effort・スクリプト・テンプレ・検証の設定（`LANES_CHECK_CMD` の値・対象の `.lanes/check.sh` の中身・`package.json` の scripts のうち typecheck / lint / test 系のもの）が同じときだけ、同じ HEAD なら省略（`--force` で強制実行）、進んでいれば前回 HEAD からの delta にします。どれかが変われば full。検証が未導入で `CLEAN` になった後に検証を足した（例: `LANES_CHECK_CMD` を設定した）ときも、同じ HEAD のまま前回の結果を使わずにレビューし直します。
 - 前回が `NEEDS_FIX` なら delta 指定でも full に戻し、前回の未解決の指摘を自動で引き継ぎます。全件の解消を確かめて独立した行 `RESOLVED_PREVIOUS_FINDINGS: YES` を出さない限り `NEEDS_FIX` のままです（コード例・引用・表の中や、`NO` との併記では解除しない）。
 - Codex レビュー（`run-codex-review.sh`）・Claude レビュー（`run-claude-review.sh`）・Gemini レビュー（`run-gemini-review.sh`）は同じ仕組みです。レビュー役（codex / claude / gemini）も条件に入るので、構成やレビュー役を変えたら前回の結果は使いません。どのランチャも、子の実行中に再利用の記録が書き換えられたら元の中身に戻して不合格（`NEEDS_FIX`・`EXIT:4`）にします。
+- **同じ worktree のレビューは 1 本ずつです。** 記録は全部の系列をまとめて子の前の中身へ戻すので、同じ `logs/` で別の label のレビュー（既定のレビューと追加の Gemini レビューなど）を並行すると、後から終わった方が先に終わった方の正規の保存を巻き戻します。ランチャは前回の記録を読む所から最後の保存まで `logs/` に排他のロック（flock）をかけ、取れなければ起動しません（`EXIT:2`。ロックはランチャの終了で外れる）。並行して見たいときは worktree を分けます。
+- 途中で終わったレビューの後始末: ランチャは子の起動前に、覚えた全系列の記録を `logs/` の外（`${XDG_STATE_HOME:-~/.local/state}/lanewright/review-inflight/`）の「確認中」の印に書き、子の後の確認（記録の復元・印の比較・変更と書き込みの判定）が済んだら消します。終了シグナル・`kill -9` などで途中で終わると印が残り、次のレビューが（排他を取った後に）記録を子の前の中身に戻し、その系列の前回の `CLEAN` を再利用しないようにします（戻せなければ「使い回し禁止」の印を置く）。dry-run は後始末をせず、印があるうちは前回の記録を使わない full として表示します。
 
 ### 必須検証の使い回し（親の `chk-run.sh` の記録）
 レビューのたびに、親が同じ HEAD で回した確認（型検査・lint・単体テスト）をレビュアーがもう一度回さないための仕組みです（`LANES_REVIEW_REUSE_CHECKS`。既定 `1`、`0` で問い合わせない）。
@@ -258,6 +264,7 @@ zsh lanes/lanes-watch.sh --check
   入力の指紋には作業ツリー（無視対象のファイルも含む）と環境変数が入るので、ランチャは scratch や git の通信止めを export する前に、`_common.sh` が外した API キーなども元に戻した環境で問い合わせます。**親は `chk-run.sh` とレビューを同じ環境（同じシェル）から呼び、その間に作業ツリーを変えないでください。** 変えると使い回さず、今までどおりレビューの中で回させます。
   ランチャの記録（`logs/` の直下の `.pid`・`.done`・ログ・証跡・起動ログなどのうち、ランチャが台帳 `logs/.lanes-records` に載せた持ち主のもの。7 章の `chk-run.sh`）は指紋に入りません。`detach-run.sh` が起動ログ（`logs/launch.log`）を先に書いても、前のレーンの記録が残っていても、記録と合います。台帳に無い名前のファイル（確認コマンドが読む `logs/input.json` など）は、記録に似た名前でも入力のままです。
   `detach-run.sh` は呼び出し元の環境変数をそのまま起動するコマンドへ渡すので、`detach-run.sh` を挟んで起動しても「同じ環境」として合います（12 章）。
+- 子の後の照合し直し: 使い回したときは、子の後にもう一度、問い合わせたときと同じ環境で入力の指紋を照合します（`chk-run.sh <worktree> --query-input <port> <outdir>`。生成物は比べない）。レビュー中に確認コマンドの入力（未追跡・無視対象の `logs/input.json`・依存・環境変数など。レビューの前後比較は未追跡の `logs/` を見ない）が変わっていたら、古い検証結果で `CLEAN` にせず `NEEDS_FIX`・`EXIT:4` にします。照合できないときも同じです。
 - 使い回せるとき: 指示書に「必須検証（typecheck / lint / unit）は親が同じ中身で実施済み（chk-run の記録: head・日時・確認コマンドの種類）。回さないこと。確かめたい点は該当テスト 1 本か小さな再現だけ」と入れ、必須検証は済んだものとして判定します（Codex: 成功確認 `COMPLETE` と同じ扱い。Claude・Gemini: テンプレの「検証 1 に未実施があれば CLEAN を出さない」を適用しない）。レビュアーが自分で回したテストの「失敗」の報告だけは不合格にします。証跡には `- 必須検証: 親の chk-run の記録を使用（head・日時・確認コマンド）` を出します。
 - 使い回せないとき（記録が無い・tree が違う・確認コマンドや環境が変わった・未 commit の変更がある・確認コマンドを確実に解決できない書き方など）: 今までとまったく同じ動きです。証跡には `- 必須検証: レビューの中で回すよう指示（親の chk-run の記録は使わない: <理由>）` を出します（指示した事実だけです。回せたかどうかは、証跡の「必須検証の成功確認」の行が示します）。
 - 使い回しの有無と使った記録（head・日時・確認コマンドの種類）は再利用の条件に入ります。記録が変わったら（使い回しが無くなった・親が回し直した）同じ HEAD でも前回の結果を使いません。
@@ -345,10 +352,15 @@ zsh lanes/lanes-watch.sh --check
 ### `chk-run.sh <worktree> --query`（回さずに、使い回せるかだけ答える）
 - 確認コマンドを一切実行せず、記録・出力先・記録のフォルダを作らず、fetch もしません。`--merge` / `--force` とは組み合わせられません（exit 2）。
 - 一致条件は `skip=same-tree` と同じです（tree・入力の指紋・確認コマンドの指紋）。同じ tree の記録ごとに、その記録の port と outdir で指紋を計算し直して照合します（port・outdir の無い旧形式の記録は使いません）。
-- 使い回せる: 1 行目 `reuse=yes`、続けて `head=<記録の head 12 桁>` / `recorded=<記録の日時>` / `check=<.lanes/check.sh か LANES_CHECK_CMD>` を出して exit 0。
+- 使い回せる: 1 行目 `reuse=yes`、続けて `head=<記録の head 12 桁>` / `recorded=<記録の日時>` / `check=<.lanes/check.sh か LANES_CHECK_CMD>` / `fp=` / `port=` / `outdir=`（照合した記録の port と outdir）/ `input=`（生成物を除いた入力の指紋）を出して exit 0。
 - 使えない: `reuse=no reason=<理由>` を出して exit 1。理由は `no-check`（確認コマンドが未設定）/ `no-record`（同じ tree の記録が無い。`chk-run.sh` をまだ通していないか、通ったが記録できなかった。後者は `chk-run.sh` が `record=no reason=…` の行に理由を出している）/ `cache-link`（記録がリンク）/ `uncommitted`（未 commit の変更・変更検知を省く設定）/ `unresolvable`（確認コマンドや依存を確実に解決できない）/ `input-changed`（確認コマンド・環境変数・依存・ランチャの記録でない無視対象のファイルなどが記録と違う）/ `state-error`。
 - 使い方の誤り（worktree が無い・git の作業ツリーでない・余計な引数）は exit 2。
-- 入力の指紋には環境変数が入るので、`chk-run.sh` を回したのと同じ環境から呼びます。レビューの入口・ランチャだけが持つ制御の値（`LANES_ENTRY_PREFLIGHT`・`LANES_REVIEW_REUSE_CHECKS`・`LANES_REVIEW_REQUIRE_CHECKS`）は指紋に入れません。
+- 入力の指紋には環境変数が入るので、`chk-run.sh` を回したのと同じ環境から呼びます。レビューの入口・ランチャだけが持つ制御の値（`LANES_ENTRY_PREFLIGHT`・`LANES_REVIEW_REUSE_CHECKS`・`LANES_REVIEW_REQUIRE_CHECKS`・`LANES_REVIEW_ENGINE`）は指紋に入れません。
+- 回すときも問い合わせのときも、最初の git の呼び出しの前に、呼び出し元の git の場所の指定（`GIT_DIR`・`GIT_COMMON_DIR`・`GIT_OBJECT_DIRECTORY` など。`_common.sh` の `LANES_GIT_LOCATION_ENV_NAMES` と同じ一覧）を全部外します（引数の worktree の参照・オブジェクトだけを見て、指紋もそろう）。指紋の計算に使う `python3` は作業ツリーへ移る前に絶対パスで確定します。
+
+### `chk-run.sh <worktree> --query-input <port> <outdir>`（回さずに、入力の指紋だけ答える）
+- `--query` と同じく何も実行・作成しません。渡した port と outdir（`--query` が答えた記録のもの。outdir は絶対パス）で入力の指紋を取り直し、`dirty=<0|1>`（未 commit の変更）と `input=<指紋>`（生成物を除く）を出して exit 0。取れなければ `reason=<理由>` を出して exit 1。
+- レビューランチャが、親の記録を使い回したレビューの子の後に、問い合わせたときと同じ環境で呼びます（上の「子の後の照合し直し」）。
 
 ## 8. 全レーンで MCP を使わない
 
@@ -492,7 +504,7 @@ zsh lanes/prepare-screen-qa.sh <checkout> [label] [--url <preview-url>] [--viewp
 | `LANES_STALL_MINUTES` | `10` | STALLED とみなす無出力の分数 |
 | `LANES_PROMPT_MAX_BYTES` | `200000` | プロンプトの上限（巨大な diff を埋め込む事故の検出） |
 | `LANES_REVIEW_REUSE_CHECKS` | `1` | 1 ならレビューランチャが `chk-run.sh --query` で問い合わせ、親の確認済みの記録があれば必須検証を回させない（6 章「必須検証の使い回し」）。0 なら問い合わせない |
-| `LANES_REVIEW_REQUIRE_CHECKS` | `0` | 1 なら、親の確認済みの記録を使えない（`no-record` / `uncommitted` / `input-changed`）とき、レビューの子を起動せずに止める（`EXIT:2`・`note=起動前の誤り`）。その起動だけ記録なしで回すなら `--allow-missing-checks`。0 なら今までどおり起動する（`docs/config.md`） |
+| `LANES_REVIEW_REQUIRE_CHECKS` | `0` | 1 なら、親の確認済みの記録を使えない（`no-record` / `uncommitted` / `input-changed` / 問い合わせそのものの失敗 `query-failed`）とき、レビューの子を起動せずに止める（`EXIT:2`・`note=起動前の誤り`）。その起動だけ記録なしで回すなら `--allow-missing-checks`。0 なら今までどおり起動する（`docs/config.md`） |
 | `LANES_REVIEW_ENGINE` | 空 | `run-review.sh` が振り分けるレビュー役（空なら構成のレビュー役。`codex` / `claude` / `gemini`。`--engine` が勝つ。`chk-run.sh` の指紋には入らない） |
 
 数値のキー（`LANES_STALL_MINUTES` `LANES_NOTIFY` `LANES_PROMPT_MAX_BYTES` `LANES_DOWNLOADS_SCAN` `LANES_DETACH_QA` `LANES_REVIEW_REUSE_CHECKS` `LANES_REVIEW_REQUIRE_CHECKS`）は `lanes.env` が整数か確かめ、数字以外なら計算に使わずに exit 2 で止まります（0 / 1 のキーと 1 以上のキーの別は `docs/config.md`）。ランチャ（`run-*.sh`）では、その label の排他を取れれば今回の失敗（`EXIT:2`・`note=起動前の誤り: 設定の誤り: ...`）を `.done` に残すので、前回成功した label でも `lanes-status.sh` は `FAILED` を返します。
@@ -541,7 +553,7 @@ LANES_LINT_STRICT=1 zsh selftest.sh --test tests/test-lint.sh   # shellcheck が
 | `test-gemini-launcher.sh` | Gemini レーンのサンドボックス・監査・救済 commit |
 | `test-chk-run.sh` / `test-chk-regressions.sh` | 最終確認の省略条件と入力照合・問い合わせ（`--query`）・通ったのに記録しないときの理由の表示（`record=no reason=…`）・依存と生成物の中のリンクの扱い（作業ツリーの中を指すなら記録し、外・行き先なしなら記録しない） |
 | `test-review-reuse-launch.sh` | `chk-run.sh` の直後に `detach-run.sh` 経由で本物の起動（dry-run でない）をしたレビューが、親の記録を使い回すこと（`node_modules`・`dist` のある worktree。Codex・Claude のレビューとも）。台帳（`logs/.lanes-records`）に載っている持ち主の記録は入力に数えず、台帳に無い名前（記録に似た名前の `logs/input.json` など）・`logs/` に置いたほかの入力・リンク・依存・生成物の変化では使い回さないこと。確認コマンドが `logs/input.json` を読む構成で中身を変えたら回し直すこと。台帳の書き方（リンクの台帳を辿らない）。台帳が FIFO（名前付きパイプ）でも、`chk-run.sh`・問い合わせ・レビューの起動・台帳へ載せる側が待たずに返ること。起動ログが FIFO・ハードリンク・symlink なら、`detach-run.sh` がその先へ書かずに起動を断ること。`python3` の入口が通るたびに環境変数を書き換える Mac（Xcode・pyenv の形を、偽の入口を PATH の先頭に置いて再現する）でも使い回すこと。`detach-run.sh` が呼び出し元の環境変数をそのまま子へ渡すこと。同じ確認（`--core`）を、そのまま回しても `chk-run.sh` の確認コマンドの中から回しても同じ結果になること（回す場所で緑と赤が変わらない） |
-| `test-review-require-checks.sh` | `LANES_REVIEW_REQUIRE_CHECKS=1` のとき、親の記録を使えない（`no-record` / `uncommitted` / `input-changed`）レビューを子の起動の前に止め、`.done` に理由と直し方を残すこと。既定（0）・記録を使えるとき・確認コマンドが未設定の案件・`LANES_REVIEW_REUSE_CHECKS=0`・`--allow-missing-checks` では起動すること（既定では証跡の文言も変わらない）。値が入力の指紋に入らないこと（起動のときだけ環境変数で渡しても記録が合う）。止まった後に `chk-run.sh` を通せば同じ label でやり直せること。前回 CLEAN の後で記録が合わなくなったら、同じ head でも前回の結果を使わずに止まること。止める・止めないの振り分け（関数単体）。入口経由・Claude のレビューでも同じこと |
+| `test-review-require-checks.sh` | `LANES_REVIEW_REQUIRE_CHECKS=1` のとき、親の記録を使えない（`no-record` / `uncommitted` / `input-changed` / `query-failed`）レビューを子の起動の前に止め、`.done` に理由と直し方を残すこと。既定（0）・記録を使えるとき・確認コマンドが未設定の案件・`LANES_REVIEW_REUSE_CHECKS=0`・`--allow-missing-checks` では起動すること（既定では証跡の文言も変わらない）。値が入力の指紋に入らないこと（起動のときだけ環境変数で渡しても記録が合う）。止まった後に `chk-run.sh` を通せば同じ label でやり直せること。前回 CLEAN の後で記録が合わなくなったら、同じ head でも前回の結果を使わずに止まること。止める・止めないの振り分け（関数単体）。入口経由・Claude のレビューでも同じこと |
 | `test-cleanup-safety.sh` / `test-cleanup-qa.sh` / `test-scratch-cleanup.sh` / `test-cleanup-pg-failures.sh` | 後片付けの停止条件・QA worktree・scratch・一時 PostgreSQL |
 | `test-lanes-monitor.sh` / `test-lanes-watch.sh` | 巡回とウォッチ |
 | `test-prepare-screen-qa.sh` | 画面 QA の準備 |

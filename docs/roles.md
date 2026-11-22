@@ -34,7 +34,8 @@ zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> [label] [--engine codex|cla
   足りないものを全部並べて exit 2 で止まります（揃っていれば 0）。Claude は `claude auth status`、Codex は `codex login status` で見ます。
   Gemini の `agy` にはログイン確認のコマンドが無いので、ログイン情報の置き場所 `~/.gemini/antigravity-cli` があるかどうかで見ます。
   Gemini を含む構成では、`run-gemini.sh` が必須にしている macOS の端末サンドボックス（`/usr/bin/sandbox-exec`）を有効にできるかも見ます。
-  点検を飛ばす抜け道（テスト用の変数など）はありません。`run-impl.sh` / `run-review.sh` も起動前に `lanes-doctor.sh --quiet` を通し、
+  点検を飛ばす抜け道（テスト用の変数など）はありません。`run-impl.sh` / `run-review.sh` も起動前に `lanes-doctor.sh --quiet` を通し
+  （レビューは確定したレビュー役を `--review-engine` で渡す。設定ファイルの `LANES_REVIEW_ENGINE` に上書きされない）、
   個別のランチャ（`run-claude.sh` など）も自分が使う道具だけ同じ点検をします。
 - 構成に無い道具のランチャを直接呼ぶと（例: ④で `run-codex-review.sh`）、起動せずに exit 2 で入口の名前を案内します。
 - `run-impl.sh` / `run-review.sh` の終了コードは振り分け先のランチャのままです。入口自身の誤り（不明なオプションを含む引数・構成・点検）は exit 2 で止まります。
