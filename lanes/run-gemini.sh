@@ -9,7 +9,10 @@
 # MCP 設定自体の読み込み・接続開始を隔離するものではない。ツール呼び出しの拒否を強制する。
 # Git の書き込みはランチャが担当。今回の COMMIT_MSG.txt と許可範囲の差分だけを、検証成功後に保存する。
 # agy の書き込み先は worktree と scratch だけ。Git 管理領域（.git 本体・フック・設定）はサンドボックスへ渡さない。
-# 本体 checkout（.git がディレクトリで作業場所の中にある）では起動しない。専用の linked worktree が前提。
+# 専用の linked worktree だけで起動する（_common.sh の lanes_require_linked_worktree。本体 checkout・管理領域を外に置いた本体・
+# submodule では起動しない）。呼び出し元の GIT_DIR などは _common.sh を読んだ時点で外し、git から見た最上位がこの worktree か確かめる。
+# agy の出力は受け取り役（gemini-stream-tee.py）がパイプで受け取り、監査は子の回収後に受け取った中身で置き換えた logs/<label>.json を読む
+# （再実行の前の分 <label>.try1.json も、2 回目の子の回収後に置き換え直す）。親の python3 は -I（作業場所のモジュールを読まない）
 # agy の終了後、ランチャが git を実行する前に worktree の .git ファイル（管理領域への入口）が変わっていないことを確かめる。
 # Git の読み取り（diff / log / status）は書き込み不要の形で許す（GIT_OPTIONAL_LOCKS=0）。
 # main / master / 統合先の枝（LANES_BASE_BRANCH）/ detached は push しない。--no-push は通常終了時もローカル保存まで。
@@ -50,11 +53,13 @@ wt="${wt:A}"; prompt="${prompt:A}"
 lanes_early_target "$wt" "$label" "$dry"
 lanes_require_label "$label"
 lanes_require_worktree "$wt"
+# 呼び出し元の git の場所の環境変数（GIT_DIR など）は _common.sh を読んだ時点で外してある。git から見た最上位がこの worktree か確かめる
+lanes_require_toplevel "$wt"
 
 # 保存範囲は文章から推測しない。末尾 / はディレクトリ全体、それ以外は完全一致。
 # 起動前の変更、範囲外の変更、リンクで外へ向く変更は保存しない。Git のパスは NUL 区切りで扱う。
 gem_changes() {   # initial / check / stage。stage も保存直前に同じ検査を行う
-  python3 - "$wt" "$1" "${allowed_paths[@]}" <<'PY'
+  python3 -I - "$wt" "$1" "${allowed_paths[@]}" <<'PY'
 import os, subprocess, sys
 from pathlib import Path
 wt, mode, *scopes = sys.argv[1:]
@@ -125,8 +130,8 @@ gem_changes initial >/dev/null || lanes_die "作業開始前の変更・保存�
 if (( ! dry )); then
   for f in "$log" "$json" "$err" "$evidence" "$final" "$json1" "$err1"; do lanes_rotate_log "$f"; done
 fi
-mkdir -p "$logdir"
-(( ! dry )) || lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
+# dry-run は lanes_mark_start を通らないので、書く前に logs/ と書き込み先（<label>.dry-run.prompt.md）を確かめ、台帳へ載せる
+if (( dry )); then lanes_dry_run_target "$wt" "$logdir" "$label" "$final"; fi
 if (( dry )); then scratch="$(lanes_scratch_path "$wt" "$label")"; else lanes_scratch_prepare "$wt" "$label" gemini; scratch="$LANES_SCRATCH"; fi
 
 lanes_require_prompt "$prompt"
@@ -143,12 +148,11 @@ unset gem_help
 
 branch="$(git -C "$wt" branch --show-current 2>/dev/null)"; [[ -n "$branch" ]] || branch="(detached)"
 head="$(git -C "$wt" rev-parse --short=12 HEAD)"
-gitdir="$(git -C "$wt" rev-parse --path-format=absolute --git-dir)"
-gitcommon="$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)"
 # サンドボックス内の agy が .git/hooks や設定を書き換えると、ランチャがサンドボックスの外で走らせる
-# git commit などから実行されうる。管理領域が作業場所・scratch の外にある linked worktree に限る。
+# git commit などから実行されうる。管理領域が作業場所・scratch の外にある、登録済みの linked worktree に限る。
+lanes_require_linked_worktree "$wt"
+gitdir="$LANES_WT_GITDIR"; gitcommon="$LANES_WT_GITCOMMON"
 gitlink="$wt/.git"
-[[ -f "$gitlink" && ! -L "$gitlink" ]] || lanes_die "本体 checkout（.git がディレクトリ）またはリンクの .git では起動しない。git worktree add で専用 worktree を作ってから渡す"
 for gd in "$gitdir" "$gitcommon"; do
   [[ "${gd:A}/" != "${wt:A}/"* && "${gd:A}/" != "${scratch:A}/"* ]] || lanes_die "Git 管理領域が worktree / scratch の中にある → 起動禁止: $gd"
 done
@@ -208,7 +212,7 @@ cmd+=(--mode accept-edits --sandbox --settings "$gem_settings"
 # agy を新しいプロセスグループで起動する（止めるときにグループごと止められるように）
 if (( dry )); then
   print -- "[dry-run] scratch: $scratch"
-  print -- "[dry-run] cd ${(q)wt} && ANTIGRAVITY_HEADLESS=true TMPDIR=${(q)scratch}/ LANES_SCRATCH=${(q)scratch} GIT_DIR=${(q)gitdir} GIT_WORK_TREE=${(q)wt} GIT_CONFIG_GLOBAL=${(q)scratch}/gitconfig lanes_start_child ${(q)cmd[@]} -p \"\$(<${(q)final})\" < /dev/null > ${(q)json} 2> ${(q)err}"
+  print -- "[dry-run] （子だけ cd ${(q)wt}）ANTIGRAVITY_HEADLESS=true TMPDIR=${(q)scratch}/ LANES_SCRATCH=${(q)scratch} GIT_DIR=${(q)gitdir} GIT_WORK_TREE=${(q)wt} GIT_CONFIG_GLOBAL=${(q)scratch}/gitconfig lanes_start_child_in ${(q)wt} python3 -I gemini-stream-tee.py ${(q)logdir} ${(q)json:t} -- ${(q)cmd[@]} -p \"\$(<${(q)final})\" < /dev/null >（親専用の写し）2> ${(q)err}"
   print -- "[dry-run] 見張り: idle（root agent idle）の後 子が無く json が ${idle_grace} 秒動かなければ異常終了 / 出力 ${noout_sec} 秒なしで EXIT:8 / --print-timeout $print_timeout / 確認間隔 ${poll} 秒"
   print -- "[dry-run] 必須検証（サンドボックス外・commit 前）: $verify"
   print -- "[dry-run] 終了後: 子孫を停止 → 書き込み・保存範囲検査 → 必須検証 → 今回の COMMIT_MSG.txt と許可範囲の変更だけを commit（異常終了の救済は EXIT:3・push なし）"
@@ -257,7 +261,7 @@ audit="$scratch/gemini-audit.txt"; body_file="$scratch/gemini-response.txt"
 run_audit() {   # 引数: 検査する json（1 回目と再実行の両方）
   # scratch は agy が書ける場所。子の回収後に、前からある物（symlink など）を消してから新しく作る
   lanes_fresh_file "$audit"; lanes_fresh_file "$body_file"
-  python3 - "$audit" "$wt" "$scratch" "$body_file" "$GEM_IDLE_KILLED" "$@" <<'PY' || print -u2 -- "[run-gemini] 書き込み検査（python）が失敗"
+  python3 -I - "$audit" "$wt" "$scratch" "$body_file" "$GEM_IDLE_KILLED" "$@" <<'PY' || print -u2 -- "[run-gemini] 書き込み検査（python）が失敗"
 import json, os, re, sys
 out, wt, scr, body_out = sys.argv[1:5]
 allow_incomplete = sys.argv[5] == '1'
@@ -284,13 +288,18 @@ for src in srcs:
         invalid.append('ログが空'); continue
     results = 0
     last_event = None
-    for line in lines:
+    inits, first_init = 0, False
+    for index, line in enumerate(lines):
         try: d = json.loads(line)
         except (ValueError, TypeError):
             invalid.append('JSON の不正行'); continue
         if not isinstance(d, dict) or not isinstance(d.get('event'), str):
             invalid.append('イベントの形式が不正'); continue
         last_event = d['event']
+        if d['event'] == 'init':
+            # 開始から記録できたことの確かめ（1 行目の init）。Gemini レビューの監査と同じ
+            inits += 1; first_init = first_init or index == 0
+            continue
         if d.get("event") == "result":
             r = d.get("result")
             if not isinstance(r, dict) or r.get('status') not in ('SUCCESS', 'ERROR'):
@@ -338,6 +347,10 @@ for src in srcs:
         invalid.append('結果が重複、または終端ではない')
     if results == 0 and not (allow_incomplete and src == srcs[-1]):
         invalid.append('終了結果が欠損')
+    if not first_init:
+        invalid.append('開始の記録（先頭の init）が無い')
+    if inits > 1:
+        invalid.append('開始の記録（init）が重複')
 def new_file(path):
     # 既存の物（symlink・ハードリンク）は辿らず、必ず新しい普通のファイルとして作る
     try:
@@ -378,9 +391,10 @@ gem_changes initial >/dev/null || lanes_die "agy 起動前に未保存の変更�
   print -- "----"
 } > "$log"
 
-retried=0; stop_line="なし"
+retried=0; stop_line="なし"; public_tampered=0
 run_agy_once "$json" "$err"
 gem_gitlink_check
+(( ! GEM_PUBLIC_TAMPERED )) || public_tampered=1
 run_audit "$json"
 gstatus="$(audit_get status)"; [[ -n "$gstatus" ]] || gstatus="NONE"
 scope_ok=1; changes="$(gem_changes check)" || { scope_ok=0; changes=0; }
@@ -393,8 +407,14 @@ if (( ! GEM_IDLE_KILLED && ! GEM_NOOUT && scope_ok && changes == 0 )) && [[ "$gs
   print -- "[run-gemini] $(lanes_now) agy が $gstatus（一時的なエラー）・差分なし → 1 回だけ再実行（1 回目は ${json1:t} / ${err1:t}）" >> "$log"
   mv -f "$json" "$json1"; mv -f "$err" "$err1"
   archive_message
+  json1_fd="$GEM_STREAM_FD"   # 1 回目に受け取った中身（親専用の写し）
   run_agy_once "$json" "$err"
   gem_gitlink_check
+  (( ! GEM_PUBLIC_TAMPERED )) || public_tampered=1
+  # 2 回目の子は 1 回目の記録（<label>.try1.json）も書き換えられるので、回収後に 1 回目に受け取った中身と突き合わせ（違えば改ざん）、
+  # 置き換え直してから監査する（置き換えられなければ消す → 監査が「ログを読み取れない」で不合格にする）
+  gem_check_public "$json1_fd" "$json1" 0 || public_tampered=1
+  gem_publish_stream "$json1_fd" "$json1" || print -u2 -- "[run-gemini] 1 回目の記録（$json1）を受け取った中身で置き換えられない（消した）"
   run_audit "$json1" "$json"
   gstatus="$(audit_get status)"; [[ -n "$gstatus" ]] || gstatus="NONE"
   scope_ok=1; changes="$(gem_changes check)" || { scope_ok=0; changes=0; }
@@ -419,6 +439,8 @@ if (( GEM_NOOUT )); then
   note="出力が ${noout_sec} 秒止まったので停止。作業途中の変更は戻さず残した（commit していない。$scratch/wip.patch）"
 elif [[ "$(audit_get audit_ok)" != "1" ]]; then
   rc=4; note="書き込み検査が完了しなかった（$audit）→ 安全側で commit しない。親が確認"
+elif (( public_tampered )); then
+  rc=4; note="agy の実行中に logs/ の stream-json（$json:t など）が消された・書き換えられた（受け取った中身と違う）→ 安全側で commit しない。親が確認"
 elif (( outside_n > 0 || suspect_n > 0 )); then
   rc=4; note="worktree / scratch の外へ書き込み ${outside_n} 件: ${outside_paths% }（$audit）。戻していない。親が確認"
 elif (( ! scope_ok )) || [[ "$(git rev-parse HEAD)" != "$head_full_before" ]]; then
