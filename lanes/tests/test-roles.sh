@@ -491,7 +491,7 @@ pass "排他が取れない（実行中）ときは前回の記録に触らず�
 
 # ---- 11. 旧名のランチャ・互換の入口は置かない（公開版は新しい名前だけ） ----
 # 置いてあるランチャ（run-*.sh）とレビュー出力の整形（*-output.py）が、新しい名前の一覧と一致すること
-want_launchers="codex-review-output.py run-claude-review.sh run-claude.sh run-codex-review.sh run-codex.sh run-gemini.sh run-impl.sh run-qa.sh run-review.sh"
+want_launchers="codex-review-output.py run-claude-review.sh run-claude.sh run-codex-review.sh run-codex.sh run-gemini-review.sh run-gemini.sh run-impl.sh run-qa.sh run-review.sh"
 typeset -a have_list; have_list=("$LANES_DIR"/run-*.sh(N:t) "$LANES_DIR"/*-output.py(N:t))
 have_list=(${(o)have_list}); have_launchers="${(j: :)have_list}"
 [[ "$have_launchers" == "$want_launchers" ]] || fail "ランチャの一覧が新しい名前だけになっていない（$have_launchers）"
