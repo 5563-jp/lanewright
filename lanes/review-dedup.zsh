@@ -351,17 +351,24 @@ PY_SAVE
 # round の数え（last_round）は前の値のまま（無ければ round - 1。0 未満にしない）。同じ round を回し直せるようにする。
 # 前回が NEEDS_FIX なら、その未解決指摘の本文（last_report）と解消確認の要否（last_blocking_previous）だけは持ち越す
 # （last_carried_verdict。rvd_carried_record）。CLEAN は持ち越さない。
+# 持ち越す本文は、読み切って空でないことを確かめてから記録を付け替える。読めない・空なら元の記録を壊さずに 1 を返す
+# （置き換えた後で失敗に気づくと、次の起動へ未解決指摘（P1 など）が引き継がれない）。記録そのものを読めないときも 1
 # <logdir> <series> <round> <label> [前回の記録] [前回の判定]
 rvd_mark_in_progress() {
-  local logdir="$1" series="$2" round="$3" label="$4" record="${5:-}" prev_v="${6:-}" f last carry=0 blocking=0
+  local logdir="$1" series="$2" round="$3" label="$4" record="${5:-}" prev_v="${6:-}" f last carry=0 blocking=0 report=""
   f="$(rvd_state_file "$logdir" "$series")"
-  last="$(rvd_state_get "$f" last_round)"
+  last="$(rvd_state_get "$f" last_round)" || return 1
   [[ "$last" == <-> ]] || last=$(( round > 0 ? round - 1 : 0 ))
   if [[ "$prev_v" == 'VERDICT: NEEDS_FIX' && -n "$record" ]]; then
-    carry=1; blocking="$(rvd_record_get "$record" blocking_previous)"
+    carry=1
+    blocking="$(rvd_record_get "$record" blocking_previous)" || return 1
+    # 末尾の改行も含めて受け取る（コマンド置換が末尾の改行を落とさないよう、印の x を付けてから外す）
+    report="$(rvd_record_get "$record" report && print -n x)" || return 1
+    report="${report%x}"
+    [[ -n "${report//[[:space:]]/}" ]] || return 1
   fi
   # 持ち越す本文は標準入力で渡す（長くても引数の上限に当たらない）。読み終えてから記録を付け替えるので、同じ記録から持ち越すときも壊れない
-  { if (( carry )); then rvd_record_get "$record" report; fi } | python3 -c '
+  print -rn -- "$report" | python3 -I -c '
 import json, sys
 last, label, carry, blocking, started = sys.argv[1:6]
 report = sys.stdin.read() if carry == "1" else ""
