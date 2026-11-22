@@ -674,10 +674,12 @@ wt, first = repo('fu-audit')
 body3 = '- [P2] 今回の残件\n' + skip_line + '\nVERDICT: NEEDS_FIX'
 fu = wt / 'logs/h.followups.md'
 r, cap, done = gem(wt, 'h-r3', mutation='write-tool', body=body3)
-check('round 3 の P2 でも、書き込みの試みで失格（EXIT:4）なら後回し票に書かない', r.returncode == 4 and not fu.exists(), out(r) + done)
+check('round 3 の P2 でも、書き込みの試みで失格（EXIT:4）なら後回し票に書かない（証跡にも保存していないと書く）',
+      r.returncode == 4 and not fu.exists() and '（確定しなかったので保存していない）' in evidence(wt, 'h-r3'), out(r) + done)
 r, cap, done = gem(wt, 'h-r3', body=body3)
 check('監査を通った回だけ後回し票に公開し、失格の回の分は重ならない',
-      r.returncode == 0 and fu.read_text().count('## round 3') == 1 and fu.read_text().count('今回の残件') == 1, out(r) + (fu.read_text() if fu.exists() else ''))
+      r.returncode == 0 and fu.read_text().count('## round 3') == 1 and fu.read_text().count('今回の残件') == 1
+      and '確定しなかったので' not in evidence(wt, 'h-r3'), out(r) + (fu.read_text() if fu.exists() else ''))
 wt, first = repo('fu-prev')
 gem(wt, 'p-r2', body='- [P2] a.txt:1 前回の軽微な指摘\nVERDICT: NEEDS_FIX')
 fu = wt / 'logs/p.followups.md'

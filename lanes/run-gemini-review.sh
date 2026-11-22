@@ -644,7 +644,7 @@ evidence_text() {
   [[ "$gate" != ESCALATE ]] || print -- "- 周回の上限（LANES_REVIEW_MAX_ROUNDS=${LANES_REVIEW_MAX_ROUNDS:-5}）を超えた → ここで止めて人に判断を返す（続ける＝直して上限を上げる / 締める＝残りを .lanes/accepted-limitations.md か後回し票へ）"
   print -- "- 必須検証の成功確認: $checks（仕組みがあると見た項目: ${checks_present:-なし}。その項目の「該当なし（未導入）」・NA は受け付けない）"
   rvd_checks_evidence
-  [[ -z "$followups" ]] || print -- "- 元の判定: $raw_verdict / P2/P3 の保存先: $followups"
+  [[ -z "$followups" ]] || print -- "- 元の判定: $raw_verdict / P2/P3 の保存先: $followups${fu_skip_note:-}"
   (( ! carried )) || print -- "- 前回: 途中で終わったレビュー（IN_PROGRESS）の記録から、その前の NEEDS_FIX の未解決指摘を引き継いだ（full）"
   [[ -z "$verdict_note" ]] || print -r -- "- VERDICT の読み取り: $verdict_note"
   print -- "- 読み取り専用の確認: 書き込みの試み ${writes_n} 件${write_tools:+（$write_tools）}（1 件でもあれば不合格）/ 承認・質問ツール ${asks_n} 回 / agy: $gstatus・終了コード $agy_rc / JSON の不備 ${invalid_n} 件${invalid_kinds:+（$invalid_kinds）} / 見張り: $stop_line"
@@ -733,6 +733,8 @@ if [[ -n "$fail_reason" ]]; then
   fi
 fi
 (( final_rc != 0 )) || [[ "$done_verdict" == 'VERDICT: CLEAN' || "$done_verdict" == 'VERDICT: NEEDS_FIX' ]] || final_rc=3   # 完走したのに VERDICT が無い
+# ここまで来たときは後回し票を公開していない（確定しなかった・公開した分は戻した）。証跡の保存先の行にその旨を付ける
+fu_skip_note="（確定しなかったので保存していない）"
 ev_text="$(evidence_text "$done_verdict" "$final_rc" "$fail_reason")" \
   || ev_text="## Gemini レビュー証跡（$label）"$'\n'"- $done_verdict"$'\n'"- 実行: $started 開始 / EXIT:$final_rc${fail_reason:+ / 記録の確定: できなかった（$fail_reason）}"
 print -r -- "$ev_text" | publish_to "$evidence" || print -u2 -- "→ 証跡（${evidence:t}）を書けない"
