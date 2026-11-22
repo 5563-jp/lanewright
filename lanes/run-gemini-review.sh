@@ -119,7 +119,9 @@ if lanes_has_impl_lane "$logdir" gemini; then
   fi
 fi
 if (( ! dry )); then
-  lanes_mark_start "$logdir" "$label" gemini-review "$wt" "file:.$series.review-state" "file:$series.followups.md"
+  # label の排他に加えて、同じ logs/ のレビュー共通の排他（--review-lock。Codex・Claude のレビューと共通の logs/.review.lock）を取る。
+  # 別の label・別のエンジンのレビューが実行中なら、その記録・再利用の記録には触らずに止める（exit 2）
+  lanes_mark_start "$logdir" "$label" gemini-review "$wt" --review-lock "file:.$series.review-state" "file:$series.followups.md"
   # 終了記録（.done）の書き込み先を、記録に触る前に確かめる。lanes_mark_start の回転が退避するのは普通のファイルと symlink だけなので、
   # 同じ名前のフォルダなどが残っていると、最後の .done だけを書けない（終了記録の無い実行を、次の起動が再利用し得る）。ここで止める
   [[ ! -e "$LANES_DONEFILE" && ! -L "$LANES_DONEFILE" ]] \

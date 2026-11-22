@@ -107,7 +107,7 @@ lanes_claude_review_resolve() {
 unset LANES_DEFERRED_ERROR LANES_EARLY_LABEL LANES_EARLY_LOGDIR LANES_CHECKS_PRESENT
 # 排他と終了記録の内部の状態（lanes_mark_start が決める）も外から持ち込ませない（持ち込まれた値で別の場所へ .done を書かない・
 # 排他を取ったことにしない）
-unset LANES_LOCK_FD LANES_PIDFILE LANES_DONEFILE LANES_DONE_WRITTEN LANES_DONE_OK
+unset LANES_LOCK_FD LANES_REVIEW_LOCK_FD LANES_PIDFILE LANES_DONEFILE LANES_DONE_WRITTEN LANES_DONE_OK
 # 1 = 必須検証（typecheck / lint / unit）は親の chk-run.sh の記録で済んでいる（レビューランチャが問い合わせて決める）。
 # 判定（lanes_parse_review）へ引数で渡す。環境から持ち込ませない（export しない・ここで 0 に戻す）
 typeset -g +x LANES_REVIEW_CHECKS_REUSED=0
@@ -1163,11 +1163,16 @@ lanes_model_effort_evidence() {
 }
 
 # 同じ label が実行中なら起動しない（ログとマーカーが混ざる）。前回の .pid / .done は .prev-<日時> に回転
-# <logdir> <label> <lane> <worktree> [台帳に一緒に載せる名前（file:<名前>）...]
-# この label を、何かを書く前にランチャの記録の台帳へ載せる。5 つ目以降は、label では決まらない記録の名前（レビューの系列の記録など）
+# <logdir> <label> <lane> <worktree> [--review-lock] [台帳に一緒に載せる名前（file:<名前>）...]
+# この label を、何かを書く前にランチャの記録の台帳へ載せる。5 つ目以降は、label では決まらない記録の名前（レビューの系列の記録など）。
+# --review-lock: レビューのランチャ（Codex・Claude・Gemini）だけが付ける。label の排他に加えて、同じ logs/ のレビュー共通の排他
+# （logs/.review.lock。lanes_review_lock）も取る
 lanes_mark_start() {
-  local logdir="$1" label="$2" lane="$3" wt="$4"
-  local -a claims; claims=("label:$label" "${@:5}")
+  local logdir="$1" label="$2" lane="$3" wt="$4" arg review=0
+  local -a claims; claims=("label:$label")
+  for arg in "${@:5}"; do
+    if [[ "$arg" == --review-lock ]]; then review=1; claims+=("file:$LANES_REVIEW_LOCK_NAME"); else claims+=("$arg"); fi
+  done
   local pidfile="$logdir/$label.pid" donefile="$logdir/$label.done"
   # ここから先の誤りは自分で理由（実行中など）を出し、排他を取った後の失敗は TRAPEXIT が .done に残す
   unset LANES_EARLY_LABEL LANES_EARLY_LOGDIR
@@ -1193,6 +1198,8 @@ lanes_mark_start() {
   if lanes_child_alive "$pidfile"; then
     lanes_die "前回の子 pid $(sed -n 's/^child_pid=//p' "$pidfile" | head -1) が生存または同一性不明。所有者と終了を確認してから再起動: $pidfile"
   fi
+  # レビューは、同じ logs/ のほかのレビュー（別の label・別のエンジン）とも同時に走らせない。前回の記録を回転する前に取る
+  (( ! review )) || lanes_review_lock "$logdir" "$label"
   lanes_rotate_log "$pidfile"; lanes_rotate_log "$donefile"
   # .pid を書く前にグローバルを用意する（.pid が存在する時点からシグナルが来ても .done を書けるように）
   typeset -g LANES_PIDFILE="$pidfile" LANES_DONEFILE="$donefile" LANES_DONE_WRITTEN=0 LANES_LABEL="$label" LANES_T0="$(date +%s)"
@@ -1207,6 +1214,36 @@ worktree=$wt"
     LANES_PIDFILE_BASE+=$'\n'"model=$LANES_REC_MODEL"$'\n'"effort=$LANES_REC_EFFORT"
   fi
   print -r -- "$LANES_PIDFILE_BASE" > "$pidfile"
+}
+
+# ---- レビュー共通の排他（同じ logs/ のレビューを 1 本ずつにする）----
+# 対象は Codex・Claude・Gemini のレビューのランチャ（lanes_mark_start の --review-lock）。label もエンジンも問わず、同じ worktree の
+# logs/ でレビューが 1 本走っている間は、ほかのレビューを起動しない（exit 2）。
+# 経緯: label の排他だけだと、別の label のレビュー（既定のレビューと Gemini の追加レビューなど）が同じ worktree で同時に走れた。
+# 先に始めた Codex・Claude のレビューは、終わるときに再利用の記録を全部の系列で開始時点へ戻す（rvd_states_restore）ので、
+# 後から始めた Gemini のレビューの確認中の印（IN_PROGRESS）を消して古い CLEAN を戻し、その古い合格を次の起動が使い得た。
+# 取れないときは、実行中のレビューの記録（.pid・.done・再利用の記録・後回し票）には触らない。今回の label の前回の記録だけは、
+# 起動前の誤りと同じく回転して今回の失敗（EXIT:2・note=起動前の誤り: ...）を残す（lanes-status.sh が今回の label の前回の DONE を
+# 返して、起動していないのに成功と取り違えないように。lanes_record_early_failure と同じ扱い）。
+# ロックファイルは label の .lock と同じく消さない・回転しない（消すと別の inode に別のロックを取れてしまう）。台帳には file: で載せる
+# （chk-run.sh は入力の指紋から外す）。シェルの終了でカーネルが外すので、強制終了の後も次の起動を妨げない。
+# 呼ぶのは lanes_mark_start の中だけ（label の排他を取り、前回のプロセスが生きていないと確かめた後・前回の記録を回転する前）
+typeset -g LANES_REVIEW_LOCK_NAME=".review.lock"
+lanes_review_lock() {   # <logdir> <label>
+  local logdir="$1" label="$2" lockf="$1/$LANES_REVIEW_LOCK_NAME" msg
+  [[ -z "${LANES_REVIEW_LOCK_FD:-}" ]] || lanes_die "このランチャは既にレビューの排他を取得している"
+  ( : >> "$lockf" ) || lanes_die "レビューの排他のロックファイルを作れない: $lockf"
+  typeset -g LANES_REVIEW_LOCK_FD
+  zsystem flock -t 0 -f LANES_REVIEW_LOCK_FD "$lockf" 2>/dev/null && return 0
+  msg="同じ worktree の logs/ で別のレビューが実行中（Codex・Claude・Gemini のレビュー共通の排他 logs/$LANES_REVIEW_LOCK_NAME を取れない）。そのレビューの終了を待ってから起動し直す（lanes-status.sh <worktree> で RUNNING のレビューを確かめる）"
+  print -u2 -- "ERROR: $msg"
+  lanes_rotate_log "$logdir/$label.pid"; lanes_rotate_log "$logdir/$label.done"
+  if lanes_early_done "$logdir" "$label" "$msg"; then
+    print -u2 -- "NOTE: 実行中のレビューの記録・再利用の記録には触っていない。今回の失敗を $logdir/$label.done に残した（lanes-status.sh は FAILED を返す）"
+  else
+    print -u2 -- "NOTE: 実行中のレビューの記録・再利用の記録には触っていない。今回の失敗の記録（$label.done）は書けない（書きかけは残していない）"
+  fi
+  exit 2
 }
 
 # 子が書ける場所（scratch など）にランチャが書く前に呼ぶ。前からある物（子や前回の実行が置いた symlink・ハードリンク）を消し、

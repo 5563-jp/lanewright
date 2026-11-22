@@ -59,7 +59,8 @@ series="$(rvd_series "$label")"
 # 排他を取る前に止め、ほかの起動前の誤りと同じく今回の失敗（EXIT:2・note=起動前の誤り）として .done に残す（lanes_die → lanes_record_early_failure。
 # logs/ がまだ無い初回は .done を作らない）。道具・指示書の点検（下の lanes_require_tool など）より先なので、そちらの誤りは chk-run.sh を通した後に出る
 if rvd_checks_block "$allow_missing"; then lanes_die "$RVD_CHECKS_BLOCK"; fi
-(( dry )) || lanes_mark_start "$logdir" "$label" codex-review "$wt" "file:.$series.review-state" "file:$series.followups.md" "file:.review-reuse-blocked"
+# --review-lock: 同じ logs/ のレビュー共通の排他（logs/.review.lock。Claude・Gemini のレビューと共通）。別のレビューが実行中なら exit 2
+(( dry )) || lanes_mark_start "$logdir" "$label" codex-review "$wt" --review-lock "file:.$series.review-state" "file:$series.followups.md" "file:.review-reuse-blocked"
 lanes_require_tool codex run-codex-review.sh
 lanes_entry_preflight
 lanes_require_prompt "$prompt"
