@@ -18,9 +18,15 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   - 子の前後で作業ツリー・指示と条件・git の管理フォルダ・git の制御ファイル（git を呼ぶ前に）を比べ、変わっていれば `NEEDS_FIX`・`EXIT:4`。
     stream-json の書き込み系のツール呼び出し（拒否されて書けなかった試みも含む）が 1 件でもあれば `NEEDS_FIX`・`EXIT:4`（証跡に件数。`agy` の失敗の終了コードより優先し、`agy` の終了コードは証跡に別に書く）。
     1 行目が `init` でない・JSON の不正・`result` の欠損や重複・`status=ERROR` は `VERDICT: NONE`。
-  - **再利用の記録は「確認中」の印で守る**: 子を起動する直前に `logs/.<系列>.review-state` を `IN_PROGRESS` にし、公開ログ（`<label>.last.md`・`<label>.log`）・後回し票・証跡が全部書けて、
-    `agy` が 0 で終わり、判定が `CLEAN` / `NEEDS_FIX` のときだけ確定する。失敗・見張りの停止・中断・強制終了・書き込みの試み・記録の書き込みの失敗では `IN_PROGRESS` のまま残り、
-    次の起動は古い `CLEAN`（記録も過去の証跡も）を使わずに full で回す。前回 `NEEDS_FIX` の未解決指摘だけは引き継ぐ。
+  - **再利用の記録は「確認中」の印で守る**: 子を起動する直前に `logs/.<系列>.review-state` を `IN_PROGRESS` にし（前回 `NEEDS_FIX` の未解決指摘の本文を読み切ってから書き換える）、
+    `agy` が 0 で終わり、判定が `CLEAN` / `NEEDS_FIX` で、読み取り専用の監査を通ったときだけ確定する。確定の順番は、書く先の確認 → ログの末尾 → 再利用の記録 → 証跡 → 後回し票 →
+    終了記録（`.done` を読み戻して確かめる）。合格の証跡と表示は全部が書けてから出し、途中で失敗したら確定した分を戻して、証跡とログの末尾を `VERDICT: NONE`・`EXIT:3` で書き直す。
+    失敗・見張りの停止・中断・強制終了・書き込みの試み・記録の書き込みの失敗では `IN_PROGRESS` のまま残り、次の起動は古い `CLEAN`（記録も過去の証跡も）を使わずに full で回す。
+    前回 `NEEDS_FIX` の未解決指摘だけは引き継ぐ。`.done` の書き先がフォルダなどで書けないと分かれば、記録に触る前に止める（`EXIT:2`）。
+  - round 3 以降の後回し票は確定するときだけ公開する（不合格の回の指摘を残さない・回し直しで重ねない）。前回の P2 / P3 を票へ移して通すのは、今回の判定が `CLEAN` のときだけ
+    （今回の本文が重大度を読み取れない `NEEDS_FIX` なら通さない）。stream-json は 1 行ずつ読む（途中で切れた行の前の書き込みの試みも数える）。
+    レビューの後に HEAD を読めなければ `NEEDS_FIX`・`EXIT:4`。親（ランチャ）は起動の最初に `/` へ移り、子だけを worktree で起動する。
+    dry-run も `logs/` とプロンプトの書き先が symlink でないことを確かめ、辿らずに書く。
   - 周回の仕組み（`review-dedup.zsh` の full / delta / 同じ HEAD の省略・未解決指摘の引き継ぎ・round 3 以降の P2/P3 の後回し・`ESCALATE`）と、
     親の chk-run の記録の使い回し・`LANES_REVIEW_REQUIRE_CHECKS=1`・`--allow-missing-checks`・`.lanes/accepted-limitations.md` は Codex・Claude のレビューと同じ。
   - 判定は共通の判定（最後の行の `VERDICT:`）。それが `NONE` のときだけ、本文の途中の独立した行の `VERDICT:`（コード・引用・表・字下げ・番号付きの行は除く）を同じ判定にかけ直す
@@ -30,12 +36,15 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
     見張りは `GEMINI_REVIEW_NOOUTPUT_SEC`（既定 600 秒。`EXIT:8`）と `GEMINI_REVIEW_PRINT_TIMEOUT`（既定 `45m`）。
 - `run-review.sh --engine codex|claude|gemini` と設定キー `LANES_REVIEW_ENGINE`（優先順は `--engine` ＞ `LANES_REVIEW_ENGINE` ＞ 構成）。構成に無い道具・知らない値は今回の失敗（`EXIT:2`）として `.done` に残す。
   起動前点検は振り分けたレビュー役で回す（`lanes-doctor.sh --review-engine`。設定が `gemini` で固定でも、`--engine codex` の起動は Gemini の点検で止めない）。
-- `lanes-doctor.sh --review-engine codex|claude|gemini`。Gemini レビューを使うときだけ、`agy` の `--sandbox`・`--settings`・`--mode plan` も点検する（既定の設定の点検結果は変わらない）。
+- `lanes-doctor.sh --review-engine codex|claude|gemini`。指定のレビュー役（codex・gemini）が構成に無ければ NG（`run-review.sh` と同じ判定）。
+  Gemini レビューを使うときだけ、`agy` の `--sandbox`・`--settings`・`--mode plan` も点検する（既定の設定の点検結果は変わらない）。
 - `lanes-roles.sh --print` に Gemini レビューの案内と、`LANES_REVIEW_ENGINE` を書いたときの振り分け先・独立性の行。`lanes-monitor.sh` は Gemini レビューを Gemini 実装と分けて数える（一覧に `[gemini-review]`）。
 
 ### 変えたこと / Changed
 - `run-gemini.sh` の `agy` の起動と見張りを `lanes/gemini-agy.zsh` に切り出し、Gemini レビューと共通にした。`agy` の出力は受け取り役 `lanes/gemini-stream-tee.py` がパイプで受けて
   `logs/<label>.json` へそのまま書く（`agy` の補助のプロセスが出力を持ち続けても、`agy` が終われば 2 秒で受け取りを終える）。動き（終了コード・監査・保存）は変わらない。
+- `_common.sh`・`review-dedup.zsh`・`run-gemini.sh` の親側の python をすべて `-I`（分離モード）で起動する。呼び出し元が対象の worktree の中にいても、そこの `json.py` などや `PYTHONPATH` を読まない（Codex・Claude のレビューから使う共通の関数も同じ）。
+- `run-gemini.sh` の dry-run も、`logs/` と `<label>.dry-run.prompt.md` が symlink でないことを確かめ、リンクを辿らずに書く。`agy` の無出力の見張りは更新時刻を zsh 組み込みの `zstat` で取る（PATH の先に GNU の `stat` があっても止めない）。
 - `review-dedup.zsh`: 再利用の記録の書き込みを 1 つの関数（一時ファイルに書いてから名前を付け替える）にまとめた。`IN_PROGRESS` のまま残った記録があれば、
   どのレビュー役も前回の記録として使わない（過去の証跡にも戻らない）。Codex・Claude のレビューは `IN_PROGRESS` を書かないので、今までどおりの動き。
 - `chk-run.sh` は `LANES_REVIEW_ENGINE` を確認コマンドに渡さず、入力の指紋からも外す（起動のときだけ渡しても親の記録を使い回せる）。

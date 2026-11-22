@@ -149,6 +149,7 @@ Gemini レビュー（`run-gemini-review.sh`）は、選んだときだけ動き
 
 - 起動前点検（`lanes-doctor.sh`）は、`run-review.sh` が振り分けたレビュー役を前提に回します（振り分け先へ `LANES_REVIEW_ENGINE` で渡し、点検の `--review-engine` に使う）。
   設定ファイルが `LANES_REVIEW_ENGINE=gemini` で固定していても、`--engine codex` で選んだ起動は Gemini の点検で止まりません。
+  レビュー役の指定が codex・gemini なら、その道具が構成にあるかも見ます（`run-review.sh` と同じ判定。無ければ NG）。
   Gemini レビューを使うときだけ、`agy --help` に `--sandbox`・`--settings`・`--mode plan` があるかも見ます（手で見るなら `lanes-doctor.sh --review-engine gemini`）。
 - 読み取り専用は、agy を `--mode plan`・`--sandbox`・`--settings`（起動単位の設定。利用者の設定ファイルは変えない）で起動して強制します。
   `--settings` の拒否は固定です（`lanes/_common.sh` の `lanes_gemini_review_settings`。設定キーでは緩められない）: MCP（`mcp(*)`）、ファイルの書き込み（`write_file(*)`・`write_file(/)`。作成・編集・削除・移動を含む）、
@@ -156,8 +157,10 @@ Gemini レビュー（`run-gemini-review.sh`）は、選んだときだけ動き
   **deny に相対パス（`write_file(.)` など）を書くと、端末サンドボックスの設定エラーになり、読み取りのコマンドまで動かなくなります**（キットの固定の一覧には入れていません）。
   plan モードだけでは道具の呼び出しは止まらず、止めているのは deny ルールです。
 - それでも子が作業ツリー・git の管理フォルダ・git の制御ファイルを変えたら、前後の比較で不合格（`EXIT:4`）にします。書き込み系のツールを呼んだ（拒否されて書けなかった試みも含む）だけでも不合格です（証跡の「読み取り専用の確認」の行に件数）。
-- 再利用の記録（`logs/.<系列>.review-state`）は、子を起動する直前に `IN_PROGRESS`（確認中）にし、公開ログ（`<label>.last.md`・`<label>.log`）・後回し票・証跡が全部書けて、`agy` が 0 で終わり、判定が `CLEAN` か `NEEDS_FIX` のときだけ確定します。
+- 再利用の記録（`logs/.<系列>.review-state`）は、子を起動する直前に `IN_PROGRESS`（確認中）にし、`agy` が 0 で終わり、判定が `CLEAN` か `NEEDS_FIX` で、読み取り専用の監査を通り、
+  ログの末尾・再利用の記録・証跡・後回し票・終了記録（`.done`）が全部書けたときだけ確定します。合格の証跡は全部が書けてから出し、途中で失敗したら確定した分を戻して、証跡とログの末尾を `VERDICT: NONE`・`EXIT:3` で書き直します。
   失敗・見張りの停止・中断・強制終了・書き込みの試み・記録の書き込みの失敗では `IN_PROGRESS` のまま残り、次の起動は前回の結果（古い `CLEAN` も、過去の証跡も）を使わずに full で回します。前回が `NEEDS_FIX` だったときの未解決指摘だけは引き継ぎます。
+  round 3 以降の後回し票は、確定するときだけ公開します（書き込みの試みなどで不合格の回の指摘は残りません）。
 - 判定の読み方は Codex・Claude と同じ共通の判定（最後の行の `VERDICT:`）です。Gemini レビューだけ、共通の判定が `NONE` のときに、本文の途中にある独立した行の `VERDICT:`（コード・引用・表・字下げ・番号付きの行は除く。`NEEDS_FIX` があればそれ、無ければ最後のもの）を最後の行に置き直して、同じ判定にもう一度かけます（レビュー不能の文言・閉じていないコード・必須検証の不足・P0〜P2 の規則はそのまま効く）。そのときは証跡に「VERDICT の読み取り」の行が出ます。
 - Gemini で実装した worktree（`logs/` に `lane=gemini` の `.pid` か Gemini 実装の証跡がある）は、Gemini でレビューしません（`exit 2`）。どうしても回すなら `--allow-same-engine`（証跡に残る）。
 - Gemini レビューも、読み取り専用の閉じ込めの中では必須検証を回しきれないことがあります。`chk-run.sh` を先に通して記録を使い回す（`LANES_REVIEW_REQUIRE_CHECKS=1` を勧める）のは Codex・Claude と同じです。
