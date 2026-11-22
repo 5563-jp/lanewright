@@ -346,15 +346,20 @@ try:
     with open(src, "rb") as f:
         raw = f.read()
     # 行の区切りは \n だけ（str.splitlines は本文の中の U+2028 などでも割ってしまい、正しい JSON を不正な行にする）
-    parts = raw.split(b"\n")
-    if parts and parts[-1] == b"":
-        parts.pop()
-    lines = [p.decode("utf-8") for p in parts]
-except (OSError, UnicodeError):
+    lines = raw.split(b"\n")
+    if lines and lines[-1] == b"":
+        lines.pop()
+except OSError:
     lines = None; invalid.append("ログを読み取れない")
 if lines is not None and not lines:
     invalid.append("ログが空")
-for index, line in enumerate(lines or []):
+for index, part in enumerate(lines or []):
+    # 文字コード（UTF-8）は 1 行ずつ読む。途中で切れた行（末尾の文字が欠けたなど）はその行だけを不備に数え、
+    # その前後の行で見つけた書き込みの記録は捨てない（書き込みの試みがあれば EXIT:4 を優先する）
+    try:
+        line = part.decode("utf-8")
+    except UnicodeDecodeError:
+        invalid.append("文字コードの不正行"); continue
     try:
         d = json.loads(line)
     except (ValueError, TypeError):
