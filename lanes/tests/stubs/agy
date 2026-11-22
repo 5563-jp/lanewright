@@ -4,6 +4,8 @@
 # （$HOME/.gemini/antigravity-cli）の有無で判定する。未ログインを試すときはそのディレクトリを作らない（消す）。
 # 環境変数:
 #   STUB_AGY_RESULT    print モードの result の status（既定 SUCCESS）
+#   STUB_AGY_RESPONSE  print モードの result の response。既定は、--mode plan（Gemini レビュー）なら VERDICT: CLEAN で終わる短い文、
+#                      それ以外（Gemini 実装）は「スタブの応答」
 #   STUB_LOG           指定があれば、呼ばれた引数を 1 行 1 JSON で追記する
 import json, os, sys
 args = sys.argv[1:]
@@ -11,12 +13,14 @@ if os.environ.get("STUB_LOG"):
     with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as f:
         f.write(json.dumps({"bin": "agy", "args": args}, ensure_ascii=False) + "\n")
 if "--help" in args or args[:1] == ["help"]:
-    print("Usage of agy (stub):\n  --sandbox\n  --settings\n  --model\n  --effort\n  --print")
+    print("Usage of agy (stub):\n  --sandbox\n  --settings\n  --model\n  --effort\n  --mode  (accept-edits, auto, plan)\n  --print")
     sys.exit(0)
 if "-p" in args or "--print" in args:
+    plan = "--mode" in args and args[args.index("--mode") + 1:args.index("--mode") + 2] == ["plan"]
+    response = os.environ.get("STUB_AGY_RESPONSE", "スタブのレビュー（変更なし）\n\nVERDICT: CLEAN" if plan else "スタブの応答")
     print(json.dumps({"event": "init"}), flush=True)
     print(json.dumps({"event": "result", "result": {"status": os.environ.get("STUB_AGY_RESULT", "SUCCESS"),
-                                                    "response": "スタブの応答"}}), flush=True)
+                                                    "response": response}}), flush=True)
     sys.exit(0)
 print("stub agy: 未対応の呼び出し", file=sys.stderr)
 sys.exit(64)
