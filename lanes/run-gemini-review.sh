@@ -112,7 +112,13 @@ if lanes_has_impl_lane "$logdir" gemini; then
     lanes_die "この worktree には Gemini 実装の記録がある（logs/$REPLY）。実装と同じ道具（Gemini）でレビューすると同じ思い込みを見落としやすいので起動しない。Codex か Claude のレビューを使う（run-review.sh --engine codex / --engine claude）。どうしても Gemini で回すなら --allow-same-engine を付ける（証跡に残る）"
   fi
 fi
-(( dry )) || lanes_mark_start "$logdir" "$label" gemini-review "$wt" "file:.$series.review-state" "file:$series.followups.md"
+if (( ! dry )); then
+  lanes_mark_start "$logdir" "$label" gemini-review "$wt" "file:.$series.review-state" "file:$series.followups.md"
+  # 終了記録（.done）の書き込み先を、記録に触る前に確かめる。lanes_mark_start の回転が退避するのは普通のファイルと symlink だけなので、
+  # 同じ名前のフォルダなどが残っていると、最後の .done だけを書けない（終了記録の無い実行を、次の起動が再利用し得る）。ここで止める
+  [[ ! -e "$LANES_DONEFILE" && ! -L "$LANES_DONEFILE" ]] \
+    || lanes_die "終了記録の書き込み先（${LANES_DONEFILE:t}）がフォルダなどになっていて書けない → 起動しない。中身を確かめてから消す: $LANES_DONEFILE"
+fi
 lanes_require_tool gemini run-gemini-review.sh
 # 入口（run-review.sh）から来たときの起動前点検は、Gemini レビューの点検（agy のオプション・サンドボックス）も含めて回す
 lanes_entry_preflight --review-engine gemini
@@ -148,6 +154,17 @@ case "$mode:$decided" in
   *:same) mode=full; (( force )) || skip_same=1 ;;
   *) mode=full ;;   # 明示の delta も、前回の記録が使えなければ（初回・前回 NEEDS_FIX・条件変更・未保存変更・前回が途中で終わった）全体を見る
 esac
+# 記録の公開（証跡・後回し票）。<公開先>、中身は標準入力。公開先と同じフォルダの一時ファイルに書き切ってから名前を付け替える
+# （mv。書きかけ・欠けた中身を公開先に残さない）。公開先が symlink・フォルダ・普通のファイルでない物なら書かない（辿らない・中へ入れない）。
+# 0 = 公開できた。子（agy）の起動前か、子と孫の回収が済んだ後だけで使う
+publish_to() {
+  local dst="$1" tmp="${1:h}/.${1:t}.tmp.$$"
+  [[ ! -L "$dst" && ( ! -e "$dst" || -f "$dst" ) ]] || return 1
+  rm -f -- "$tmp" 2>/dev/null || true
+  if [[ ! -e "$tmp" && ! -L "$tmp" ]] && cat > "$tmp" && mv -f -- "$tmp" "$dst"; then return 0; fi
+  rm -f -- "$tmp" 2>/dev/null || true
+  return 1
+}
 unresolved_note=""
 if [[ "$prev_v" == 'VERDICT: NEEDS_FIX' ]]; then
   # 未解決のある系列では明示 delta も全体へ戻す。
@@ -163,7 +180,8 @@ if (( skip_same )); then
   fi
   for f in "$log" "$json" "$err" "$evidence" "$body_log"; do lanes_rotate_log "$f"; done
   [[ "$(rvd_snapshot "$wt")" == "$tree" && "$(review_context)" == "$context" ]] || lanes_die "省略判定中に内容・指示が変化した。再実行する"
-  {
+  # 証跡は変数に作ってから 1 回で書く。証跡・ログのどちらかを書けなければ、前回の結果を使ったことにしない（EXIT:3・VERDICT: NONE）
+  ev_text="$(
     print -- "## Gemini レビュー証跡（$label）"
     print -- "- $prev_v"
     print -- "- 対象: $(lanes_git_summary "$wt")"
@@ -173,11 +191,16 @@ if (( skip_same )); then
     [[ -z "$same_engine_line" ]] || print -r -- "$same_engine_line"
     print -- "- 実行: $(lanes_now) / 約 0 分 / EXIT:0"
     print -- "- HEAD: ${prev_head:0:12} → ${prev_head:0:12} / 作業ツリー差分行 0"
-  } > "$evidence"
-  { cat "$evidence"; print -- "EXIT:0"; print -- "$prev_v"; } > "$log"
-  cat "$evidence"
-  lanes_mark_done 0 "$prev_v" "skip-same-head round=$round"
-  exit 0
+  )" || ev_text=""
+  if [[ -n "$ev_text" ]] && print -r -- "$ev_text" | publish_to "$evidence" \
+      && print -r -- "$ev_text"$'\n'"EXIT:0"$'\n'"$prev_v" > "$log"; then
+    print -r -- "$ev_text"
+    lanes_mark_done 0 "$prev_v" "skip-same-head round=$round"
+    exit 0
+  fi
+  print -u2 -- "→ 記録を書けなかった（証跡 ${evidence:t}・ログ ${log:t}）。前回の結果を使ったことにしない。logs/ の権限・空きを確かめて回し直す"
+  lanes_mark_done 3 "VERDICT: NONE" "skip-same-head round=$round / 記録を書けない"
+  exit 3
 fi
 if (( dry )); then
   final="$logdir/$label.dry-run.prompt.md"
@@ -507,19 +530,37 @@ PY
 fi
 [[ "$verdict" == "VERDICT: PASS" ]] && verdict="VERDICT: CLEAN"
 (( rc == 0 )) || verdict="VERDICT: NONE"   # agy が非 0 で終わった・見張りで止めた本文の VERDICT は採用しない
-head_after="$(git -C "$wt" rev-parse --short=12 HEAD)"
+# レビュー後の HEAD。読めない（枝の参照が消えた・壊れた など）ときは止めずに、作業ツリーや git の変更として扱う（下の dirty。EXIT:4）
+head_after_full="$(git -C "$wt" rev-parse --verify -q HEAD 2>/dev/null)" || head_after_full=""
+head_after="${head_after_full:0:12}"; [[ -n "$head_after" ]] || head_after="（読めない）"
 # P0/P1 と明示 CLEAN の矛盾は必ず不合格
 typeset -A sev; for k in P0 P1 P2 P3; do sev[$k]=$(lanes_count_findings "$body_log" $k); done
 sevsum="P0:${sev[P0]} P1:${sev[P1]} P2:${sev[P2]} P3:${sev[P3]}"
 [[ "$verdict" == 'VERDICT: NONE' ]] || (( rc != 0 || sev[P0] + sev[P1] == 0 )) || verdict="VERDICT: NEEDS_FIX"
 gate="$(rvd_gate "$round" "$verdict" "${sev[P0]}" "${sev[P1]}")"
 raw_verdict="$verdict"; followups=""
+# 後回し票（<系列>.followups.md）は、下の読み取り専用の監査（書き込みの試み・作業ツリーや git の変更）を通り、記録を確定するときだけ
+# 公開する。それまでは scratch の写し（公開中の票の中身から始める）に足しておく（失格の回の指摘を票に残さない・再実行で重ねない）
+fu_pub="$logdir/$series.followups.md"; fu_stage=""; fu_old=""; fu_published=0
+stage_followups() {   # 写しを用意する（1 回だけ）。0 = 用意できた
+  [[ -z "$fu_stage" ]] || return 0
+  local s o=""
+  s="$(mktemp "${LANES_SCRATCH%/}/followups.XXXXXX")" || return 1
+  if [[ -e "$fu_pub" || -L "$fu_pub" ]]; then
+    # 公開中の票が普通のファイルでなければ失敗にする。公開の後で確定に失敗したら戻せるよう、元の中身も別に写す
+    if ! { [[ -f "$fu_pub" && ! -L "$fu_pub" ]] && o="$(mktemp "${LANES_SCRATCH%/}/followups-old.XXXXXX")" \
+        && cat -- "$fu_pub" > "$s" && cat -- "$fu_pub" > "$o"; }; then
+      rm -f -- "$s" ${o:+"$o"}; return 1
+    fi
+  fi
+  fu_stage="$s"; fu_old="$o"
+}
 # round 3 以降の P2/P3 は、元から CLEAN（P3 だけ）でも残件を必ず後回し票に保存する（run-claude-review.sh と同じ）
 if (( round >= 3 && sev[P2] + sev[P3] > 0 )) && [[ "$verdict" != 'VERDICT: NONE' ]]; then
-  followups="$logdir/$series.followups.md"
-  if ! rvd_write_followups "$body_log" "$followups" "$round" "$head_after" "$label"; then
+  followups="$fu_pub"
+  if ! { stage_followups && rvd_write_followups "$body_log" "$fu_stage" "$round" "$head_after" "$label"; }; then
     rc=3; verdict="VERDICT: NONE"; gate=FIX
-    write_failed+=("後回し票（${followups:t}）")
+    write_failed+=("後回し票（${fu_pub:t}）")
   fi
 fi
 # 指摘があっても、必須検証の成功（または親の記録の使い回し）が確かめられなければ昇格させない
@@ -538,19 +579,26 @@ resolved="$(lanes_parse_review "$body_log" resolved)" || resolved=NO
 pending_note="$unresolved_note"; blocking_previous=0
 [[ "$resolved" != YES ]] || pending_note=""
 if [[ -n "$unresolved_note" && "$resolved" != YES ]]; then
-  # 前回の軽微な指摘も保存対象。今回の本文から省かれていても取りこぼさない
+  # 前回の軽微な指摘も保存対象。今回の本文から省かれていても取りこぼさない。
+  # ただし前回分を後回し票へ移して通すのは、今回の判定が CLEAN のとき（今回の指摘が無い、または今回の要修正の理由が全部 P2/P3 で、
+  # 上で後回し票に移して CLEAN にした）だけ。今回の本文が NEEDS_FIX のまま（重大度を読み取れない今回の要修正の理由がある）なら、
+  # 前回分だけを移しても今回の理由が残るので通さない（NEEDS_FIX のまま）
   defer_previous=0
-  if (( round >= 3 && rc == 0 && sev[P0] + sev[P1] == 0 )) && [[ ( "$verdict" == 'VERDICT: CLEAN' || "$verdict" == 'VERDICT: NEEDS_FIX' ) && "$checks" == COMPLETE ]]; then
+  if (( round >= 3 && rc == 0 && sev[P0] + sev[P1] == 0 )) && [[ "$verdict" == 'VERDICT: CLEAN' && "$checks" == COMPLETE ]]; then
     defer_previous=1
   fi
   previous_rc=0
-  rvd_previous_followups "$record" "$logdir/$series.followups.md" "$round" "$head_after" "$label" "$defer_previous" || previous_rc=$?
+  if (( defer_previous )) && ! stage_followups; then
+    previous_rc=2
+  else
+    rvd_previous_followups "$record" "$fu_stage" "$round" "$head_after" "$label" "$defer_previous" || previous_rc=$?
+  fi
   if (( previous_rc == 0 && defer_previous )); then
     pending_note=""; verdict="VERDICT: CLEAN"; gate=MERGE_WITH_FOLLOWUP
-    followups="$logdir/$series.followups.md"
+    followups="$fu_pub"
   elif (( previous_rc == 2 )); then
     rc=3; verdict="VERDICT: NONE"; gate=FIX
-    (( ! defer_previous )) || write_failed+=("後回し票（$series.followups.md）")
+    (( ! defer_previous )) || write_failed+=("後回し票（${fu_pub:t}）")
   else
     (( previous_rc != 1 )) || blocking_previous=1
     [[ "$verdict" == 'VERDICT: NONE' ]] || verdict="VERDICT: NEEDS_FIX"
@@ -562,7 +610,7 @@ snapshot_after="$(rvd_snapshot "$wt")" || snapshot_after=ERROR
 conditions_after="$(review_context)" || conditions_after=ERROR
 guard_after="$(rvd_git_guard "$wt")" || guard_after=ERROR
 dirty=0
-if [[ "$snapshot_after" == ERROR || "$snapshot_before" != "$snapshot_after" || "$conditions_after" != "$context" \
+if [[ -z "$head_after_full" || "$snapshot_after" == ERROR || "$snapshot_before" != "$snapshot_after" || "$conditions_after" != "$context" \
     || "$guard_after" == ERROR || "$guard_before" != "$guard_after" ]] || (( writes_n > 0 )); then
   dirty=1; verdict="VERDICT: NEEDS_FIX"
   [[ "$gate" == STOP_P0P1 ]] || gate=FIX
@@ -570,14 +618,16 @@ if [[ "$snapshot_after" == ERROR || "$snapshot_before" != "$snapshot_after" || "
   # 監査の違反を区別できるように）。agy の終了コードは証跡の「読み取り専用の確認」の行に別に残す
   rc=4
   (( writes_n == 0 )) || print -u2 -- "→ Gemini レビューが書き込み系のツールを ${writes_n} 件呼んだ（${write_tools:-名前不明}）。読み取り専用のレビューとして不合格（NEEDS_FIX）にする"
+  [[ -n "$head_after_full" ]] || print -u2 -- "→ レビューの後に HEAD を読めない（枝の参照が消えた・壊れた など）。git の変更として不合格（NEEDS_FIX）にする。git -C $wt status で確かめる"
 fi
 (( rc != 0 )) || [[ "$verdict" == 'VERDICT: CLEAN' || "$verdict" == 'VERDICT: NEEDS_FIX' ]] || rc=3
 # 周回の上限を超えて CLEAN にならなければ ESCALATE（人に返す）。続けるなら人が直して LANES_REVIEW_MAX_ROUNDS を上げる
 gate="$(rvd_escalate "$round" "$verdict" "$gate")"
 
-{
+# 証跡の本文（PR に貼る）。<判定> <EXIT> [記録を確定できなかった理由]。変数に作ってから 1 回で書く（途中の失敗で欠けた証跡を出さない）
+evidence_text() {
   print -- "## Gemini レビュー証跡（$label）"
-  print -- "- $verdict"
+  print -- "- $1"
   print -- "- 対象: $(lanes_git_summary "$wt")"
   print -- "- レビューエンジン: gemini"
   print -- "- モード: $mode / base=$base / round=$round"
@@ -586,33 +636,105 @@ gate="$(rvd_escalate "$round" "$verdict" "$gate")"
   [[ "$gate" != ESCALATE ]] || print -- "- 周回の上限（LANES_REVIEW_MAX_ROUNDS=${LANES_REVIEW_MAX_ROUNDS:-5}）を超えた → ここで止めて人に判断を返す（続ける＝直して上限を上げる / 締める＝残りを .lanes/accepted-limitations.md か後回し票へ）"
   print -- "- 必須検証の成功確認: $checks（仕組みがあると見た項目: ${checks_present:-なし}。その項目の「該当なし（未導入）」・NA は受け付けない）"
   rvd_checks_evidence
-  [[ -n "$followups" ]] && print -- "- 元の判定: $raw_verdict / P2/P3 の保存先: $followups"
+  [[ -z "$followups" ]] || print -- "- 元の判定: $raw_verdict / P2/P3 の保存先: $followups"
   (( ! carried )) || print -- "- 前回: 途中で終わったレビュー（IN_PROGRESS）の記録から、その前の NEEDS_FIX の未解決指摘を引き継いだ（full）"
   [[ -z "$verdict_note" ]] || print -r -- "- VERDICT の読み取り: $verdict_note"
   print -- "- 読み取り専用の確認: 書き込みの試み ${writes_n} 件${write_tools:+（$write_tools）}（1 件でもあれば不合格）/ 承認・質問ツール ${asks_n} 回 / agy: $gstatus・終了コード $agy_rc / JSON の不備 ${invalid_n} 件${invalid_kinds:+（$invalid_kinds）} / 見張り: $stop_line"
   [[ -z "$same_engine_line" ]] || print -r -- "$same_engine_line"
-  print -- "- 実行: $started 開始 / 約 ${elapsed} 分 / EXIT:$rc"
+  print -- "- 実行: $started 開始 / 約 ${elapsed} 分 / EXIT:$2"
+  [[ -z "${3:-}" ]] || print -r -- "- 記録の確定: できなかった（$3）。再利用の記録は確定していない（確認中（IN_PROGRESS）のまま。次の起動は前回の結果を使わずに回す）"
   print -- "- HEAD: $head → $head_after / 内容・履歴・条件の変更検出 $dirty（0=なし、1=あり）"
   print -- "- ログ: $log（本文）/ $body_log（最後の応答）/ $json（生）/ $final（渡した全文）"
   print -- "- 作業場所（scratch）: $scratch（${LANES_BASE_BRANCH:-develop} へのマージ後の cleanup で削除）"
-} > "$evidence" || write_failed+=("証跡（${evidence:t}）")
+}
+# 終了記録（.done）を今回の値で書けたか（普通のファイルで、1 行目が EXIT:<n>・2 行目が判定）。lanes_mark_done は書けなくても止まらない
+done_written() {
+  local f="${LANES_DONEFILE:-}" first="" second=""
+  [[ -n "$f" && -f "$f" && ! -L "$f" ]] || return 1
+  { IFS= read -r first && IFS= read -r second; } < "$f" || return 1
+  [[ "$first" == "EXIT:$1" && "$second" == "$2" ]]
+}
 
-{ print -- ""; print -- "----"; cat "$evidence"; print -- "finished: $(lanes_now)"; print -- "EXIT:$rc"; print -- "$verdict"; } >> "$log" \
-  || write_failed+=("ログの末尾（${log:t}）")
-cat "$evidence" 2>/dev/null || true
+# ---- 記録の確定 ----
+# 確定するのは、agy が 0 で終わり、VERDICT が CLEAN か NEEDS_FIX で、ここまでの記録（公開ログ・後回し票の写し）が全部書けたときだけ。
+# 順番: 書く先の確認 → ログの末尾（確定見込みの判定）→ 再利用の記録（rvd_save_state）→ 証跡 → 後回し票 → 終了記録（.done。読み戻して確かめる）
+# 合格の証跡と標準出力の表示は、全部が書けてから出す。途中で失敗したら、確定した分（再利用の記録・後回し票）を元に戻し、
+# 証跡を失敗（VERDICT: NONE・EXIT:3 と理由）で書き直し、ログの末尾にも失敗の判定を足す（合格の表示を残さない）
+statef="$(rvd_state_file "$logdir" "$series")"
 final_rc=$rc; done_verdict="$verdict"; done_note="gemini rc=$rc agy_rc=$agy_rc gate=$gate $sevsum"
+fail_reason=""; tail_written=0; state_saved=0; done_lost=0; inprog_copy=""; ev_text=""
+finalize=0
+(( rc == 0 )) && [[ "$verdict" == 'VERDICT: CLEAN' || "$verdict" == 'VERDICT: NEEDS_FIX' ]] && finalize=1
+if (( finalize )); then
+  # 書く先が symlink・フォルダなどになっていないか（子が実行中に置いた物も含む）。終了記録（.done）は開始時に退避してあるので、
+  # 何かがあれば実行中に置かれた物（書けないか、今回の結果でない）。1 つでもあれば確定しない
+  [[ ! -e "$LANES_DONEFILE" && ! -L "$LANES_DONEFILE" ]] || write_failed+=("終了記録（${LANES_DONEFILE:t}。実行中に置かれた物がある）")
+  for f in "$evidence" "$log" "$statef" ${fu_stage:+"$fu_pub"}; do
+    [[ ! -L "$f" && ( ! -e "$f" || -f "$f" ) ]] || write_failed+=("${f:t}（symlink・フォルダなどになっている）")
+  done
+fi
 if (( ${#write_failed} )); then
-  # 記録を書けなかったレビューは確定しない（再利用の記録は IN_PROGRESS のまま。次の起動は前回の結果を使わずに回す）
-  print -u2 -- "→ 記録を書けなかった: ${(j:・:)write_failed}。再利用の記録は確定しない（IN_PROGRESS のまま）。logs/ の権限・空きを確かめて回し直す"
-  (( final_rc != 0 )) || final_rc=3
-  done_verdict="VERDICT: NONE"; done_note+=" / 記録を書けない: ${(j:・:)write_failed}"
-elif (( rc == 0 )) && [[ "$verdict" == "VERDICT: CLEAN" || "$verdict" == "VERDICT: NEEDS_FIX" ]]; then
-  # 全部の記録が書けたときだけ、最後に確定する（ここまで来なければ IN_PROGRESS のまま）
-  if ! rvd_save_state "$logdir" "$series" "$round" "$(git -C "$wt" rev-parse HEAD)" "$verdict" "$gate" "$label" "$context" "$snapshot_after" "$review_base" "$log" "$pending_note" "$blocking_previous"; then
-    print -u2 -- "→ 再利用の記録（logs/.$series.review-state）を確定できない。IN_PROGRESS のまま残す（次の起動は前回の結果を使わずに回す）"
-    final_rc=3; done_verdict="VERDICT: NONE"; done_note+=" / 再利用の記録を確定できない"
+  fail_reason="記録を書けない: ${(j:・:)write_failed}"
+elif (( finalize )); then
+  ev_text="$(evidence_text "$verdict" "$rc")" || ev_text=""
+  if [[ -z "$ev_text" ]]; then
+    fail_reason="記録を書けない: 証跡（${evidence:t}）を作れない"
+  elif ! print -r -- $'\n'"----"$'\n'"$ev_text"$'\n'"finished: $(lanes_now)"$'\n'"EXIT:$rc"$'\n'"$verdict" >> "$log"; then
+    fail_reason="記録を書けない: ログの末尾（${log:t}）"
+  else
+    tail_written=1
+    # 確定に失敗したら戻せるよう、確認中（IN_PROGRESS）の記録を先に写しておく
+    if ! { inprog_copy="$(mktemp "${LANES_SCRATCH%/}/review-state.XXXXXX")" && cat -- "$statef" > "$inprog_copy"; }; then
+      fail_reason="記録を確定できない: 確認中の再利用の記録（${statef:t}）を写せない"
+    elif ! rvd_save_state "$logdir" "$series" "$round" "$head_after_full" "$verdict" "$gate" "$label" "$context" "$snapshot_after" "$review_base" "$log" "$pending_note" "$blocking_previous"; then
+      fail_reason="記録を確定できない: 再利用の記録（${statef:t}）"
+    else
+      state_saved=1
+      if ! print -r -- "$ev_text" | publish_to "$evidence"; then
+        fail_reason="記録を書けない: 証跡（${evidence:t}）"
+      elif [[ -n "$fu_stage" ]] && ! publish_to "$fu_pub" < "$fu_stage"; then
+        fail_reason="記録を書けない: 後回し票（${fu_pub:t}）"
+      else
+        [[ -z "$fu_stage" ]] || fu_published=1
+        lanes_mark_done "$final_rc" "$done_verdict" "$done_note" || true
+        if done_written "$final_rc" "$done_verdict"; then
+          print -r -- "$ev_text"
+          exit $final_rc
+        fi
+        # 終了記録を書けなかった（.done は書き直せない）。ここまでの確定を戻し、終了記録の無い実行を次の起動が再利用しないようにする
+        done_lost=1; fail_reason="記録を書けない: 終了記録（${LANES_DONEFILE:t}）"
+      fi
+    fi
   fi
 fi
-(( final_rc != 0 )) || [[ "$done_verdict" == "VERDICT: CLEAN" || "$done_verdict" == "VERDICT: NEEDS_FIX" ]] || final_rc=3   # 完走したのに VERDICT が無い
-lanes_mark_done "$final_rc" "$done_verdict" "$done_note"
+if [[ -n "$fail_reason" ]]; then
+  print -u2 -- "→ $fail_reason。再利用の記録は確定しない（確認中（IN_PROGRESS）のまま）。logs/ の権限・空きを確かめて回し直す"
+  (( final_rc != 0 )) || final_rc=3
+  done_verdict="VERDICT: NONE"; done_note+=" / $fail_reason"
+  # 確定まで進めた分を元に戻す。再利用の記録は確認中へ（戻せなければ消す＝次の起動は前回の記録を使わない）、後回し票は公開前の中身へ
+  if (( state_saved )) && ! rvd_state_write "$statef" < "$inprog_copy" 2>/dev/null; then
+    if rm -f -- "$statef" 2>/dev/null; then
+      print -u2 -- "→ 再利用の記録（${statef:t}）を確認中へ戻せないので消した（次の起動は前回の記録を使わずに full で回す。前回の未解決指摘は引き継がれない）"
+    else
+      print -u2 -- "→ 再利用の記録（${statef:t}）を確認中へ戻せない・消せない。次の起動の前に手で消す: $statef"
+    fi
+  fi
+  if (( fu_published )); then
+    if [[ -n "$fu_old" ]]; then publish_to "$fu_pub" < "$fu_old"; else rm -f -- "$fu_pub"; fi \
+      || print -u2 -- "→ 後回し票（${fu_pub:t}）を公開前の中身へ戻せない。今回の round（$round）の分を手で消す: $fu_pub"
+  fi
+fi
+(( final_rc != 0 )) || [[ "$done_verdict" == 'VERDICT: CLEAN' || "$done_verdict" == 'VERDICT: NEEDS_FIX' ]] || final_rc=3   # 完走したのに VERDICT が無い
+ev_text="$(evidence_text "$done_verdict" "$final_rc" "$fail_reason")" \
+  || ev_text="## Gemini レビュー証跡（$label）"$'\n'"- $done_verdict"$'\n'"- 実行: $started 開始 / EXIT:$final_rc${fail_reason:+ / 記録の確定: できなかった（$fail_reason）}"
+print -r -- "$ev_text" | publish_to "$evidence" || print -u2 -- "→ 証跡（${evidence:t}）を書けない"
+if (( tail_written )); then
+  # 先に書いた確定見込みの判定は採用しない（ログの最後の行を今回の結果にする）
+  tail_text="[run-gemini-review] $(lanes_now) 記録の確定に失敗（$fail_reason）→ 上の判定は採用しない"$'\n'"EXIT:$final_rc"$'\n'"$done_verdict"
+else
+  tail_text=$'\n'"----"$'\n'"$ev_text"$'\n'"finished: $(lanes_now)"$'\n'"EXIT:$final_rc"$'\n'"$done_verdict"
+fi
+print -r -- "$tail_text" >> "$log" || print -u2 -- "→ ログの末尾（${log:t}）を書けない"
+print -r -- "$ev_text"
+(( done_lost )) || lanes_mark_done "$final_rc" "$done_verdict" "$done_note" || true
 exit $final_rc
