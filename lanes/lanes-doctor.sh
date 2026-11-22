@@ -13,8 +13,10 @@
 #       Codex : codex login status が ChatGPT でのログイン
 #       Gemini: agy にはログイン確認のサブコマンドが無いので、ログイン情報の置き場所（~/.gemini/antigravity-cli）の有無
 #               （確認は弱いので、通っても注意を出す）。あわせて端末サンドボックス（/usr/bin/sandbox-exec）を有効にできるか
-#               Gemini レビューを使うとき（LANES_REVIEW_ENGINE=gemini か --review-engine gemini）だけ、構成に gemini があるかと、
+#               Gemini レビューを使うとき（LANES_REVIEW_ENGINE=gemini か --review-engine gemini）だけ、
 #               agy が --sandbox・--settings・--mode plan に対応しているか（agy --help）も見る（既定の設定では見ない）
+#   - レビュー役の指定（--review-engine か LANES_REVIEW_ENGINE）が codex・gemini なら、その道具が構成にあるか（run-review.sh と同じ判定。
+#     無ければ NG。claude はどの構成にもある）
 #   - ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY 等が設定されていても、ランチャは起動時に外す（表示だけ。失敗にはしない）
 # 設定値の誤り（lanes.env が見つけたもの）も NG の 1 行として並べる（誤った値は既定に戻して残りを点検する）。
 # 足りないものは全部並べてから exit 2。全部そろえば exit 0。ログイン状態の本文（鍵の断片が混ざりうる）は表示しない。
@@ -146,12 +148,15 @@ if (( roles_ok )); then
         fi ;;
     esac
   done
+  # レビュー役の指定（--review-engine か LANES_REVIEW_ENGINE）が構成に入っているか。run-review.sh と同じ判定（claude はどの構成にもある。
+  # codex・gemini は構成に無ければ起動しない）。入っていなければ、その指定の点検はここで NG にして、道具ごとの点検へは進まない
+  if (( review_engine_given )); then review_engine_from="--review-engine"; else review_engine_from="LANES_REVIEW_ENGINE"; fi
+  if [[ -n "$review_engine" && "$review_engine" != claude ]] && ! lanes_roles_has_tool "$review_engine"; then
+    ng "レビュー役に $review_engine を使う指定（$review_engine_from）だが構成（LANES_TOOLS=\"$LANES_TOOLS_NORMALIZED\"）に $review_engine が無い。構成に $review_engine を足すか、指定を外す（run-review.sh も起動しない）"
   # Gemini レビュー（run-gemini-review.sh）を使うときだけ、agy の有無・サンドボックスに加えて、読み取り専用を強制するのに
   # 要る agy のオプション（--sandbox / --settings / --mode plan）も見る。既定（レビュー役の指定が空）では何も足さない
-  if [[ "$review_engine" == gemini ]]; then
-    if ! lanes_roles_has_tool gemini; then
-      ng "Gemini レビューを使う指定（LANES_REVIEW_ENGINE / --review-engine）だが構成（LANES_TOOLS=\"$LANES_TOOLS_NORMALIZED\"）に gemini が無い。構成に gemini を足すか、指定を外す"
-    elif (( ! ${+functions[lanes_help_has_option]} )); then
+  elif [[ "$review_engine" == gemini ]]; then
+    if (( ! ${+functions[lanes_help_has_option]} )); then
       ng "gemini レビュー: python3 が無いので agy のオプションを確かめられない"
     elif [[ -n "${GEMINI_BIN:-}" && -f "$GEMINI_BIN" && -x "$GEMINI_BIN" ]]; then
       gem_help="$(ANTIGRAVITY_HEADLESS=true "$GEMINI_BIN" --help < /dev/null 2>&1)" || gem_help=""
