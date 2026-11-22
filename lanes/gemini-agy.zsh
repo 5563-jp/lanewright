@@ -5,7 +5,8 @@
 #   cmd（agy のコマンドの配列。-p より前まで）/ final（渡す全文のファイル）/ log（ランチャのログ）/ wt / gitdir / scratch（最小 gitconfig と
 #   親専用の写しを一時的に作る場所）/ poll / idle_grace / resume_grace / noout_sec（見張りの秒数）/ GEM_TAG（ログの行の頭。既定 [run-gemini]）
 # 起動のしかた:
-#   - 子（監督役・受け取り役・agy）の作業場所（cwd）だけを worktree にする（lanes_start_child_in）。呼び出し元のシェルは移らない。
+#   - 子（受け取り役・agy）の作業場所（cwd）だけを worktree にする（lanes_start_child_in）。呼び出し元のシェルも監督役も移らない
+#     （監督役は / で動き、受け取り役を起動する Popen にだけ作業場所を渡す。監督役が名前で起動する ps を作業ツリーの物で選ばない）。
 #     監督役と受け取り役の python3 は _common.sh が起動時に確定した絶対パス（LANES_PYTHON3）。agy は呼び出し元が絶対パスで cmd に入れる
 #   - agy の標準出力（stream-json）は受け取り役（gemini-stream-tee.py）がパイプで直接受け取り、公開用の logs/<label>.json と、
 #     親専用の写し（子の起動前に作ってすぐ名前を消した一時ファイル。開いた番号 GEM_STREAM_FD だけが残る）の両方へ書く。
