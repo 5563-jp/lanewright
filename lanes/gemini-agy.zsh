@@ -140,7 +140,7 @@ start = max(0, off - (len(PHRASE) - 1))
 data = os.pread(4, min(max(0, s_err.st_size - start), 1 << 24), start) if s_err.st_size > start else b""
 i = data.find(PHRASE)
 while i >= 0:
-    if start + i + len(PHRASE) > off:   # 前回までに読み終えた範囲に収まる分は数えた済み
+    if start + i + len(PHRASE) > off:   # 前回までに読み終えた範囲に収まる分は数え済み
         total += 1
     i = data.find(PHRASE, i + 1)
 print(int(s_json.st_mtime), int(s_err.st_mtime), total, max(off, start + len(data)))' "$1" "$2" 3<&$GEM_STREAM_FD 4<&$GEM_ERR_RFD

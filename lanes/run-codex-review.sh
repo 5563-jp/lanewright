@@ -199,7 +199,7 @@ t = t.replace("Claude", "Codex")
 for k, v in {"WORKTREE": wt, "BRANCH": branch, "HEAD": head, "BASE": base or "(なし)", "MODE": mode, "DATE": date, "SCRATCH": scratch}.items():
     t = t.replace("{{" + k + "}}", v)
 c = pathlib.Path(case).read_text(encoding="utf-8")
-write_new(out, 
+write_new(out,
 t.rstrip() + "\n\n" + rule.rstrip() + "\n\n---\n\n# 案件固有の指示\n\n" + c.rstrip()
 + "\n\nbuild はレビューでは回さない（統合先（LANES_BASE_BRANCH。今は " + (os.environ.get("LANES_BASE_BRANCH") or "develop") + "）に入れる直前の最終 head の chk-run と CI で 1 回だけ担保する）。"
 # 必須検証のきまり（review-dedup.zsh の rvd_checks_rule。使い回すときは「回さない」、使わないときは成功行の書き方）
