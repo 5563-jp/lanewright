@@ -376,18 +376,20 @@ WRITE_HINT = ("write", "replace", "edit", "delete", "move", "rename", "create", 
 status, body, error, turns, asks = "NONE", "", "", 0, 0
 writes, write_tools, invalid = set(), set(), []
 results, last_event, events, inits, first_init = 0, None, 0, 0, False
-try:
-    with open(src, "rb") as f:
-        raw = f.read()
-    # 行の区切りは \n だけ（str.splitlines は本文の中の U+2028 などでも割ってしまい、正しい JSON を不正な行にする）
-    lines = raw.split(b"\n")
-    if lines and lines[-1] == b"":
-        lines.pop()
-except OSError:
-    lines = None; invalid.append("ログを読み取れない")
-if lines is not None and not lines:
-    invalid.append("ログが空")
-for index, part in enumerate(lines or []):
+def stream_lines(path):
+    # 生ログを 1 行ずつ読む（全体を読み込んで割った写しを持たない。長いレビューでもログの大きさの 2 倍のメモリを要らない）。
+    # 行の区切りは \n だけ（バイナリのファイルの反復は \n だけで割る。str.splitlines は本文の中の U+2028 などでも割ってしまい、
+    # 正しい JSON を不正な行にする）。最後の行の後ろの \n は空の行に数えない。途中で読めなくなったら、そこまでの行の集計は残して
+    # 「ログを読み取れない」を不備に足す（その前の書き込みの試みは捨てない）
+    try:
+        with open(path, "rb") as f:
+            for raw in f:
+                yield raw[:-1] if raw.endswith(b"\n") else raw
+    except OSError:
+        invalid.append("ログを読み取れない")
+nlines = 0
+for index, part in enumerate(stream_lines(src)):
+    nlines += 1
     # 文字コード（UTF-8）は 1 行ずつ読む。途中で切れた行（末尾の文字が欠けたなど）はその行だけを不備に数え、
     # その前後の行で見つけた書き込みの記録は捨てない（書き込みの試みがあれば EXIT:4 を優先する）
     try:
@@ -432,11 +434,13 @@ for index, part in enumerate(lines or []):
         key = next((str(su[k]) for k in ("step_index", "step_id", "id", "tool_call_id") if k in su), None)
         writes.add(key if key is not None else name + "\0" + json.dumps(su.get("tool_info"), sort_keys=True, ensure_ascii=False))
         write_tools.add(name)
+if nlines == 0 and "ログを読み取れない" not in invalid:
+    invalid.append("ログが空")
 if results > 1 or (results == 1 and last_event != "result"):
     invalid.append("結果が重複、または終端ではない")
-if results == 0 and lines:
+if results == 0 and nlines:
     invalid.append("終了結果が欠損")
-if lines and not first_init:
+if nlines and not first_init:
     invalid.append("開始の記録（先頭の init）が無い")
 if inits > 1:
     invalid.append("開始の記録（init）が重複")

@@ -281,16 +281,26 @@ def resolve(p):
     return os.path.realpath(p if os.path.isabs(p) else os.path.join(wt, p))
 def inside(rp):
     return rp == wt or rp.startswith(wt + os.sep) or rp == scr or rp.startswith(scr + os.sep)
-for src in srcs:
+def stream_lines(path, problems):
+    # 生ログを 1 行ずつ読む（全体を読み込んで割った写しを持たない。長い実行でもログの大きさの 2 倍のメモリを要らない）。
+    # 行の区切りは \n だけ（バイナリのファイルの反復は \n だけで割る。str.splitlines は本文の中の U+2028 などでも割ってしまい、
+    # 正しい JSON を不正な行にする）。最後の行の後ろの \n は空の行に数えない。文字コード（UTF-8）は 1 行ずつ読む（呼び出し側）。
+    # 開けない・途中で読めなくなったら problems に足す（そこまでの行で見つけた書き込みの記録は捨てない）
     try:
-        lines = open(src, encoding="utf-8").read().splitlines()
-    except (OSError, UnicodeError):
-        invalid.append('ログを読み取れない'); continue
-    if not lines:
-        invalid.append('ログが空'); continue
+        with open(path, "rb") as f:
+            for raw in f:
+                yield raw[:-1] if raw.endswith(b"\n") else raw
+    except OSError:
+        problems.append('ログを読み取れない')
+for src in srcs:
     results = 0
     last_event = None
-    for line in lines:
+    nlines, read_problems = 0, []
+    for part in stream_lines(src, read_problems):
+        nlines += 1
+        try: line = part.decode("utf-8")
+        except UnicodeDecodeError:
+            invalid.append('文字コードの不正行'); continue
         try: d = json.loads(line)
         except (ValueError, TypeError):
             invalid.append('JSON の不正行'); continue
@@ -340,6 +350,11 @@ for src in srcs:
                 if gone or os.path.lexists(rp): outside.append(f"{name} {k}={rp}")
                 else: suspect.append(f"{name} {k}={rp}")
         if not path_seen: invalid.append('書き込み先を特定できない')
+    invalid.extend(read_problems)
+    if read_problems and not nlines:
+        continue   # 開けない（今までどおり、空・終了結果の欠損は数えない）
+    if not nlines:
+        invalid.append('ログが空'); continue
     if results > 1 or (results == 1 and last_event != 'result'):
         invalid.append('結果が重複、または終端ではない')
     if results == 0 and not (allow_incomplete and src == srcs[-1]):
