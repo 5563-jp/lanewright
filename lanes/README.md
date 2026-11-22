@@ -25,8 +25,9 @@ Mac で Claude / Codex / Gemini（Antigravity CLI `agy`）の CLI（コマンド
 | `<label>.last.md` / `<label>.completion.json` | Codex レビューの最終本文と、完了イベント・受信時刻・本文の SHA-256（内容から作る指紋）の照合記録。Gemini レビューも `<label>.last.md`（最後の応答の本文だけ）を残す |
 | `<label>.evidence.md` | PR 本文に貼る証跡（実行条件・検証結果・判定） |
 | `<label>.pid` | 起動時に書く。pid・`lstart`（プロセス開始時刻）・開始時刻・レーン種別・worktree・CLI に渡す設定のモデルと effort（`model=` / `effort=`。空は CLI の既定。CLI を起動する前に止まったレーンにも残る）・子の pid と開始時刻・scratch のパス |
-| `<label>.done` | 終了時に書く。`EXIT:n`・`VERDICT:`・終了時刻・経過分・補足 |
+| `<label>.done` | 終了時に書く。`EXIT:n`・`VERDICT:`・終了時刻・経過分・補足。同じフォルダの一時ファイルに全文を書き切ってから置き換える（容量不足・途中の中断でも、先頭の `EXIT:0` だけの書きかけを見せない） |
 | `<label>.lock` | 同じ label の二重起動を防ぐ排他ロック（消さない・回転しない） |
+| `.review.lock` | 同じ worktree のレビュー（Codex・Claude・Gemini。label を問わない）を 1 本ずつにする排他ロック（消さない・回転しない。下の「同じ label の排他と止め方」） |
 | `.lanes-records` | ランチャの記録の台帳。ランチャと `detach-run.sh` が、`logs/` に何かを書く前に、書く名前の持ち主を 1 行ずつ載せる（`label:<label>` か `file:<名前>`）。`chk-run.sh` は、ここに載っている持ち主の記録だけを入力の指紋から外す（7 章）。手で書き換えない |
 
 既存のログは上書きせず `<name>.prev-<日時>.<ext>` に退避します。
@@ -108,6 +109,7 @@ Gemini を含む構成では、`run-gemini.sh` が必須にしている macOS �
 引数の誤り・`--base` の形の誤り・設定の値の誤りなどで、label の排他（`.lock`）を取る前に止まったときも、同じ label の前回の `.done` を残したままにはしません。
 - 排他を取れたら、前回の `.pid` / `.done` を `.prev-<日時>` に回転し、今回の `.done`（`EXIT:2`・`VERDICT: NONE`・`note=起動前の誤り: ...`）を書きます。`lanes-status.sh` は `FAILED` を返します。
 - 排他を取れない（同じ label が実行中）・前回のプロセスが生きているときは「前回の記録には触らない」と出して、記録はそのままにします。
+- レビューのランチャで、同じ worktree の別のレビュー（別の label・別のエンジン）が実行中（レビュー共通の排他 `logs/.review.lock` を取れない）ときは、実行中のレビューの記録と再利用の記録には触らずに止めます（`exit 2`）。今回の label の前回の `.pid` / `.done` だけは同じく回転し、今回の `.done`（`EXIT:2`・`note=起動前の誤り: 同じ worktree の logs/ で別のレビューが実行中…`）を書きます（`lanes-status.sh` は今回の label の前回の `DONE` ではなく `FAILED` を返す）。
 - `logs/` が無いとき（worktree が無い・一度も起動していない）と `--dry-run` のときは何も書きません。label が 2 回指定された・label の形が不正なときも、どの label か決められないので書きません。
 - 不明なオプションも同じく止めて記録します。label は指示書の直後に置いてください。不明なオプションの次の語が `-` で始まらなければ、そのオプションの値として読み捨てます（`--mode full` の `full` を label と取り違えない。`--name=value` の形は次の語を読み捨てません）。全ランチャ共通（`_common.sh` の `lanes_unknown_opt_width`）です。
 - 入口（`run-impl.sh` / `run-review.sh`）自身の誤り（不明なオプション・`--engine` の誤り・構成に無い道具・`--round` や `--base` の扱いの誤りなど）も同じです。
@@ -127,13 +129,13 @@ Gemini を含む構成では、`run-gemini.sh` が必須にしている macOS �
 
 #### `run-gemini-review.sh` の補足
 - 構成（`LANES_TOOLS`）に gemini が無ければ起動しません（`exit 2`）。モデルと effort は `GEMINI_REVIEW_MODEL` / `GEMINI_REVIEW_EFFORT`（既定は空＝付けない。実装用の `GEMINI_MODEL` / `GEMINI_EFFORT` とは別）。
-- 読み取り専用: `agy` を `--mode plan --sandbox --settings '<JSON>'` で起動し、`--dangerously-skip-permissions`・`accept-edits`・`auto` は使いません。`--settings` の拒否は固定（`_common.sh` の `lanes_gemini_review_settings`）で、MCP（`mcp(*)`）・ファイルの書き込み（`write_file(*)`・`write_file(/)`）・URL・commit や push などのコマンド（Claude レビューの固定の拒否の一覧のコマンドの分）です。`ANTIGRAVITY_HEADLESS=true`・stdin は `/dev/null`・`--add-dir` は scratch だけ・子の `GIT_CONFIG_GLOBAL` は scratch の最小 gitconfig・`GIT_OPTIONAL_LOCKS=0`・`GIT_PAGER=cat`・git の通信は止めます。macOS の端末サンドボックスを有効にできない・`agy --help` に `--sandbox` / `--settings` / `--mode`（plan）が無い（オプション名は単語として照合する。`--model` の説明の「plan」では通さない）・登録済みの linked worktree でない（`_common.sh` の `lanes_require_linked_worktree`）なら起動しません。親（ランチャ）は引数のパスを絶対パスに決めた直後に `/` へ移り、子だけを worktree で起動します（`lanes_start_child_in`）。対象の worktree の中から呼んでも、親が動かす python（判定や記録。`_common.sh`・`review-dedup.zsh` の python はすべて `-I` の分離モード）は作業場所の `json.py` などを読みません。今の場所からの相対パスで書いた `LANES_CONF`・パスで書いた `GEMINI_BIN` は、移る前に絶対パスに直します。
+- 読み取り専用: `agy` を `--mode plan --sandbox --settings '<JSON>'` で起動し、`--dangerously-skip-permissions`・`accept-edits`・`auto` は使いません。`--settings` の拒否は固定（`_common.sh` の `lanes_gemini_review_settings`）で、MCP（`mcp(*)`）・ファイルの書き込み（`write_file(*)`・`write_file(/)`）・URL・commit や push などのコマンド（Claude レビューの固定の拒否の一覧のコマンドの分）です。`ANTIGRAVITY_HEADLESS=true`・stdin は `/dev/null`・`--add-dir` は scratch だけ・子の `GIT_CONFIG_GLOBAL` は scratch の最小 gitconfig・`GIT_OPTIONAL_LOCKS=0`・`GIT_PAGER=cat`・git の通信は止めます。macOS の端末サンドボックスを有効にできない・`agy --help` に `--sandbox` / `--settings` / `--mode`（plan）が無い（オプション名は単語として照合する。`--model` の説明の「plan」では通さない）・登録済みの linked worktree でない（`_common.sh` の `lanes_require_linked_worktree`）なら起動しません。親（ランチャ）は引数のパスを絶対パスに決めた直後に `/` へ移り、子だけを worktree で起動します（`lanes_start_child_in`）。対象の worktree の中から呼んでも、親が動かす python（判定や記録。`_common.sh`・`review-dedup.zsh` の python はすべて `-I` の分離モード）は作業場所の `json.py` などを読みません。必須検証の使い回しの問い合わせ（`chk-run.sh --query`）は、`/` へ移る前に起動元の場所と環境のまま行います（親が `chk-run.sh` を回したのと同じ条件で照合する。相対パスの `LANES_CONF`・`CHK_CACHE` でも合う。問い合わせの中の python も `-I`）。その後、今の場所からの相対パスで書いた `LANES_CONF`・`LANES_SCRATCH_ROOT`・パスで書いた `GEMINI_BIN` / `CLAUDE_BIN` / `CODEX_BIN` を、起動元を基準に絶対パスに直してから移ります（scratch を `/` を基準に作らない。それでも `LANES_SCRATCH_ROOT` が絶対パスでなければ、scratch を作る前に止める）。
 - 前後の比較: 作業ツリー（無視対象も）・指示と条件・git の管理フォルダ（設定・hooks・タグ・stash）・git の制御ファイル（`.git`・`commondir`・`gitdir`・`config`・hooks。子の後は git を呼ぶ前に比べ、変わっていれば git を実行せずに `EXIT:4`）。変わっていたら `NEEDS_FIX`・`EXIT:4`。
 - 書き込みの試み: stream-json の `step_update` のうち、ツール名に `write` / `replace` / `edit` / `delete` / `move` / `rename` / `create` / `append` / `copy` / `patch` を含む呼び出し（`run-gemini.sh` の監査と同じ判定。同じ `step_index` の経過は 1 件）が 1 件でもあれば `NEEDS_FIX`・`EXIT:4`。拒否されて書けなかった試みも数えます。証跡の「読み取り専用の確認」の行に件数とツール名が出ます。
 - 本文: 最後の `result`（`status=SUCCESS` の `response`）だけを `logs/<label>.last.md` と `logs/<label>.log` に書き、判定・指摘数・必須検証・解消宣言はこの本文だけを読みます。1 行目が `init` でない・`init` の重複・JSON の不正行・文字コード（UTF-8）の不正行・`result` の欠損・重複・終端でない `result`・`status=ERROR` は `VERDICT: NONE`。stream-json は 1 行ずつ読むので、途中で切れた行があっても、その前後の行の書き込みの試みは数えます（書き込みの試みがあれば `EXIT:4` が優先）。
   共通の判定（最後の行の `VERDICT:`）が `NONE` のときだけ、本文の途中の独立した行の `VERDICT:`（コード・引用・表・字下げ・番号付きの行は除く。`NEEDS_FIX` があればそれ、無ければ最後のもの）を最後の行に置き直して、同じ判定にもう一度かけます（レビュー不能の文言・閉じていないコード・必須検証の不足・P0〜P2 の規則はそのまま効く）。
 - 再利用の記録（確認中の印）: 子を起動する直前に `logs/.<系列>.review-state` を `IN_PROGRESS`（`last_exit=-1`。`last_round` は前の値のまま）にします。前回が `NEEDS_FIX` なら、その未解決指摘の本文を読み切ってから書き換えます（読めない・空なら記録を変えずに `EXIT:2`）。`agy` が 0 で終わり、判定が `CLEAN` / `NEEDS_FIX` で、読み取り専用の監査を通り、公開ログが書けたときだけ確定します。失敗・見張りの停止・中断・強制終了・書き込みの試み・記録の書き込みの失敗では `IN_PROGRESS` のまま残り、次の起動は前回の記録（古い `CLEAN`・過去の証跡）を使わずに full で回します（`review-dedup.zsh` の `rvd_prev_record`）。前回が `NEEDS_FIX` だったときの未解決指摘は `IN_PROGRESS` の記録に持ち越して引き継ぎます（`rvd_carried_record`）。
-- 確定の順番: 書く先（`.done`・証跡・ログ・後回し票・記録が symlink・フォルダでないか）の確認 → ログの末尾 → 再利用の記録（`rvd_save_state`）→ 証跡（`<label>.evidence.md`）→ 後回し票 → 終了記録（`.done`。書けたかを読み戻して確かめる）。合格の証跡と標準出力の表示は、全部が書けてから出します。途中で失敗したら、確定した分（再利用の記録は確認中へ・後回し票は公開前の中身へ）を戻し、証跡を `VERDICT: NONE`・`EXIT:3` と理由（「記録の確定: できなかった」の行）で書き直し、ログの末尾にも失敗の判定を足します（合格の表示を残さない）。`.done` の書き先がフォルダなどで書けないと起動の時点で分かれば、記録に触る前に止めます（`EXIT:2`）。
+- 確定の順番: 書く先（`.done`・証跡・ログ・後回し票・記録が symlink・フォルダでないか）の確認 → ログの末尾 → 証跡（`<label>.evidence.md`）→ 後回し票 → 終了記録（`.done`。一時ファイルから置き換えて、読み戻して確かめる）→ 再利用の記録（`rvd_save_state`。最後）→ 標準出力の合格の表示。再利用の記録を最後に置くのは、次の起動が前回の結果を使える（同じ HEAD の省略・delta）ようになるのを、PR に貼る証跡・後回し票・終了記録が全部揃った後だけにするためです（それより前に中断・強制終了されたら、記録は確認中のまま残り、次は省略せずに回す。`.done` を置いた後・記録の確定の前に中断されたときは、証跡と `.done` は合格のまま＝レビューは終わっていて成果物も揃っており、記録だけが確認中のまま残る）。途中で失敗したら、公開した分を取り下げます: 再利用の記録は確認中の写しへ戻し（戻せなければ消す）、後回し票は公開前の中身へ戻し、証跡を `VERDICT: NONE`・`EXIT:3` と理由（「記録の確定: できなかった」の行）で書き直し（書き直せなければ消す）、ログの末尾に失敗の判定を足し、合格で置いた `.done` も `EXIT:3`・`VERDICT: NONE` へ書き直します（書き直せなければ消す。合格の表示を残さない）。同じ HEAD の結果を使う経路（skip-same-head）も、ログ → 証跡 → `.done`（読み戻す）の全部が書けてから合格を表示し、どれかを書けなければ書いた分を失敗の中身へ書き直します。`.done` の書き先がフォルダなどで書けないと起動の時点で分かれば、記録に触る前に止めます（`EXIT:2`）。
 - 後回し票（round 3 以降の P2 / P3）: 確定するまでは scratch の写しに足すだけで、確定するときに `logs/<系列>.followups.md` へ公開します（同じフォルダの一時ファイルから名前を付け替える）。書き込みの試み・作業ツリーの変更で不合格（`EXIT:4`）の回の指摘は票に残らず、回し直しても重なりません。前回の P2 / P3 を票へ移して通すのは、今回の判定が `CLEAN` のとき（今回の指摘が無い、または今回の要修正の理由が全部 P2 / P3）だけです。今回の本文が重大度を読み取れない `NEEDS_FIX` なら、前回分だけ移しても通しません（`NEEDS_FIX` のまま）。
 - 見張りは `run-gemini.sh` と同じ（`gemini-agy.zsh`）: 出力が `GEMINI_REVIEW_NOOUTPUT_SEC`（既定 600 秒）止まれば `EXIT:8`、idle のまま子が無ければ `EXIT:3`、全体の上限は `GEMINI_REVIEW_PRINT_TIMEOUT`（既定 `45m`）。出力の更新時刻は zsh 組み込みの `zstat` で取ります（PATH の先に GNU の `stat` があっても壊れない）。
 - dry-run: `logs/` が symlink なら書きません（`EXIT:2`）。`<label>.dry-run.prompt.md` が symlink なら辿らずにその名前を外してから、普通のファイルとして新しく書きます（`run-gemini.sh` の dry-run も同じ）。
@@ -180,7 +182,7 @@ Gemini を含む構成では、`run-gemini.sh` が必須にしている macOS �
 1. worktree を確かめた直後に `.pid` を書く（以後どこで落ちても `.done` が残る）
 2. 起動前点検（サブスクのログイン確認。認証状態の本文はログに出さない）→ API キーの環境変数を外す
 3. MCP（外部サービスへつなぐ拡張機能）の遮断（8 章）
-4. `logs/<label>.lock` の排他ロック
+4. `logs/<label>.lock` の排他ロック（レビューは `logs/.review.lock` の共通の排他も取る）
 5. プロンプトは stdin（標準入力）で渡す（コマンドライン長の上限と、`-` 始まりのプロンプトがオプション扱いされる事故を避けるため）。上限は `LANES_PROMPT_MAX_BYTES`
 6. ログ回転 → 実行 → `EXIT:n` と証跡を書く。終了時に macOS 通知（`LANES_NOTIFY=0` で無効）
 
@@ -206,6 +208,8 @@ zsh lanes/lanes-status.sh <worktree> <label> --tail 20  # DONE 以外は最終�
   **なぜ**: 起動したつもりで実は止まっていて、誰も気づかないまま時間だけ過ぎる事故を防ぐため。
 
 ### 同じ label の排他と止め方
+- レビュー（Codex・Claude・Gemini のレビューのランチャ）は、label の排他に加えて、同じ worktree の `logs/` で 1 本ずつに限ります（共通の排他 `logs/.review.lock`）。別の label・別のエンジンのレビューが実行中なら、実行中のレビューの記録と再利用の記録に触らずに `exit 2` で止まります（今回の label には `EXIT:2` を残す。上の「排他を取る前の誤りの記録」）。
+  **なぜ**: 別の label なら同時に走れたとき、先に始めた Codex・Claude のレビューが終わるときの再利用の記録の巻き戻しが、後から始めた Gemini のレビューの確認中の印（`IN_PROGRESS`）を消して古い `CLEAN` を戻し、その古い合格を次の起動が使い得たため。
 - 同じ label は「ランチャが実行中」でも「前回の子（claude / codex / agy）が生きている」でも起動を拒否します（exit 2）。生死は `lstart`（`LC_ALL=C TZ=UTC` 固定の開始時刻）で照合し、pid の使い回しを見分けます。開始時刻が取れないなど同一性が確かめられないものは、終わったとみなさず再起動もログ回転も保留します。
 - 止めるときは **`kill <ランチャの pid>`**（`.pid` の `pid=` 行）。ランチャは子の終了を最大 10 秒待ってから `.done` を書きます。`kill -9` は後始末が走らないので使いません。
 - `FAILED` / `DEAD` の行に「子 pid=N 生存」と出たときだけ、その子を `kill N` してから再起動します。`RUNNING` / `STALLED` の子は健全なので kill しません。
@@ -354,6 +358,7 @@ zsh lanes/lanes-watch.sh --check
 - 使えない: `reuse=no reason=<理由>` を出して exit 1。理由は `no-check`（確認コマンドが未設定）/ `no-record`（同じ tree の記録が無い。`chk-run.sh` をまだ通していないか、通ったが記録できなかった。後者は `chk-run.sh` が `record=no reason=…` の行に理由を出している）/ `cache-link`（記録がリンク）/ `uncommitted`（未 commit の変更・変更検知を省く設定）/ `unresolvable`（確認コマンドや依存を確実に解決できない）/ `input-changed`（確認コマンド・環境変数・依存・ランチャの記録でない無視対象のファイルなどが記録と違う）/ `state-error`。
 - 使い方の誤り（worktree が無い・git の作業ツリーでない・余計な引数）は exit 2。
 - 入力の指紋には環境変数が入るので、`chk-run.sh` を回したのと同じ環境から呼びます。レビューの入口・ランチャだけが持つ制御の値（`LANES_ENTRY_PREFLIGHT`・`LANES_REVIEW_REUSE_CHECKS`・`LANES_REVIEW_REQUIRE_CHECKS`・`LANES_REVIEW_ENGINE`）は指紋に入れません。
+- 問い合わせは作業ツリーへ移ってから入力を読みますが、そのときの python（`read_state`）は `-I`（分離モード）で動かします。レビューのランチャが呼び出し元の認証の環境を戻して呼んでも、worktree の中の同じ名前のモジュール（`shutil.py` など）を読みません。
 
 ## 8. 全レーンで MCP を使わない
 

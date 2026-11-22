@@ -19,6 +19,7 @@ description: >-
 - **レビュー（`<kit>/lanes/run-review.sh`）**:
   - `LANES_TOOLS` に Codex が含まれる構成（`full` / `claude-codex`）では Codex レビュー（`run-codex-review.sh`）、含まれない構成（`claude-gemini` / `claude-only`）では Claude レビュー（`run-claude-review.sh`・別セッション・読み取り専用）が走る。
   - Gemini レビュー（`run-gemini-review.sh`）は、`run-review.sh --engine gemini`（または設定の `LANES_REVIEW_ENGINE=gemini`）で選んだときだけ走る（構成に gemini があるとき）。label は既定のレビューと別の系列（例 `grev-<票>-r<N>`）にする。周回の仕組み（full / delta / 同じ HEAD の省略・round 3 以降の後回し・ESCALATE）と VERDICT の読み方は Codex・Claude と同じ。
+  - **同じ worktree のレビューは 1 本ずつ**（label・レビュー役を問わない共通の排他 `logs/.review.lock`）。既定のレビューと Gemini レビューは続けて回す。並べて起動すると後のほうが `exit 2`（`FAILED`・`note=起動前の誤り: 同じ worktree の logs/ で別のレビューが実行中…`）で止まるので、前のレビューの終了を待って同じ label で回し直す（実行中のレビューの記録と再利用の記録は変わらない）。
   - **実装と同じ道具でレビューしない**: Gemini で実装した worktree は Gemini でレビューしない（ランチャが `EXIT:2` で止め、Codex か Claude のレビューを案内する。どうしても回すときだけ `--allow-same-engine`。証跡に残る）。P0/P1 の修正後の再レビューと、認証・課金・データ削除などリスクの高い差分は既定のレビュー役で回す。
   - label は全構成で `rev-<票>-r<N>` の形で round 番号を入れる。比較の起点は統合先ブランチ（`LANES_BASE_BRANCH`、既定 `develop`）か `--base`。
   - **どの構成でも（Codex レビュー・Claude レビューとも）**: 既定は `--mode auto`。round 1 は `full`（全体差分レビュー）、前回 `CLEAN`（合格）の後は前回レビューした HEAD（現在のブランチ先端のコミット）からの `delta`（増分レビュー）、同一 HEAD は省略（`skip-same-head`）を自動で選ぶ。前回 `NEEDS_FIX` なら `full` に戻して未解決指摘を引き継ぐ。`--round N`・`--force` も使える。仕組みは `<kit>/lanes/review-dedup.zsh` の 1 つ。

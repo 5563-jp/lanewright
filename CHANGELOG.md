@@ -19,8 +19,10 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
     stream-json の書き込み系のツール呼び出し（拒否されて書けなかった試みも含む）が 1 件でもあれば `NEEDS_FIX`・`EXIT:4`（証跡に件数。`agy` の失敗の終了コードより優先し、`agy` の終了コードは証跡に別に書く）。
     1 行目が `init` でない・JSON の不正・`result` の欠損や重複・`status=ERROR` は `VERDICT: NONE`。
   - **再利用の記録は「確認中」の印で守る**: 子を起動する直前に `logs/.<系列>.review-state` を `IN_PROGRESS` にし（前回 `NEEDS_FIX` の未解決指摘の本文を読み切ってから書き換える）、
-    `agy` が 0 で終わり、判定が `CLEAN` / `NEEDS_FIX` で、読み取り専用の監査を通ったときだけ確定する。確定の順番は、書く先の確認 → ログの末尾 → 再利用の記録 → 証跡 → 後回し票 →
-    終了記録（`.done` を読み戻して確かめる）。合格の証跡と表示は全部が書けてから出し、途中で失敗したら確定した分を戻して、証跡とログの末尾を `VERDICT: NONE`・`EXIT:3` で書き直す。
+    `agy` が 0 で終わり、判定が `CLEAN` / `NEEDS_FIX` で、読み取り専用の監査を通ったときだけ確定する。確定の順番は、書く先の確認 → ログの末尾 → 証跡 → 後回し票 →
+    終了記録（`.done`。一時ファイルから置き換えて読み戻す）→ 再利用の記録（最後）。次の起動が前回の結果を使える（同じ HEAD の省略・delta）のは、PR に貼る証跡・後回し票・終了記録が
+    全部揃った後だけ。合格の表示は再利用の記録まで確定してから出し、途中で失敗したら公開した分を取り下げる（再利用の記録は確認中へ・後回し票は公開前の中身へ・
+    証跡とログの末尾と `.done` は `VERDICT: NONE`・`EXIT:3` へ書き直す）。同じ HEAD の結果を使う経路も、ログ・証跡・`.done` の全部が書けてから合格を表示する。
     失敗・見張りの停止・中断・強制終了・書き込みの試み・記録の書き込みの失敗では `IN_PROGRESS` のまま残り、次の起動は古い `CLEAN`（記録も過去の証跡も）を使わずに full で回す。
     前回 `NEEDS_FIX` の未解決指摘だけは引き継ぐ。`.done` の書き先がフォルダなどで書けないと分かれば、記録に触る前に止める（`EXIT:2`）。
   - round 3 以降の後回し票は確定するときだけ公開する（不合格の回の指摘を残さない・回し直しで重ねない）。前回の P2 / P3 を票へ移して通すのは、今回の判定が `CLEAN` のときだけ
@@ -34,6 +36,10 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   - **実装と同じ道具でレビューしない**: `logs/` に Gemini 実装（`run-gemini.sh`）の記録があれば起動しない（`EXIT:2`。Codex か Claude のレビューを案内）。どうしても回すときだけ `--allow-same-engine`（証跡に残る）。
   - モデルと effort は `GEMINI_REVIEW_MODEL` / `GEMINI_REVIEW_EFFORT`（既定は空＝CLI の既定。実装用の `GEMINI_MODEL` / `GEMINI_EFFORT` とは別）。`.pid` と証跡に残る。
     見張りは `GEMINI_REVIEW_NOOUTPUT_SEC`（既定 600 秒。`EXIT:8`）と `GEMINI_REVIEW_PRINT_TIMEOUT`（既定 `45m`）。
+- **同じ worktree のレビューは 1 本ずつ**: Codex・Claude・Gemini のレビューは、label の排他に加えて `logs/` 単位の共通の排他（`logs/.review.lock`）を取る。
+  別の label・別のエンジンのレビューが実行中なら、その記録にも再利用の記録にも触らずに止める（`exit 2`。今回の label には `EXIT:2`・`note=起動前の誤り: ...` を残し、
+  `lanes-status.sh` は前回の `DONE` ではなく `FAILED` を返す）。今までは別の label なら同時に走れ、先に始めた Codex・Claude のレビューの終わりの巻き戻しが、
+  後から始めた Gemini のレビューの確認中の印を消して古い `CLEAN` を戻し得た。ロックファイルは消さない・回転しない（台帳に載るので `chk-run.sh` の指紋にも入らない）。
 - `run-review.sh --engine codex|claude|gemini` と設定キー `LANES_REVIEW_ENGINE`（優先順は `--engine` ＞ `LANES_REVIEW_ENGINE` ＞ 構成）。構成に無い道具・知らない値は今回の失敗（`EXIT:2`）として `.done` に残す。
   起動前点検は振り分けたレビュー役で回す（`lanes-doctor.sh --review-engine`。設定が `gemini` で固定でも、`--engine codex` の起動は Gemini の点検で止めない）。
 - `lanes-doctor.sh --review-engine codex|claude|gemini`。指定のレビュー役（codex・gemini）が構成に無ければ NG（`run-review.sh` と同じ判定）。
@@ -48,6 +54,14 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 - `review-dedup.zsh`: 再利用の記録の書き込みを 1 つの関数（一時ファイルに書いてから名前を付け替える）にまとめた。`IN_PROGRESS` のまま残った記録があれば、
   どのレビュー役も前回の記録として使わない（過去の証跡にも戻らない）。Codex・Claude のレビューは `IN_PROGRESS` を書かないので、今までどおりの動き。
 - `chk-run.sh` は `LANES_REVIEW_ENGINE` を確認コマンドに渡さず、入力の指紋からも外す（起動のときだけ渡しても親の記録を使い回せる）。
+  問い合わせ（`--query`）の入力の読み取り（`read_state`）の python も `-I`（分離モード）で動かす（レビューの起動から呼んでも、worktree の `shutil.py` などを読まない）。
+- 終了記録（`.done`）は、一時ファイルに全文を書き切ってから置き換える（全ランチャ共通。起動前の誤りの記録も同じ）。容量不足や途中の中断で、先頭の `EXIT:0` だけの
+  書きかけが残り、`lanes-status.sh` が `DONE` と読むことがなくなる（書けなければ `.done` は無いまま＝`DEAD`）。
+- Gemini レビューは、必須検証の使い回しの問い合わせを `/` へ移る前に、起動元の場所と環境のまま行う（Codex・Claude のレビューと同じ。相対パスの `LANES_CONF`・`CHK_CACHE` で
+  親が `chk-run.sh` を通しても記録と照合できる）。相対パスの `LANES_SCRATCH_ROOT` は起動元を基準に絶対パスへ直してから scratch を作る（`/` を基準に作らない）。
+- stream-json の監査（Gemini レビュー・Gemini 実装）は生ログを 1 行ずつ読む（ログ全体を二重に持たない）。Gemini 実装の監査も、本文の中の U+2028 などで正しい行を割らず、
+  途中の文字コードの不正行より前の書き込みの記録を捨てない。
+- 旧形式の指摘ログ（`<系列>-r<k>.evidence.md` と `.log`）を途中までしか読めなかったら、その失敗を返す（欠けた未解決指摘で確認中の印に置き換えない）。
   **上げた後は、`chk-run.sh` を 1 回通し直す。** `chk-run.sh` と `_common.sh` の中身が変わったので、前の版で残した確認済みの記録は 1 回だけ使えなくなる（レビューの問い合わせは `input-changed`）。
 
 ## [0.1.7] - Cloudflare Workers + vinext の構成の生成物があっても確認の結果を記録する / Record checks with Cloudflare Workers + vinext generated output

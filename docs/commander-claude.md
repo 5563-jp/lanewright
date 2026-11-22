@@ -57,6 +57,7 @@ zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> grev-<票>-r<N> --engine ge
 ```
 
 - Gemini レビューの label は、既定のレビューと別の系列（上の例の `grev-`）にします。系列ごとに周回を数え、前回の結果の再利用もレビュー役ごとに分かれます。
+- 同じ worktree のレビューは、label・レビュー役を問わず 1 本ずつです（共通の排他 `logs/.review.lock`）。既定のレビューと Gemini レビューは並べて起動せず、続けて回します。並べて起動すると後のほうが `exit 2`（`lanes-status.sh` は `FAILED`・`note=起動前の誤り: 同じ worktree の logs/ で別のレビューが実行中…`）で止まるので、前のレビューが終わってから同じ label で回し直します（実行中のレビューの記録と再利用の記録は変わっていない）。別の worktree のレビューは今までどおり同時に回せます。
 - Gemini で実装した worktree に `--engine gemini` を付けると、ランチャが起動せずに止めます（実装と同じ道具でレビューしない）。そのまま既定のレビュー役（Codex か Claude）で回します。
 - Gemini レビューが途中で終わった（`FAILED`・`DEAD`・中断）ときは、同じ label でそのまま回し直します。前回の結果（古い `CLEAN`）は使わずに full で回り、前回 `NEEDS_FIX` の未解決指摘は引き継がれます。
 - P0 / P1 を直した後の再レビューと、リスクの高い差分は既定のレビュー役で回します。`VERDICT:` の行・GATE の読み方はどのレビュー役でも同じです。

@@ -82,6 +82,8 @@ zsh <kit>/lanes/detach-run.sh <launch.log> zsh <kit>/lanes/run-review.sh <worktr
 zsh <kit>/lanes/detach-run.sh <launch.log> zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> grev-<票>-r<N> --engine gemini [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--dry-run]
 #   Gemini で実装した worktree では起動しない（exit 2。実装と同じ道具でレビューしない）。どうしても回すときだけ --allow-same-engine（証跡に残る）
 #   途中で終わった（FAILED・DEAD・中断）ら、同じ label で回し直す（再利用の記録は IN_PROGRESS のまま残り、古い CLEAN は使わずに full で回る）
+#   同じ worktree のレビューは label・レビュー役を問わず 1 本ずつ（logs/.review.lock）。既定のレビューと並べず続けて回す
+#   （並べると後のほうが exit 2・FAILED「別のレビューが実行中」で止まる。前の終了を待って同じ label で回し直す）
 ```
 
 - **起動後 60 秒以内の確認**: `<kit>/lanes/lanes-status.sh <worktree> <label> --tail 20` を実行する。確認前に「起動した」と報告しない。`RUNNING` または `DONE` のときだけ「起動確認 OK: PID（プロセス識別番号） / ログパス」と報告する。
