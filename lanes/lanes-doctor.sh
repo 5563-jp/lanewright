@@ -1,7 +1,10 @@
 #!/bin/zsh -f
 # 起動前点検（doctor = 健康診断）。今の構成（LANES_TOOLS）で使う道具がそろっているかを確かめる。
-# 使い方: lanes-doctor.sh [--quiet] [<worktree>]
+# 使い方: lanes-doctor.sh [--quiet] [--review-engine codex|claude|gemini] [<worktree>]
 #   --quiet     問題が無ければ何も出さない（run-impl.sh / run-review.sh が起動前に使う）。問題があれば同じ一覧を出す
+#   --review-engine  このレビューの起動で確定したレビュー役（レビューのランチャが _common.sh の lanes_entry_preflight で渡す）。
+#               設定ファイル（lanes.conf）を読んだ後に LANES_REVIEW_ENGINE へ当てる（設定ファイルに値をそのまま書いた
+#               LANES_REVIEW_ENGINE=gemini でも、--engine codex / claude で選んだ起動を使わない Gemini の点検で止めない）
 #   <worktree>  （任意）レーンを走らせる作業ツリー。渡すと、ランチャが書く logs/ が git に無視されているかも見る
 #               （無視されていなければ注意だけ。未追跡の logs/ が残り、誤って commit される原因になる）
 # 見るもの:
@@ -19,12 +22,16 @@
 # 足りないものは全部並べてから exit 2。全部そろえば exit 0。ログイン状態の本文（鍵の断片が混ざりうる）は表示しない。
 set -euo pipefail
 LANES_DIR="${0:A:h}"
-usage="使い方: lanes-doctor.sh [--quiet] [<worktree>]"
+usage="使い方: lanes-doctor.sh [--quiet] [--review-engine codex|claude|gemini] [<worktree>]"
 quiet=0
 worktree=""
+review_engine=""
 while (( $# )); do
   case "$1" in
     --quiet) quiet=1; shift ;;
+    --review-engine)
+      (( $# >= 2 )) && [[ "$2" == (codex|claude|gemini) ]] || { print -u2 -- "ERROR: --review-engine は codex か claude か gemini / $usage"; exit 2; }
+      review_engine="$2"; shift 2 ;;
     -h|--help) print -r -- "$usage"; exit 0 ;;
     -*) print -u2 -- "ERROR: 不明なオプション: $1 / $usage"; exit 2 ;;
     *)
@@ -61,6 +68,8 @@ if command -v gh >/dev/null 2>&1; then ok "gh（任意）"; else note "gh（GitH
 # 誤った値は lanes.env が既定に戻すので、残りの点検は既定値で続ける。export しない変数で頼む（lanes.env「設定の誤りの扱い」）
 typeset +x LANES_DEFER_CONFIG_ERROR=1
 source "$LANES_DIR/lanes.env"
+# 確定したレビュー役（--review-engine）は設定を読んだ後に当てる（設定ファイルの値に上書きされない）
+[[ -z "$review_engine" ]] || LANES_REVIEW_ENGINE="$review_engine"
 [[ -z "${LANES_CONFIG_ERROR:-}" ]] || ng "設定の誤り: $LANES_CONFIG_ERROR（誤った値は既定に戻して残りを点検した。直してから再実行する）"
 if [[ -f "$LANES_CONF" ]]; then ok "設定ファイル: $LANES_CONF"; else note "設定ファイルが無い（既定値で動く）: $LANES_CONF"; fi
 # 司令塔（LANES_COMMANDER）は運用の印。ランチャや判定の動きは変えず、監視の回し方の案内だけを変える
@@ -86,6 +95,8 @@ if (( roles_ok )); then
     # _common.sh も lanes.env を読み直す。上で並べた設定の誤りで止まらないよう、同じく保留を頼む
     typeset +x LANES_DEFER_CONFIG_ERROR=1
     source "$LANES_DIR/_common.sh"
+    # _common.sh も設定を読み直すので、確定したレビュー役をもう一度当てる
+    [[ -z "$review_engine" ]] || LANES_REVIEW_ENGINE="$review_engine"
     # 点検の途中で止まっても .done 等を書かない（_common.sh の終了処理はランチャ用）
     unfunction TRAPEXIT TRAPZERR 2>/dev/null || true
   fi

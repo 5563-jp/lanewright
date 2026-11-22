@@ -45,10 +45,8 @@ lanes_restore_caller_auth_env() {
   for k in "${(@k)LANES_SAVED_AUTH_ENV}"; do export "$k=${LANES_SAVED_AUTH_ENV[$k]}"; done
   for k in "${(@k)LANES_SAVED_GIT_ENV}"; do export "$k=${LANES_SAVED_GIT_ENV[$k]}"; done
 }
-# 作業場所（scratch）の置き場所（LANES_SCRATCH_ROOT）が相対パスなら、起動した場所を起点にここで絶対パスへ直す。
-# ランチャは途中で作業場所を移る（cd）ので、相対のままだと検査した場所・作った場所と、子へ渡す場所（--add-dir・TMPDIR・
-# LANES_SCRATCH・GIT_CONFIG_GLOBAL）がずれる。symlink はたどらない（:a。検査の lanes_scratch_guard は実体で比べる）
-[[ -z "${LANES_SCRATCH_ROOT:-}" || "$LANES_SCRATCH_ROOT" == /* ]] || LANES_SCRATCH_ROOT="${LANES_SCRATCH_ROOT:a}"
+# 作業場所（scratch）の置き場所（LANES_SCRATCH_ROOT）の相対指定は、lanes.env が絶対パスに直す（chk-run.sh も同じ lanes.env を読むので、
+# 親の検証とレビューの問い合わせで指紋の環境変数がそろう）
 # 外す前の環境に戻してコマンドを実行する（同じく子シェルの中で使う）
 lanes_with_caller_auth_env() { lanes_restore_caller_auth_env; "$@"; }
 
@@ -177,16 +175,31 @@ lanes_now() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 
 # zsh -f は .zshrc を読まないので PATH は起動元の継承だけ。python3 は必須
 command -v python3 >/dev/null 2>&1 || lanes_die "python3 が PATH に無い"
+# 親（ランチャ・監督役・受け取り役・監査）が使う python3 は、作業場所を移る前のここで絶対パスに確定する。
+# PATH に相対のフォルダ（. や空の項目）があると、作業ツリーへ移った後（Codex・Claude レビューの cd、子の作業場所で起動する監督役）の
+# python3 は作業ツリーの中の同名のファイルを選び得る（-I が隔離するのは起動後のモジュール検索だけで、どの python3 を選ぶかには効かない）。
+# 以後このシェルの `python3 ...` は下の関数を通って、ここで確定した実行ファイルを使う。背景起動・exec・別プロセスへ渡すコマンドの
+# 先頭（監督役の起動・受け取り役・codex-review-output.py）は関数を通らないので、"$LANES_PYTHON3" をそのまま書く
+typeset -g LANES_PYTHON3="$(command -v python3)"
+LANES_PYTHON3="${LANES_PYTHON3:a}"
+[[ "$LANES_PYTHON3" == /* && -f "$LANES_PYTHON3" && -x "$LANES_PYTHON3" ]] || lanes_die "python3 の場所を確かめられない: $LANES_PYTHON3"
+python3() { "$LANES_PYTHON3" "$@"; }
 
-# バイナリが無ければ PATH から探す
+# バイナリが無ければ PATH から探す。決めた実行ファイルは、作業場所を移る前のここで絶対パスに直して <var> に入れる
+# （相対パスの CLAUDE_BIN / CODEX_BIN / GEMINI_BIN や、PATH の . などで見つかった ./agy のままだと、--help などの点検は呼び出し元の
+# 作業場所で、起動は作業ツリーへ移った後（Codex・Claude レビューの cd、子の作業場所で起動する監督役）になり、別のファイルを指し得る）。
+# 名前だけ（/ を含まない）の指定は PATH から探す（作業場所の同名のファイルを選ばない）。点検と起動は、ここで決めた同じ値を使う
 lanes_resolve_bin() {
-  local var="$1" name="$2"
+  local var="$1" name="$2" v="${(P)1}"
+  [[ -z "$v" || "$v" == */* ]] || v="$(whence -p -- "$v" 2>/dev/null || true)"
   # -x はフォルダでも真になるので、ふつうのファイルであることも確かめる
-  if [[ -z "${(P)var}" || ! -f "${(P)var}" || ! -x "${(P)var}" ]]; then
-    local found; found="$(command -v "$name" 2>/dev/null || true)"
-    [[ -n "$found" ]] || lanes_die "$name が見つからない（${var} にも PATH にも無い）。入れてから lanes-doctor.sh で確かめる"
-    typeset -g "$var"="$found"
+  if [[ -z "$v" || ! -f "$v" || ! -x "$v" ]]; then
+    v="$(whence -p -- "$name" 2>/dev/null || true)"
+    [[ -n "$v" ]] || lanes_die "$name が見つからない（${var} にも PATH にも無い）。入れてから lanes-doctor.sh で確かめる"
   fi
+  v="${v:a}"
+  [[ -f "$v" && -x "$v" ]] || lanes_die "$name の実行ファイルを確かめられない: $v"
+  typeset -g "$var"="$v"
 }
 
 # 環境変数の effort が、設定ファイル（無ければ既定）と違う値で勝っているときだけ、注意を 1 行出す（stderr）。
@@ -228,10 +241,15 @@ lanes_require_tool() {
 # 入口は LANES_ENTRY_PREFLIGHT=1 を付けて振り分け先へ exec し、振り分け先が lanes_mark_start の後にこれを呼ぶ。
 # こうすると点検の失敗も今回の .done（EXIT:2）として残り、同じ label の前回の成功（DONE）と取り違えない。
 # 直接ランチャを呼んだときは何もしない（そのランチャ自身の道具の点検だけが走る）。子の CLI へ引き継がないよう外す。
-lanes_entry_preflight() {
+# [レビュー役]（codex / claude / gemini）: レビューのランチャは自分のレビュー役を渡す。点検は設定（lanes.conf）を読み直すので、
+# 環境変数の LANES_REVIEW_ENGINE だけで渡すと、設定ファイルに値をそのまま書いた LANES_REVIEW_ENGINE=gemini に上書きされる
+# （--engine codex で選んだ起動が、使わない Gemini の点検で止まる）。引数は設定を読んだ後に当てる（lanes-doctor.sh --review-engine）
+lanes_entry_preflight() {   # [レビュー役]
   [[ "${LANES_ENTRY_PREFLIGHT:-0}" == 1 ]] || return 0
   unset LANES_ENTRY_PREFLIGHT
-  zsh -f "$LANES_DIR/lanes-doctor.sh" --quiet || lanes_die "起動前点検（lanes-doctor.sh）で足りないものがある → 起動しない"
+  local -a args=(--quiet)
+  [[ -z "${1:-}" ]] || args+=(--review-engine "$1")
+  zsh -f "$LANES_DIR/lanes-doctor.sh" "${args[@]}" || lanes_die "起動前点検（lanes-doctor.sh）で足りないものがある → 起動しない"
 }
 
 # <worktree> <gitdir> <共通の管理フォルダ> → git の制御ファイルの指紋（子の実行の前後で比べる）。
@@ -495,7 +513,8 @@ PY_GEM_SETTINGS
 # symlink など）ときは 2 を返し、理由（読めなかった名前など）を REPLY に入れる（「記録なし」と取り違えて起動しない）。
 # <lane> は lanes_mark_start に渡す名前（gemini / codex / claude）。
 # 見るもの: logs/ の直下の <label>.pid（回転した .prev-* も）の「lane=<lane>」の行と、<label>.evidence.md（回転したものも）の
-# 1 行目の見出し（「## Gemini 実装証跡（」など）。.done には種別が無いので見ない。symlink・普通のファイルでないものは中身を読まない。git は呼ばない
+# 1 行目の見出し（「## Gemini 実装証跡（」など）。.done には種別が無いので見ない。git は呼ばない。
+# 記録の名前なのに普通のファイルでないもの（フォルダ・symlink・FIFO など）は中身を読まず、「確かめられない」（2）に数える
 lanes_impl_lane_recorded() {   # <logdir> <lane>
   local found rc=0
   typeset -g REPLY=""
@@ -521,7 +540,9 @@ for e in entries:
     except OSError:
         unreadable.append(e.name); continue
     if not stat.S_ISREG(s.st_mode):
-        continue
+        # 記録の名前なのに普通のファイルでない（フォルダ・symlink・FIFO など）。中身を読まずに「確かめられない」に数える
+        # （読み飛ばして「記録なし」にすると、実装役を確かめないまま --allow-same-engine なしでレビューが始まる）
+        unreadable.append(e.name); continue
     try:
         if is_pid:
             with open(e.path, encoding="utf-8", errors="replace") as f:
@@ -1128,17 +1149,20 @@ except Exception:
 
 # 呼び出し元の標準入出力を保って背景起動する。LANES_CHILD を wait すれば孫の回収まで完了する。
 lanes_start_child() {
-  python3 -I -c "$LANES_PROCESS_GUARD" supervise "$@" <&0 &
+  # 監督役は起動時に確定した python3（LANES_PYTHON3）で動かす（背景起動は関数の python3 を通さない。$! を監督役の pid にするため）
+  "$LANES_PYTHON3" -I -c "$LANES_PROCESS_GUARD" supervise "$@" <&0 &
   typeset -g LANES_CHILD=$!
   typeset -g LANES_MANAGED_CHILD_PID="$LANES_CHILD"
   lanes_record_child "$LANES_CHILD"
 }
 # lanes_start_child と同じ。ただし作業場所（cwd）を <dir> にするのは監督役とその子だけ（呼び出し元のシェルは移らない）。
 # 親（ランチャ）が対象の作業ツリーへ cd せずに済むので、親が回す python3・git が作業ツリーの中の同名のモジュールや設定に引きずられない。
-# 子シェルで cd してから exec で監督役に置き換わるので、LANES_CHILD は監督役の pid（lanes_start_child と同じ扱い）
+# 子シェルで cd してから exec で監督役に置き換わるので、LANES_CHILD は監督役の pid（lanes_start_child と同じ扱い）。
+# 監督役の python3 は cd の前に確定した絶対パス（LANES_PYTHON3）。cd の後に PATH で探し直さない（相対の PATH で作業ツリーの中の物を選ばない）。
+# <コマンド...> の先頭も、監督役が作業場所で PATH から探すので、相対の PATH に左右されない絶対パスで渡す（受け取り役は "$LANES_PYTHON3"）
 lanes_start_child_in() {   # <dir> <コマンド...>
   local dir="$1"; shift
-  ( builtin cd -q -- "$dir" && exec python3 -I -c "$LANES_PROCESS_GUARD" supervise "$@" ) <&0 &
+  ( builtin cd -q -- "$dir" && exec "$LANES_PYTHON3" -I -c "$LANES_PROCESS_GUARD" supervise "$@" ) <&0 &
   typeset -g LANES_CHILD=$!
   typeset -g LANES_MANAGED_CHILD_PID="$LANES_CHILD"
   lanes_record_child "$LANES_CHILD"
@@ -1225,8 +1249,10 @@ lanes_fresh_file() {
 # 通らないので、ここで同じ考え方の確かめをする。前の実行の子が logs/ の中に置いたリンクを辿って、外のファイルを上書きしないため:
 #   - logs/ が symlink でない本物のフォルダで、worktree の直下にある（無ければ作る）
 #   - ランチャの記録の台帳に載せられる（載せられない＝台帳がリンクなど。dry-run でも書かずに止める）
-#   - 書き込み先が symlink でもフォルダでもない。前からある物（ハードリンクを含む）は消し、後の書き込みが新しい普通のファイルを作るようにする
-# 子は動いていない（dry-run は子を起動しない）ので、消してから書くまでの間に置き直されることはない
+#   - 書き込み先がフォルダでない
+# 前回の dry-run の指示書は、ここでは消さない。ランチャは認証・サンドボックス・テンプレートなどの確かめが通った後に、logs/ を symlink を
+# 辿らずに開いた中で新しい一時ファイルに書いてから名前を付け替える（前からある名前が symlink・ハードリンクでも先を書き換えない）。
+# 途中の確かめで止まっても、前回確かめられていた指示書は残る
 lanes_dry_run_target() {   # <worktree> <logdir> <label> <書き込み先>
   local wt="${1:A}" logdir="$2" label="$3" file="$4"
   [[ ! -L "$logdir" ]] || lanes_die "logs/ が symlink → dry-run でも書かない: $logdir"
@@ -1236,7 +1262,6 @@ lanes_dry_run_target() {   # <worktree> <logdir> <label> <書き込み先>
   lanes_records_claim_try "$logdir" "label:$label" \
     || lanes_die "ランチャの記録の台帳（logs/.lanes-records）に載せられない（symlink・ハードリンク・FIFO など）→ dry-run でも書かない: $logdir"
   [[ ! -d "$file" || -L "$file" ]] || lanes_die "dry-run の書き込み先がフォルダ: $file"
-  lanes_fresh_file "$file"
 }
 
 # 開いておいたフォルダの中で、新しい一時ファイルに書いてから名前を置き換える（標準入力の中身を書く）。置き換えは名前の付け替えなので、

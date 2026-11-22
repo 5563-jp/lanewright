@@ -2,6 +2,7 @@
 # chk-run.sh — 統合先（LANES_BASE_BRANCH）に入れる直前の最終 head で回す手元確認の共通本体。同じ確認を繰り返さない
 # 使い方: chk-run.sh <worktree> <port> <outdir> [--merge <ref>] [--force]
 #         chk-run.sh <worktree> --query   （回さずに、確認済みの記録を使い回せるかだけ答える。下の「問い合わせ」）
+#         chk-run.sh <worktree> --query-input <port> <outdir>   （回さずに、その port・outdir での入力の指紋だけを答える。下の「入力の照合」）
 #   回す確認コマンドは次の順で決める（どちらも無ければ exit 2 で設定方法を出す）:
 #     1) 対象リポの .lanes/check.sh（あれば優先。bash で worktree を作業場所にして実行）
 #     2) 設定キー LANES_CHECK_CMD（例: pnpm lint && pnpm typecheck && pnpm build。bash -c で実行）
@@ -29,10 +30,15 @@
 #   （tree<TAB>head<TAB>full<TAB>日時<TAB>worktree<TAB>input_fp<TAB>port<TAB>outdir）。port と outdir は問い合わせが同じ条件で照合し直すために残す
 # 問い合わせ（--query）: 確認コマンドを一切実行せず、記録も出力先も作らない（fetch もしない）。skip=same-tree になる条件
 #   （tree・入力の指紋・確認コマンドの指紋）をそのまま使い、記録に残した port と outdir で指紋を計算し直して照合する。
-#   使い回せる: 1 行目 reuse=yes、続けて head= / recorded= / check=（.lanes/check.sh か LANES_CHECK_CMD）を出して exit 0
+#   使い回せる: 1 行目 reuse=yes、続けて head= / recorded= / check=（.lanes/check.sh か LANES_CHECK_CMD）/ fp= / port= / outdir= /
+#               input=（その記録の port・outdir で取った入力の指紋。生成物を除く）を出して exit 0
 #   使えない  : reuse=no reason=<理由> を出して exit 1（no-check / no-record / cache-link / uncommitted / unresolvable / input-changed / state-error）
 #   使い方の誤り（worktree が無い・git でない・他の引数と組み合わせた）は exit 2
 #   指紋には環境変数も入るので、親が chk-run.sh を回したのと同じ環境から呼ぶ（レビューランチャは起動直後に呼ぶ）
+# 入力の照合（--query-input <port> <outdir>）: 確認コマンドを一切実行せず、何も作らない。--query が答えた記録の port・outdir で
+#   入力の指紋を取り直し、dirty=<0|1>（未 commit の変更）と input=<指紋>（生成物を除く）を出して exit 0。取れなければ exit 1。
+#   レビューランチャが、親の記録を使い回したレビューの子の後に、問い合わせたときと同じ環境で呼ぶ（レビュー中に確認コマンドの
+#   入力 = 未追跡の logs/input.json・依存・環境変数などが変わっていないか。生成物はレビューのテストで変わってよいので比べない）
 set -u
 # 設定ファイル（LANES_CONF）の LANES_CHECK_CMD / LANES_RUNS_ROOT などを受け取るため、最初の 1 回だけ zsh で
 # lanes.env を読み（設定キーが export される）、そのまま bash で自分を起動し直す。環境変数で渡した値は設定ファイルに勝つ
@@ -40,12 +46,18 @@ if [ -z "${LANES_CHK_ENV_LOADED:-}" ] && [ -f "$(dirname "$0")/lanes.env" ]; the
   export LANES_CHK_ENV_LOADED=1
   exec zsh -fc 'source "$1" || exit 2; shift; exec bash "$@"' chk-run "$(dirname "$0")/lanes.env" "$0" "$@"
 fi
-usage="使い方: chk-run.sh <worktree> <port> <outdir> [--merge <ref>] [--force] / chk-run.sh <worktree> --query"
-query=0
+usage="使い方: chk-run.sh <worktree> <port> <outdir> [--merge <ref>] [--force] / chk-run.sh <worktree> --query / chk-run.sh <worktree> --query-input <port> <outdir>"
+query=0; query_input=0
 if [ $# -ge 2 ] && [ "$2" = "--query" ]; then
   # 問い合わせは他の引数と組み合わせない（--merge・--force は回すときだけの指定）
   [ $# -eq 2 ] && [ -n "$1" ] || { echo "$usage" >&2; exit 2; }
   query=1; wt=$1; port=""; o=""; shift 2
+elif [ $# -ge 2 ] && [ "$2" = "--query-input" ]; then
+  # 入力の照合も何も作らない（問い合わせと同じ扱い）。port と outdir は --query が答えた記録のもの（outdir は絶対パス）
+  [ $# -eq 4 ] && [ -n "$1" ] && [ -n "$4" ] || { echo "$usage" >&2; exit 2; }
+  case "$3" in ''|*[!0-9]*) echo "不正な port: $3" >&2; exit 2 ;; esac
+  case "$4" in /*) ;; *) echo "outdir は絶対パス: $4" >&2; exit 2 ;; esac
+  query=1; query_input=1; wt=$1; port=$3; o=$4; shift 4
 else
   [ $# -ge 3 ] || { echo "$usage" >&2; exit 2; }
   wt=$1; port=$2; o=$3; shift 3
@@ -80,11 +92,20 @@ else
   cache_dir=$(cd "$(dirname "$cache")" && pwd -P) || { echo "キャッシュ先を解決できない: $cache" >&2; exit 2; }
   cache="$cache_dir/$(basename "$cache")"
 fi
+# 呼び出し元の git の場所の指定（GIT_DIR・GIT_COMMON_DIR・GIT_OBJECT_DIRECTORY など。_common.sh の LANES_GIT_LOCATION_ENV_NAMES と
+# 同じ一覧）は、最初の git の呼び出しより前に全部外す。回すときも問い合わせ（--query / --query-input）のときも同じに外すので、
+# レビューランチャが呼び出し元の値を戻して問い合わせても（lanes_with_caller_auth_env）、引数の worktree の参照・オブジェクトだけを見て、
+# 指紋の環境変数もそろう
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX \
+  GIT_SHALLOW_FILE GIT_GRAFT_FILE GIT_REPLACE_REF_BASE GIT_NO_REPLACE_OBJECTS GIT_QUARANTINE_PATH GIT_INTERNAL_SUPER_PREFIX
+# 指紋の計算・監督役に使う python3 は、作業ツリーへ移る前に絶対パスで確定する（PATH に . などの相対の項目があると、移った後の
+# python3 は作業ツリーの中の同名のファイルを選び得る）。確認コマンド（bash -c）には関数を渡さないので、確認コマンドは PATH のまま
+chk_python3=$(command -v python3 2>/dev/null) || { echo "python3 が PATH に無い" >&2; exit 2; }
+case "$chk_python3" in /*) ;; *) chk_python3="$PWD/$chk_python3" ;; esac
+[ -f "$chk_python3" ] && [ -x "$chk_python3" ] || { echo "python3 の場所を確かめられない: $chk_python3" >&2; exit 2; }
+python3() { "$chk_python3" "$@"; }
 cd "$wt" || { echo "worktree が無い: $wt" >&2; exit 2; }
 wt=$(pwd -P) || exit 2
-if [ -e "$wt/.git" ]; then
-  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-fi
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "git 作業ツリーではない: $wt" >&2; exit 2; }
 # 確認コマンドを決める。.lanes/check.sh が優先、無ければ LANES_CHECK_CMD。どちらも無ければ何も回さず止める
 pick_check() {
@@ -103,7 +124,9 @@ pick_check() {
     return 2
   fi
 }
-if [ "$query" = 1 ]; then
+if [ "$query_input" = 1 ]; then
+  pick_check 2>/dev/null || { echo "reason=no-check"; exit 1; }
+elif [ "$query" = 1 ]; then
   pick_check 2>/dev/null || { echo "reuse=no reason=no-check"; exit 1; }
 else
   pick_check || exit 2
@@ -156,6 +179,7 @@ tree=$(git rev-parse --verify 'HEAD^{tree}' 2>/dev/null) || { echo "tree の取�
 # 1 行目 = 作業ツリー直下から見たフォルダ、2 行目 = ファイルの語尾、3 行目 = 作業ツリー直下のファイル名そのもの（どれもスペース区切り）
 generated_def=$(LANES_DIR="$lanes_dir" zsh -fc 'source "$LANES_DIR/_common.sh"; lanes_generated_def' 2>/dev/null) || generated_def=""
 if [ -z "$generated_def" ]; then
+  if [ "$query_input" = 1 ]; then echo "reason=state-error"; exit 1; fi
   if [ "$query" = 1 ]; then echo "reuse=no reason=state-error"; exit 1; fi
   echo "生成物の定義（_common.sh の LANES_GENERATED_DIRS）を読めない" >&2; exit 2
 fi
@@ -831,6 +855,17 @@ sys.stdout.buffer.write(f"dirty={dirty}\nfp={fp_hex}\ncache_fp={cache_fp}\nwhy={
 PY
 }
 export CHK_CHECK_SRC="$check_src"
+# 入力の照合: 渡された port・outdir で入力の指紋を取り、未 commit の変更の有無と一緒に答える（記録は見ない・作らない）
+if [ "$query_input" = 1 ]; then
+  state_info=$(read_state) || { echo "reason=state-error"; exit 1; }
+  qi_dirty=$(printf '%s\n' "$state_info" | sed -n 's/^dirty=//p' | head -1)
+  qi_fp=$(printf '%s\n' "$state_info" | sed -n 's/^fp=//p' | head -1)
+  [ -n "$qi_fp" ] && [ -n "$qi_dirty" ] || { echo "reason=state-error"; exit 1; }
+  [ "$qi_dirty" = 0 ] || qi_dirty=1
+  echo "dirty=$qi_dirty"
+  echo "input=$qi_fp"
+  exit 0
+fi
 # 問い合わせ: 同じ tree の記録ごとに、その記録の port・outdir で指紋を計算し直し、skip=same-tree と同じ条件で照合する
 if [ "$query" = 1 ]; then
   [ -n "$cache_dir" ] && [ -f "$cache" ] || { echo "reuse=no reason=no-record"; exit 1; }
@@ -857,6 +892,10 @@ if [ "$query" = 1 ]; then
       echo "recorded=$(printf '%s' "$hit" | cut -f4)"
       echo "check=$check_src"
       echo "fp=$cache_fp"
+      # 子の後の照合し直し（--query-input）に使う、この記録の port・outdir と、生成物を除いた入力の指紋
+      echo "port=$port"
+      echo "outdir=$o"
+      echo "input=$(printf '%s\n' "$state_info" | sed -n 's/^fp=//p' | head -1)"
       exit 0
     fi
   done <<EOF_CANDS
@@ -930,7 +969,7 @@ trap 'exit 129' HUP
 
 : > "$o/check-state.json" || exit 1
 LANES_CHECK_PORT=$port LANES_CHECK_OUTDIR=$o \
-  python3 -I -c "$guard" supervise-state "$o/check-state.json" bash -c "$check_cmd" > "$o/check.log" 2>&1 < /dev/null & pp=$!
+  "$chk_python3" -I -c "$guard" supervise-state "$o/check-state.json" bash -c "$check_cmd" > "$o/check.log" 2>&1 < /dev/null & pp=$!
 read_pp_start || true
 r=0
 wait "$pp" || r=$?

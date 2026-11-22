@@ -468,10 +468,11 @@ rvd_place_outer_marker() {   # <外の印のパス>
 # 前回が NEEDS_FIX の記録はそのまま残す（次のレビューを full にして、未解決の指摘を引き継がせる。消すと未解決のまま CLEAN になり得る）。
 # 記録は logs/ を symlink を辿らずに開いた中で読み書きする（一時ファイルに書いてから名前を付け替える）。
 # 0 = 失効させた・失効させる記録が無い / 1 = 確かめられない・書けない（ランチャは「使い回し禁止」の印を置く）
-rvd_invalidate_state() {   # <logdir> <series> <終了コード> <label>
-  python3 -I - "$1" ".$2.review-state" "$3" "$4" <<'PY_INVALIDATE'
+# [理由] は記録に残す一言（既定は「書き込みの試み・改ざんで不合格」。途中で終わったレビューの後始末は rvd_inflight_recover が渡す）
+rvd_invalidate_state() {   # <logdir> <series> <終了コード> <label> [理由]
+  python3 -I - "$1" ".$2.review-state" "$3" "$4" "${5:-書き込みの試み・改ざんで不合格}" <<'PY_INVALIDATE'
 import json, os, stat, sys
-d, name, code, label = sys.argv[1:5]
+d, name, code, label, why = sys.argv[1:6]
 try:
     dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 except OSError:
@@ -504,7 +505,7 @@ if not isinstance(record, dict):
 if record.get("last_verdict") != "VERDICT: CLEAN":
     sys.exit(0)
 record["last_exit"] = int(code)
-record["last_invalidated"] = f"{label}: 書き込みの試み・改ざんで不合格（EXIT:{code}）。この記録は再利用しない"
+record["last_invalidated"] = f"{label}: {why}（EXIT:{code}）。この記録は再利用しない"
 tmp = f".{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
 try:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666, dir_fd=dfd)
@@ -528,6 +529,136 @@ rvd_mark_blocked() {   # <logdir> → 0 = logs/ の外の印は置けた（logs/
   return $ok
 }
 
+# ---- 同じ logs/ のレビューは 1 本ずつ（全系列の再利用の記録を守るための排他）----
+# レビューは子の前に logs/ の全系列の再利用の記録を覚え、子の後で違っていたら子の前の中身に戻す（rvd_states_restore）。同じ logs/ で
+# 別の label のレビュー（既定のレビューと追加の Gemini レビューなど）が並行すると、先に終わった方が正規に保存した記録まで、後から
+# 終わった方が「子の改ざん」として巻き戻す（新しい NEEDS_FIX が古い CLEAN に戻り、次回その古い合格を再利用し得る）。
+# そこで、ランチャは記録の取得（前回の記録を読む所）から最後の保存までの間、logs/ のフォルダそのものに排他のロック（flock）をかける。
+# 待たない（取れなければ別のレビューが動いているので起動しない）。ロックはランチャが終わる（kill -9 を含む）とカーネルが外す。
+# 開いた番号は RVD_REVIEW_LOCK_FD に残す（閉じると外れる）。レビューの CLI 自身には渡らない（監督役が close_fds で起動する）。
+# logs/ そのものに掛けるので、子が中に置いたファイルを消しても外れない（logs/ を差し替えたら lanes_logdir_check が止める）。
+# 0 = 取れた / 1 = 別のレビューが持っている / 2 = 開けない・本物のフォルダでない・起動時の logs/ と別物（<識別子> を渡したとき）
+rvd_review_lock() {   # <logdir> [logs/ の識別子（dev:inode。_common.sh の LANES_LOGDIR_ID）]
+  local fd rc=0
+  [[ -d "$1" && ! -L "$1" ]] || return 2
+  { exec {fd}<"$1" } 2>/dev/null || return 2
+  python3 -I -c '
+import fcntl, os, stat, sys
+st = os.fstat(3)
+if not stat.S_ISDIR(st.st_mode) or (sys.argv[1] and sys.argv[1] != f"{st.st_dev}:{st.st_ino}"):
+    sys.exit(2)
+try:
+    fcntl.flock(3, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(1)
+except OSError:
+    sys.exit(2)' "${2:-}" 3<&$fd || rc=$?
+  if (( rc )); then exec {fd}<&-; return $rc; fi
+  typeset -g RVD_REVIEW_LOCK_FD=$fd
+}
+# ランチャが呼ぶ入口。取れなければ理由を出して止める（_common.sh の lanes_die を使う。今回の失敗 EXIT:2 として .done に残る）
+rvd_review_lock_or_die() {   # <logdir> [logs/ の識別子]
+  local rc=0
+  rvd_review_lock "$@" || rc=$?
+  (( rc == 0 )) && return 0
+  if (( rc == 1 )); then
+    lanes_die "同じ worktree（$1）で別のレビューが動いている（または前のレビューの子が残っている）。並行すると、後から終わった方が先に終わった方の再利用の記録（logs/.*.review-state）を子の改ざんとして巻き戻すので、同じ worktree のレビューは 1 本ずつ回す。終わってから起動し直す（lanes-status.sh で確かめる）"
+  fi
+  lanes_die "レビューの排他（logs/ のロック）を取れない: $1"
+}
+
+# ---- 途中で終わったレビューの後始末（「確認中」の印）----
+# ランチャは子を起動する前に、覚えた全系列の再利用の記録（rvd_states_snapshot の出力）を logs/ の外の「確認中」の印に書き、
+# 子の後の復元・確認（記録の復元・印の比較・書き込みの試み・改ざんの判定と、違反のときの前回の CLEAN の失効）が全部終わってから消す。
+# 終了シグナル・set -e・kill -9 などで途中で終わると印が残る。次のレビューは（排他を取った後、前回の記録を読む前に）印を見つけたら、
+#   1. 印に残した中身へ全系列の記録を戻す（途中で終わったレビューの子が書き換えた記録を信じない）
+#   2. 途中で終わったレビューの系列の前回の CLEAN を失効させる（何を試みたか確かめられていないので、古い合格を再利用しない）
+#   3. どちらかができなければ「使い回し禁止」の印を置く
+# 置き場所: ${XDG_STATE_HOME:-~/.local/state}/lanewright/review-inflight/<logs/ の実パスの指紋>（「使い回し禁止」の外の印と同じ考え方。
+# Codex・Gemini のレビューの子はここへ書けない。Claude のレビューの子は Bash で消せる＝気づく守り）
+rvd_inflight_file() {   # <logdir> → 印のパス
+  local key
+  key="$(print -rn -- "${1:A}" | shasum -a 256 | cut -c1-32)" || return 1
+  [[ -n "$key" ]] || return 1
+  print -r -- "${XDG_STATE_HOME:-$HOME/.local/state}/lanewright/review-inflight/$key"
+}
+rvd_inflight_present() {   # <logdir> → 0 = 印がある（確かめられないときも 0）
+  local f; f="$(rvd_inflight_file "$1")" || return 0
+  [[ -e "$f" || -L "$f" ]]
+}
+# <logdir> <series> <label>（覚えた中身は標準入力で渡す）→ 0 = 置いた / 1 = 置けない（ランチャは子を起動しない）
+rvd_inflight_begin() {
+  local f; f="$(rvd_inflight_file "$1")" || return 1
+  ( umask 077; mkdir -p -- "${f:h}" ) 2>/dev/null || return 1
+  python3 -I -c '
+import json, os, sys
+path, series, label = sys.argv[1:4]
+states = json.loads(sys.stdin.read())
+if not isinstance(states, dict):
+    sys.exit(1)
+d, name = os.path.split(path)
+dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+tmp = f".{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"series": series, "label": label, "states": states}, ensure_ascii=False) + "\n")
+    os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+except BaseException:
+    try:
+        os.unlink(tmp, dir_fd=dfd)
+    except OSError:
+        pass
+    raise' "$f" "$2" "$3" 2>/dev/null
+}
+rvd_inflight_end() {   # <logdir> → 0 = 消した（無かった）/ 1 = 消せない
+  local f; f="$(rvd_inflight_file "$1")" || return 1
+  rm -f -- "$f" 2>/dev/null || true
+  [[ ! -e "$f" && ! -L "$f" ]]
+}
+# 印があれば後始末する。排他（rvd_review_lock）を取った後、前回の記録を読む前に呼ぶ。
+# 0 = 印なし / 1 = 後始末した / 2 = 後始末しきれない（「使い回し禁止」の印を置いた。置けなければその旨も出す）
+rvd_inflight_recover() {   # <logdir>
+  local logdir="$1" f data series="" label="" states="" s_rc=0 i_rc=0
+  local -a data_lines
+  f="$(rvd_inflight_file "$logdir")" || { rvd_mark_blocked "$logdir" 2>/dev/null || true; return 2; }
+  [[ -e "$f" || -L "$f" ]] || return 0
+  data="$(python3 -I -c '
+import json, os, stat, sys
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+with os.fdopen(fd, "rb") as f:
+    if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+        sys.exit(1)
+    d = json.loads(f.read().decode("utf-8"))
+if not (isinstance(d, dict) and isinstance(d.get("series"), str) and isinstance(d.get("label"), str) and isinstance(d.get("states"), dict)):
+    sys.exit(1)
+if any(not s or "\n" in s or "/" in s for s in (d["series"], d["label"])):
+    sys.exit(1)
+print(d["series"]); print(d["label"]); print(json.dumps(d["states"], sort_keys=True))' "$f" 2>/dev/null)" || data=""
+  if [[ -n "$data" ]]; then
+    data_lines=("${(@f)data}")
+    series="${data_lines[1]:-}"; label="${data_lines[2]:-}"; states="${data_lines[3]:-}"
+  fi
+  if [[ -z "$series" || -z "$states" ]]; then
+    ( print -u2 -- "注意: 途中で終わったレビューの「確認中」の印（$f）を読めない。「使い回し禁止」の印を置いて、印を消す" ) || true
+    rvd_mark_blocked "$logdir" 2>/dev/null || ( print -u2 -- "→ 「使い回し禁止」の印も置けない。次のレビューは --mode full --force で回す" ) || true
+    rm -f -- "$f" 2>/dev/null || true
+    return 2
+  fi
+  print -r -- "$states" | rvd_states_restore "$logdir" || s_rc=$?
+  rvd_invalidate_state "$logdir" "$series" 3 "$label" "途中で終わったレビュー（子の後の確認が済んでいない）" || i_rc=$?
+  local changed=""; (( s_rc != 1 )) || changed="（変わっていた）"
+  ( print -u2 -- "注意: 前のレビュー（$label）が子の後の確認の前に終わっていた。再利用の記録を子の前の中身に戻し${changed}、系列 $series の前回の CLEAN を再利用しないようにした" ) || true
+  if (( s_rc == 2 || i_rc != 0 )); then
+    ( print -u2 -- "→ 再利用の記録を戻しきれない・失効させられない。「使い回し禁止」の印を置く" ) || true
+    rvd_mark_blocked "$logdir" 2>/dev/null || ( print -u2 -- "→ 「使い回し禁止」の印も置けない。次のレビューは --mode full --force で回す" ) || true
+    rm -f -- "$f" 2>/dev/null || true
+    return 2
+  fi
+  rm -f -- "$f" 2>/dev/null || true
+  return 1
+}
+
 # ---- 必須検証の使い回し（親の chk-run.sh の記録）----
 # <lanes_dir> <wt>: chk-run.sh --query で問い合わせ、結果を RVD_CHECKS_REUSE（yes / no / off）・RVD_CHECKS_HEAD・RVD_CHECKS_AT・
 # RVD_CHECKS_SRC・RVD_CHECKS_REASON に入れる。LANES_REVIEW_REUSE_CHECKS=0 なら問い合わせず off。
@@ -536,33 +667,85 @@ rvd_mark_blocked() {   # <logdir> → 0 = logs/ の外の印は置けた（logs/
 # 指紋に入らない（chk-run.sh の is_lane_record）ので、detach-run.sh が先に logs/launch.log を書いていても、前のレーンの記録が
 # 残っていても、記録と合う。台帳に無い名前のファイル（確認コマンドが読む logs/input.json など）は入力のまま。
 # _common.sh が外した API キーなどは、親が chk-run.sh を回したときの環境に戻して渡す（chk-run.sh は何も実行しない）
+# 問い合わせたときの環境（export されている変数の名前と値）は、export しない連想配列 RVD_CHECKS_QUERY_ENV に控える。
+# 子の後に同じ環境で入力を照合し直すため（rvd_checks_recheck。その間にランチャが scratch・git の通信止めなどを export・unset しても戻す）。
+# 問い合わせそのものが失敗した（終了コードが 0・1 以外・答えに reuse= の行が無い・reuse=yes の形が崩れている）ときは
+# 理由を query-failed にする（LANES_REVIEW_REQUIRE_CHECKS=1 なら rvd_checks_block が止める）
 rvd_checks_query() {
-  local lanes_dir="$1" wt="$2" out="" rc=0 line
+  local lanes_dir="$1" wt="$2" out="" rc=0 line k first
+  local -a out_lines
   typeset -g RVD_CHECKS_REUSE=no RVD_CHECKS_HEAD="" RVD_CHECKS_AT="" RVD_CHECKS_SRC="" RVD_CHECKS_FP="" RVD_CHECKS_REASON=""
+  typeset -g RVD_CHECKS_PORT="" RVD_CHECKS_OUTDIR="" RVD_CHECKS_INPUT="" RVD_CHECKS_DETAIL=""
+  typeset -gA RVD_CHECKS_QUERY_ENV=()
   if [[ "${LANES_REVIEW_REUSE_CHECKS:-1}" != 1 ]]; then RVD_CHECKS_REUSE=off; RVD_CHECKS_REASON="LANES_REVIEW_REUSE_CHECKS=0"; return 0; fi
   [[ -f "$lanes_dir/chk-run.sh" ]] || { RVD_CHECKS_REASON="chk-run.sh が無い"; return 0; }
+  for k in ${(k)parameters[(R)*export*]}; do RVD_CHECKS_QUERY_ENV[$k]="${(P)k}"; done
   if (( ${+functions[lanes_with_caller_auth_env]} )); then
     out="$(lanes_with_caller_auth_env bash "$lanes_dir/chk-run.sh" "$wt" --query 2>/dev/null)" || rc=$?
   else
     out="$(bash "$lanes_dir/chk-run.sh" "$wt" --query 2>/dev/null)" || rc=$?
   fi
-  if (( rc == 0 )) && [[ "${${(f)out}[1]:-}" == reuse=yes ]]; then
-    for line in "${(@f)out}"; do
+  # 1 行目は配列に分けてから取る（${${(f)out}[1]} は 1 行だけの答えだと 1 文字目になる）
+  out_lines=("${(@f)out}"); first="${out_lines[1]:-}"
+  if (( rc == 0 )) && [[ "$first" == reuse=yes ]]; then
+    for line in "${out_lines[@]}"; do
       case "$line" in
         head=*) RVD_CHECKS_HEAD="${line#head=}" ;;
         recorded=*) RVD_CHECKS_AT="${line#recorded=}" ;;
         check=*) RVD_CHECKS_SRC="${line#check=}" ;;
         fp=*) RVD_CHECKS_FP="${line#fp=}" ;;
+        port=*) RVD_CHECKS_PORT="${line#port=}" ;;
+        outdir=*) RVD_CHECKS_OUTDIR="${line#outdir=}" ;;
+        input=*) RVD_CHECKS_INPUT="${line#input=}" ;;
       esac
     done
-    # 3 つ揃わない答えは使わない（形の崩れた答えで検証を省かない）
-    if [[ "$RVD_CHECKS_HEAD" =~ '^[0-9a-f]{7,40}$' && -n "$RVD_CHECKS_AT" && -n "$RVD_CHECKS_FP" && ( "$RVD_CHECKS_SRC" == .lanes/check.sh || "$RVD_CHECKS_SRC" == LANES_CHECK_CMD ) ]]; then
+    # 揃わない答えは使わない（形の崩れた答えで検証を省かない）。port・outdir・input は子の後の照合し直し（rvd_checks_recheck）に使う
+    if [[ "$RVD_CHECKS_HEAD" =~ '^[0-9a-f]{7,40}$' && -n "$RVD_CHECKS_AT" && -n "$RVD_CHECKS_FP" && ( "$RVD_CHECKS_SRC" == .lanes/check.sh || "$RVD_CHECKS_SRC" == LANES_CHECK_CMD ) \
+          && "$RVD_CHECKS_PORT" == <-> && "$RVD_CHECKS_OUTDIR" == /* && "$RVD_CHECKS_INPUT" =~ '^[0-9a-f]{16,64}$' ]]; then
       RVD_CHECKS_REUSE=yes; return 0
     fi
-    RVD_CHECKS_HEAD="" RVD_CHECKS_AT="" RVD_CHECKS_SRC="" RVD_CHECKS_FP=""; RVD_CHECKS_REASON="答えの形が不正"; return 0
+    RVD_CHECKS_HEAD="" RVD_CHECKS_AT="" RVD_CHECKS_SRC="" RVD_CHECKS_FP="" RVD_CHECKS_PORT="" RVD_CHECKS_OUTDIR="" RVD_CHECKS_INPUT=""
+    RVD_CHECKS_REASON="query-failed"; RVD_CHECKS_DETAIL="答えの形が不正"; return 0
   fi
-  RVD_CHECKS_REASON="${${out##*reason=}%%$'\n'*}"
-  [[ "$out" == *reason=* ]] || RVD_CHECKS_REASON="問い合わせに失敗（exit $rc）"
+  if (( rc == 1 )) && [[ "$first" == "reuse=no reason="?* ]]; then
+    RVD_CHECKS_REASON="${${first#reuse=no reason=}%% *}"
+    return 0
+  fi
+  RVD_CHECKS_REASON="query-failed"; RVD_CHECKS_DETAIL="問い合わせに失敗（exit $rc）"
+  return 0
+}
+# 親の記録を使い回したレビューで、子の後にもう一度、問い合わせたときと同じ環境で入力（確認コマンドが読む未追跡・無視対象の
+# ファイル・依存・環境変数・確認コマンドの指紋）を照合する（chk-run.sh --query-input。何も実行しない）。レビューの前後比較
+# （rvd_snapshot）は未追跡の logs/ を見ないので、確認コマンドが読む logs/input.json などがレビュー中に変わっても、ここで見つける。
+# 生成物（ビルド・テストの出力）は比べない（レビューが 1 本のテストを回して変わっても、確かめた入力は同じ）。
+# 0 = 同じ（または使い回していない）/ 1 = 変わった（未 commit の変更が出た場合も）/ 2 = 確かめられない
+rvd_checks_recheck() {   # <lanes_dir> <wt>
+  local lanes_dir="$1" wt="$2" out="" rc=0 line input="" dirty=""
+  [[ "${RVD_CHECKS_REUSE:-}" == yes ]] || return 0
+  [[ "$RVD_CHECKS_PORT" == <-> && "$RVD_CHECKS_OUTDIR" == /* && -n "$RVD_CHECKS_INPUT" && -f "$lanes_dir/chk-run.sh" ]] || return 2
+  out="$(
+    # 問い合わせたときの環境に戻す（子シェルの中だけ）。後から export された変数は外し、外された・値の変わった変数だけを戻す
+    # （同じ値の変数には触らない。Mac の zsh は XPC_SERVICE_NAME などへの代入で子シェルごと止まることがある）
+    for k in ${(k)parameters[(R)*export*]}; do (( ${+RVD_CHECKS_QUERY_ENV[$k]} )) || unset -- "$k" 2>/dev/null || true; done
+    for k in ${(k)RVD_CHECKS_QUERY_ENV}; do
+      [[ "${parameters[$k]-}" == *export* && "${(P)k}" == "${RVD_CHECKS_QUERY_ENV[$k]}" ]] && continue
+      export -- "$k=${RVD_CHECKS_QUERY_ENV[$k]}" 2>/dev/null || true
+    done
+    if (( ${+functions[lanes_with_caller_auth_env]} )); then
+      lanes_with_caller_auth_env bash "$lanes_dir/chk-run.sh" "$wt" --query-input "$RVD_CHECKS_PORT" "$RVD_CHECKS_OUTDIR" 2>/dev/null
+    else
+      bash "$lanes_dir/chk-run.sh" "$wt" --query-input "$RVD_CHECKS_PORT" "$RVD_CHECKS_OUTDIR" 2>/dev/null
+    fi
+  )" || rc=$?
+  (( rc == 0 )) || return 2
+  for line in "${(@f)out}"; do
+    case "$line" in
+      input=*) input="${line#input=}" ;;
+      dirty=*) dirty="${line#dirty=}" ;;
+    esac
+  done
+  [[ -n "$input" && ( "$dirty" == 0 || "$dirty" == 1 ) ]] || return 2
+  [[ "$dirty" == 0 && "$input" == "$RVD_CHECKS_INPUT" ]] || return 1
   return 0
 }
 # 再利用条件（rvd_context）に入れる鍵。使い回すときは使った記録と、照合した入力の指紋まで入れる
@@ -580,6 +763,7 @@ rvd_checks_reason_hint() {
     unresolvable) print -r -- "確認コマンドか依存を確実に照合できない（外を指すリンク・解決できない書き方など）" ;;
     input-changed) print -r -- "記録の後で入力が変わった（依存・環境変数・確認コマンド・ランチャの記録でない無視対象のファイル）。chk-run.sh と同じ環境から呼ぶ（起動のときだけ環境変数を足す・外すと合わない）" ;;
     state-error) print -r -- "作業ツリーの状態を読めない" ;;
+    query-failed) print -r -- "問い合わせそのものが失敗した（${RVD_CHECKS_DETAIL:-理由不明}。chk-run.sh <worktree> --query を手で回して確かめる）" ;;
   esac
   return 0
 }
@@ -587,7 +771,8 @@ rvd_checks_reason_hint() {
 # <allow>: 1 = この起動は --allow-missing-checks 付き（記録なしで回す）。
 # 0 を返したら止める（理由と直し方が RVD_CHECKS_BLOCK に入る）。1 を返したら今までどおり起動する。
 # 止めるのは chk-run.sh --query の理由が no-record / uncommitted / input-changed のとき（利用者が直してから chk-run.sh を通せば
-# 記録が残る・合う理由）。確認コマンドが未設定（no-check）・記録の後で照合できなくなった（unresolvable など）・問い合わせの失敗は
+# 記録が残る・合う理由）と、問い合わせそのものの失敗（query-failed。終了コードが 0・1 以外・答えの形の崩れ。記録を確かめられないまま
+# 「必須検証あり」として起動しない）。確認コマンドが未設定（no-check）・記録の後で照合できなくなった（unresolvable など）は
 # 止めない（止めない側に倒す）。
 # chk-run.sh が「通ったが記録しない」（record=no。確認コマンドを照合できない書き方・確認の途中で入力が変わる、など）構成は、
 # 記録が 1 件も無いので no-record として止まる。chk-run.sh を通し直すだけでは直らないので、文言で record=no の理由を先に直すよう案内する。
@@ -602,6 +787,7 @@ rvd_checks_block() {
     no-record) fix="先に chk-run.sh <worktree> を通し、出力に recorded= が出たことを確かめてからやり直す（record=no と出るなら、そこに出る理由を先に直す。通し直すだけでは記録されない）" ;;
     uncommitted) fix="変更を commit してから（ログなどの置き場は .gitignore に足してから）chk-run.sh <worktree> を通し、やり直す" ;;
     input-changed) fix="chk-run.sh <worktree> を、レビューを起動するのと同じ環境から通し直してからやり直す" ;;
+    query-failed) fix="chk-run.sh <worktree> --query を手で回して失敗の理由を直し、reuse=yes が出てからやり直す" ;;
     *) return 1 ;;
   esac
   if [[ "$allow" == 1 ]]; then RVD_CHECKS_ALLOWED=1; return 1; fi
