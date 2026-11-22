@@ -16,12 +16,18 @@
 #   設定の拒否は _common.sh の lanes_gemini_review_settings（MCP・ファイルの書き込み・URL・commit や push などのコマンド。外から緩められない）。
 #   --dangerously-skip-permissions・accept-edits・auto は使わない。ANTIGRAVITY_HEADLESS=true・stdin は /dev/null・--add-dir は scratch だけ。
 #   Mac の端末サンドボックス（sandbox-exec）を有効にできない・agy --help に --sandbox / --settings / --mode（plan）が無いなら起動しない。
-#   本体 checkout（.git がディレクトリ）では起動しない（専用の linked worktree が前提。run-gemini.sh と同じ確認）。
+#   専用の linked worktree だけで起動する（_common.sh の lanes_require_linked_worktree。本体 checkout・管理領域を外に置いた本体・
+#   submodule では起動しない。run-gemini.sh と同じ確認）。呼び出し元の GIT_DIR などは _common.sh を読んだ時点で外し、git から見た
+#   最上位がこの worktree であることも確かめる。
+#   親（このランチャ）は対象の worktree へ cd しない（子だけを worktree で起動する）。親の python3 は -I（作業場所・PYTHON* の環境変数を
+#   見ない）で動かし、レビュー対象の同名のモジュールを読まない。
 #   子の環境: TMPDIR / LANES_SCRATCH = scratch、GIT_OPTIONAL_LOCKS=0、GIT_PAGER=cat、GIT_CONFIG_GLOBAL = scratch の最小 gitconfig、git の通信は止める。
 #   子の前後で作業ツリー・指示と条件・git の管理フォルダ（設定・hooks・タグ・stash）・git の制御ファイル（git を呼ぶ前に比べる）・
-#   再利用の記録・「使い回し禁止」の印を比べ、変わっていたら NEEDS_FIX（EXIT:4）。Codex レビューと同じ。
+#   再利用の記録・「使い回し禁止」の印（logs/ の中と外を置き場所ごとに）を比べ、変わっていたら NEEDS_FIX（EXIT:4）。
 #   stream-json の書き込み系のツール呼び出し（run-gemini.sh の監査と同じ判定）が 1 件でもあれば NEEDS_FIX（EXIT:4。証跡に件数）。
-#   JSON の欠損・不正・result の重複・終端でない result は VERDICT: NONE。
+#   監査と最後の応答は、親の受け取り役（gemini-stream-tee.py）がパイプで直接受け取った親専用の写しを読む（子が書ける logs/<label>.json は
+#   判定の正本にしない。回収後に親専用の写しで置き換える）。先頭の init が無い・JSON の欠損・不正・result の重複・終端でない result は VERDICT: NONE。
+#   書き込みの試み・改ざん（EXIT:4）で不合格にしたら、その系列の前回の CLEAN を失効させる（次の通常の起動で同じ HEAD の省略・delta に使わない）。
 # 見張り: run-gemini.sh と同じ（gemini-agy.zsh）。出力が GEMINI_REVIEW_NOOUTPUT_SEC 秒（既定 600）止まったら EXIT:8、
 #   idle（裏の作業待ち）のまま子が無ければ EXIT:3、全体の上限は --print-timeout（GEMINI_REVIEW_PRINT_TIMEOUT、既定 45m）。
 # モデルと effort: GEMINI_REVIEW_MODEL / GEMINI_REVIEW_EFFORT（既定は空 = 付けない。実装用の GEMINI_MODEL / GEMINI_EFFORT とは別）
@@ -29,7 +35,8 @@
 #       / <label>.stderr.log / <label>.prompt.md（渡した全文。dry-run は <label>.dry-run.prompt.md）/ <label>.evidence.md（PR 貼り付け用）
 #       / <label>.pid（起動時）/ <label>.done（終了時）/ .<系列>.review-state（再利用の記録）/ <系列>.followups.md（round 3 以降の後回し票）
 # 最終行は必ず VERDICT: CLEAN | NEEDS_FIX | NONE。終了コード: agy の rc（非 0 ならそのまま。見張りの停止は idle 3 / 無出力 8）、
-#   改ざん・書き込みの試みは 4、rc 0 で VERDICT が取れなければ 3、引数・前提の誤りは 2
+#   改ざん・書き込みの試みは 4（agy の rc より優先。agy の rc は証跡の「読み取り専用の確認」の行に別に書く）、rc 0 で VERDICT が取れなければ 3、
+#   引数・前提の誤りは 2。実行中に logs/ そのものを差し替えられたら 5（記録を書かずに止め、logs/ の外に「使い回し禁止」の印を置く）
 set -euo pipefail
 # 設定値の誤りもすぐには止めず、label が決まってから今回の失敗として .done に残す（lanes.env「設定の誤りの扱い」）
 typeset +x LANES_DEFER_CONFIG_ERROR=1
@@ -60,6 +67,8 @@ wt="${wt:A}"; prompt="${prompt:A}"
 lanes_early_target "$wt" "$label" "$dry"
 lanes_require_label "$label"
 lanes_require_worktree "$wt"
+# 呼び出し元の git の場所の環境変数（GIT_DIR など）は _common.sh を読んだ時点で外してある。git から見た最上位がこの worktree か確かめる
+lanes_require_toplevel "$wt"
 [[ "$mode" == "auto" || "$mode" == "full" || "$mode" == "delta" ]] || lanes_die "--mode は auto|full|delta（渡されたのは '$mode'）"
 [[ "$round" == <-> && ${#round} -le 6 ]] || lanes_die "--round は 0〜999999 の整数"
 # 比較起点はレビュー開始前に commit へ固定し、再利用判定にも含める。統合先の枝が無い repo（main だけの運用など）では --base を案内して止める
@@ -84,13 +93,22 @@ series="$(rvd_series "$label")"
 # 親の chk-run の記録を使えないときは、子を起動せずに止める（LANES_REVIEW_REQUIRE_CHECKS=1 のとき。run-claude-review.sh と同じ位置）
 if rvd_checks_block "$allow_missing"; then lanes_die "$RVD_CHECKS_BLOCK"; fi
 # 同じ道具でレビューしない。この worktree に Gemini 実装の記録があれば、排他を取る前に止める（今回の失敗 EXIT:2 として .done に残す）
-same_engine_line=""
-if lanes_impl_lane_recorded "$logdir" gemini; then
+# 記録を読めない（確かめられない）ときも「記録なし」と取り違えず、--allow-same-engine が無ければ止める
+same_engine_line=""; same_rc=0
+lanes_impl_lane_recorded "$logdir" gemini || same_rc=$?
+if (( same_rc == 0 )); then
   if (( allow_same )); then
     same_engine_line="- 同じ道具のレビュー: この worktree に Gemini 実装の記録がある（logs/$REPLY）のに --allow-same-engine で起動した（実装と同じ思い込みを見落としやすい）"
     print -u2 -- "注意: この worktree に Gemini 実装の記録がある（logs/$REPLY）。--allow-same-engine が付いているので Gemini でレビューする（証跡に残す）"
   else
     lanes_die "この worktree には Gemini 実装の記録がある（logs/$REPLY）。実装と同じ道具（Gemini）でレビューすると同じ思い込みを見落としやすいので起動しない。Codex か Claude のレビューを使う（run-review.sh --engine codex / --engine claude）。どうしても Gemini で回すなら --allow-same-engine を付ける（証跡に残る）"
+  fi
+elif (( same_rc != 1 )); then
+  if (( allow_same )); then
+    same_engine_line="- 同じ道具のレビュー: この worktree の Gemini 実装の記録を確かめられない（$REPLY）のに --allow-same-engine で起動した"
+    print -u2 -- "注意: この worktree の Gemini 実装の記録を確かめられない（$REPLY）。--allow-same-engine が付いているので Gemini でレビューする（証跡に残す）"
+  else
+    lanes_die "この worktree の Gemini 実装の記録を確かめられない（$REPLY）。実装と同じ道具（Gemini）でのレビューにならないと確かめられないので起動しない。logs/ の .pid・証跡を読めるように直すか、Codex か Claude のレビューを使う（run-review.sh --engine codex / --engine claude）。どうしても Gemini で回すなら --allow-same-engine を付ける（証跡に残る）"
   fi
 fi
 (( dry )) || lanes_mark_start "$logdir" "$label" gemini-review "$wt" "file:.$series.review-state" "file:$series.followups.md" "file:.review-reuse-blocked"
@@ -160,12 +178,12 @@ if (( skip_same )); then
   exit 0
 fi
 if (( dry )); then
+  # dry-run は lanes_mark_start を通らないので、書く前に logs/ と書き込み先を確かめ、台帳へ載せる（載せられなければ書かずに止める）
   final="$logdir/$label.dry-run.prompt.md"
+  lanes_dry_run_target "$wt" "$logdir" "$label" "$final"
 else
   for f in "$log" "$json" "$err" "$evidence" "$final" "$body_log"; do lanes_rotate_log "$f"; done
 fi
-mkdir -p "$logdir"
-(( ! dry )) || lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
 # レーン専用の作業場所（TMPDIR / LANES_SCRATCH）。agy に書かせてよいのはここだけ（--add-dir）。マージ後 cleanup が消す
 if (( dry )); then scratch="$(lanes_scratch_path "$wt" "$label")"; else lanes_scratch_prepare "$wt" "$label" gemini-review; scratch="$LANES_SCRATCH"; fi
 scratch_rule="$(lanes_scratch_rule "$scratch")"
@@ -176,22 +194,20 @@ lanes_check_gemini_subscription
 /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny file-write*)' /usr/bin/true 2>/dev/null \
   || lanes_die "端末サンドボックスを有効にできない → 起動禁止"
 gem_help="$(ANTIGRAVITY_HEADLESS=true "$GEMINI_BIN" --help < /dev/null 2>&1)" || lanes_die "agy --help の確認に失敗"
+# オプション名は単語として照合する（*--mode* だと --model の行にも当たる。_common.sh の lanes_help_has_option。lanes-doctor.sh と同じ）
 for option in --sandbox --settings --mode; do
-  [[ "$gem_help" == *"$option"* ]] || lanes_die "agy が $option に未対応 → 起動禁止（読み取り専用を強制できない）"
+  lanes_help_has_option "$gem_help" "$option" || lanes_die "agy が $option に未対応 → 起動禁止（読み取り専用を強制できない）"
 done
-# plan は --mode の行の中にあること（help の別の場所の語では通さない）
-gem_mode_lines="${(j: :)${(@M)${(@f)gem_help}:#*--mode*}}"
-[[ "$gem_mode_lines" == *plan* ]] || lanes_die "agy の --mode に plan が無い → 起動禁止（読み取り専用を強制できない）"
-unset gem_mode_lines
+# plan は --mode の行の中に単語としてあること（help の別の場所の語・--model の説明の語では通さない）
+lanes_agy_help_mode_has_plan "$gem_help" || lanes_die "agy の --mode に plan が無い → 起動禁止（読み取り専用を強制できない）"
 unset gem_help
 
 branch="$(git -C "$wt" branch --show-current 2>/dev/null)"; [[ -n "$branch" ]] || branch="(detached)"
 head="$(git -C "$wt" rev-parse --short=12 HEAD)"
-gitdir="$(git -C "$wt" rev-parse --path-format=absolute --git-dir)"
-gitcommon="$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)"
-# 管理領域（.git 本体・hooks・設定）が作業場所・scratch の外にある linked worktree に限る（run-gemini.sh と同じ）
-gitlink="$wt/.git"
-[[ -f "$gitlink" && ! -L "$gitlink" ]] || lanes_die "本体 checkout（.git がディレクトリ）またはリンクの .git では起動しない。git worktree add で専用 worktree を作ってから渡す"
+# 登録済みの linked worktree に限る（.git が普通のファイルというだけでは通さない。_common.sh の lanes_require_linked_worktree。run-gemini.sh と同じ）。
+# 管理領域（.git 本体・hooks・設定）が作業場所・scratch の外にあることも確かめる
+lanes_require_linked_worktree "$wt"
+gitdir="$LANES_WT_GITDIR"; gitcommon="$LANES_WT_GITCOMMON"
 for gd in "$gitdir" "$gitcommon"; do
   [[ "${gd:A}/" != "${wt:A}/"* && "${gd:A}/" != "${scratch:A}/"* ]] || lanes_die "Git 管理領域が worktree / scratch の中にある → 起動禁止: $gd"
 done
@@ -204,15 +220,16 @@ delta_note=""
 
 # テンプレ（役名を Gemini に読み替え。Codex レビューと同じ流用）+ 置き場所 + 閉じ込めの説明 + 案件固有の指示 + ランチャの追記
 # （delta の説明・前回の未解決指摘・受け入れ済みの限界・必須検証のきまり）+ 出し方（Codex レビューと同じ codex-review-focus.md）を結合して残す
-LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" python3 - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" \
+LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" python3 -I - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" \
     "$(rvd_checks_rule)" "$delta_note" "$unresolved_note" "$scratch" "$scratch_rule" "$focus" <<'PY'
 import os, sys, pathlib
 tpl, case, out, wt, branch, head, base, mode, date, checks_rule, delta_note, unresolved, scratch, scratch_rule, focus = sys.argv[1:16]
 t = pathlib.Path(tpl).read_text(encoding="utf-8")
+# 役名だけ Gemini に読み替える（Claude レビュー用のテンプレを流用）。実際のパス・枝名（{{WORKTREE}} など）を埋め込む前に、テンプレの文だけを
+# 置き換える（後から全文を置き換えると、Claude を含むパス・枝名まで存在しない Gemini の名前に変わる）
+t = t.replace("Claude", "Gemini")
 for k, v in {"WORKTREE": wt, "BRANCH": branch, "HEAD": head, "BASE": base, "MODE": mode, "DATE": date, "SCRATCH": scratch}.items():
     t = t.replace("{{" + k + "}}", v)
-# 役名だけ Gemini に読み替え（Claude レビュー用のテンプレを流用。Codex レビューと同じやり方）
-t = t.replace("Claude", "Gemini")
 jail = ("# このレビューの閉じ込め（ランチャが強制している）\n"
         "- 書き込みはできない（plan モード・端末サンドボックス・ファイルの書き込みの拒否）。ファイルの作成・編集・削除・移動・名前の変更を試さない。"
         "計画やメモのファイルも作らない（書き込み系のツールを 1 回でも呼ぶと、ランチャがこのレビューを不合格にする）。結果は最後の応答の本文にだけ書く。\n"
@@ -222,10 +239,25 @@ extra = [p.rstrip() for p in (delta_note, unresolved, os.environ.get("LANES_ACCE
 rule = checks_rule.rstrip()
 extra.append(rule if rule.startswith("#") else "# 必須検証の成功行\n- " + rule)
 f = pathlib.Path(focus).read_text(encoding="utf-8").rstrip()
-pathlib.Path(out).write_text(t.rstrip() + "\n\n" + scratch_rule.rstrip() + "\n\n" + jail
-                             + "\n\n---\n\n# 案件固有の指示（司令塔が記入）\n\n" + c.rstrip()
-                             + "\n\n---\n\n" + "\n\n".join(extra) + "\n\n" + f
-                             + "\n\n最終行は次のいずれか1行だけ:\nVERDICT: CLEAN\nVERDICT: NEEDS_FIX\n", encoding="utf-8")
+text = (t.rstrip() + "\n\n" + scratch_rule.rstrip() + "\n\n" + jail
+        + "\n\n---\n\n# 案件固有の指示（司令塔が記入）\n\n" + c.rstrip()
+        + "\n\n---\n\n" + "\n\n".join(extra) + "\n\n" + f
+        + "\n\n最終行は次のいずれか1行だけ:\nVERDICT: CLEAN\nVERDICT: NEEDS_FIX\n")
+# logs/ を symlink を辿らずに開き、その中で一時ファイルに書いてから名前を付け替える（既存の名前が symlink・ハードリンクでも先を書き換えない）
+d, name = os.path.split(out)
+dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+tmp = f".{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666, dir_fd=dfd)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+except BaseException:
+    try:
+        os.unlink(tmp, dir_fd=dfd)
+    except OSError:
+        pass
+    raise
 PY
 
 # 起動単位の設定（拒否の固定の一覧。_common.sh の lanes_gemini_review_settings。利用者の設定ファイルは変えない）
@@ -240,7 +272,7 @@ cmd+=(--mode plan --sandbox --settings "$gem_settings"
 if (( dry )); then
   print -- "[dry-run] series=$series round=$round mode=$mode base=$base prev_head=${prev_head:0:12}（判定 $decided）/ 必須検証の使い回し: $RVD_CHECKS_REUSE"
   print -- "[dry-run] scratch: $scratch"
-  print -- "[dry-run] cd ${(q)wt} && ANTIGRAVITY_HEADLESS=true TMPDIR=${(q)scratch}/ LANES_SCRATCH=${(q)scratch} GIT_DIR=${(q)gitdir} GIT_WORK_TREE=${(q)wt} GIT_CONFIG_GLOBAL=${(q)scratch}/gitconfig GIT_OPTIONAL_LOCKS=0 GIT_PAGER=cat GIT_ALLOW_PROTOCOL=lanes-no-transport lanes_start_child ${(q)cmd[@]} -p \"\$(<${(q)final})\" < /dev/null > ${(q)json} 2> ${(q)err}"
+  print -- "[dry-run] （子だけ cd ${(q)wt}）ANTIGRAVITY_HEADLESS=true TMPDIR=${(q)scratch}/ LANES_SCRATCH=${(q)scratch} GIT_DIR=${(q)gitdir} GIT_WORK_TREE=${(q)wt} GIT_CONFIG_GLOBAL=${(q)scratch}/gitconfig GIT_OPTIONAL_LOCKS=0 GIT_PAGER=cat GIT_ALLOW_PROTOCOL=lanes-no-transport lanes_start_child_in ${(q)wt} python3 -I gemini-stream-tee.py ${(q)logdir} ${(q)json:t} -- ${(q)cmd[@]} -p \"\$(<${(q)final})\" < /dev/null >（親専用の写し）2> ${(q)err}"
   print -- "[dry-run] 見張り: idle（root agent idle）の後 子が無く json が ${idle_grace} 秒動かなければ異常終了（EXIT:3）/ 出力 ${noout_sec} 秒なしで EXIT:8 / --print-timeout $print_timeout / 確認間隔 ${poll} 秒"
   [[ -z "$same_engine_line" ]] || print -r -- "[dry-run] ${same_engine_line#- }"
   print -- "[dry-run] 結合済みプロンプト: $final"
@@ -255,16 +287,29 @@ lanes_fresh_file "$scratch/gitconfig"
   print -- "[core]"; print -- "\tpager = cat"; print -- "[safe]"; print -- "\tdirectory = *"
 } > "$scratch/gitconfig"
 
-cd "$wt"
+# 親は対象の worktree へ移らない（親が回す python3・git が、レビュー対象の中の同名のモジュールや設定に引きずられないように）。
+# 子（agy）の作業場所だけを worktree にする（gemini-agy.zsh の run_agy_once が lanes_start_child_in で起動する）。
+# 以後の git は必ず -C "$wt" で呼ぶ（/ では git のリポジトリにならないので、付け忘れても別のリポジトリを読まずに失敗する）
+cd /
 snapshot_before="$(rvd_snapshot "$wt")" || lanes_die "レビュー前の内容確認に失敗"
 [[ "$snapshot_before" == "$tree" && "$(review_context)" == "$context" ]] || lanes_die "起動準備中に内容・指示が変化した。再実行する"
 guard_before="$(rvd_git_guard "$wt")" || lanes_die "レビュー前の git 管理フォルダの確認に失敗"
 # git の制御ファイル（worktree の .git・gitdir の commondir / gitdir / config・共通の config・hooks）の前後比較（Codex レビューと同じ）。
 # 子の後は git を 1 回も呼ぶ前に指紋だけで比べる（偽の gitdir・core.fsmonitor などを、ランチャがサンドボックスの外で動かさない）
 git_fp_before="$(lanes_git_ctl_fingerprint "$wt" "$gitdir" "$gitcommon")" || lanes_die "起動前の git 制御ファイルの確認に失敗"
-# 再利用の記録（logs/ にある全部の系列の .review-state）と「使い回し禁止」の印の有無を覚える（子の後で比べて戻す。Codex・Claude レビューと同じ）
+# 再利用の記録（logs/ にある全部の系列の .review-state）を覚える（子の後で比べて戻す。Codex・Claude レビューと同じ）
 states_before="$(rvd_states_snapshot "$logdir")" || lanes_die "レビュー前の再利用の記録の確認に失敗"
-blocked_before=0; rvd_reuse_blocked "$logdir" && blocked_before=1
+# 「使い回し禁止」の印は、置き場所（logs/ の中と外）ごとに有無を覚える（子の後で比べる。片方だけの削除・新設も見つける）。
+# 外の印のパスは logs/ の実パスから決まるので、子が logs/ を差し替える前のここで求めておく
+block_files=("${(@f)$(rvd_block_files "$logdir")}")
+(( ${#block_files} == 2 )) || lanes_die "「使い回し禁止」の印の置き場所を決められない"
+blocked_before="$(rvd_block_state "${block_files[1]}" "${block_files[2]}")"
+# 子の実行中に logs/ そのものを差し替えられたら（lanes_logdir_check が記録を書かずに EXIT:5 で止める）、止める前に logs/ の外へ
+# 「使い回し禁止」の印を置く（差し替えた先に偽の再利用の記録を置かれても、次のレビューが前回の結果を使わない）
+lanes_logdir_tamper_hook() {
+  rvd_place_outer_marker "${block_files[2]}" \
+    || ( print -u2 -- "→ 「使い回し禁止」の印（${block_files[2]}）を置けない。次のレビューは --mode full --force で回す" ) || true
+}
 started="$(lanes_now)"; t0=$(date +%s)
 
 # レビューの子から push（と fetch）をできなくする（読み取り専用の役。git の通信は要らない）
@@ -275,6 +320,7 @@ GEM_TAG="[run-gemini-review]"
 source "$LANES_DIR/gemini-agy.zsh"
 run_agy_once "$json" "$err"
 LANES_CHILD=""   # 以後の trap で（pid 再利用した）別プロセスを kill しない
+agy_rc=$GEM_RC   # agy（受け取り役）の終了コード。書き込みの試み・改ざんで EXIT:4 にしたときも、証跡にはこの値を別に残す
 rc=$GEM_RC
 stop_line="なし"
 if (( GEM_NOOUT )); then rc=8; stop_line="出力 ${noout_sec} 秒なしで停止"
@@ -283,12 +329,15 @@ fi
 # 再利用の記録が子の実行中に変わっていたら、まず元の中身に戻す（以後どこで終わっても偽の記録を残さない）
 state_tampered=0
 states_rc=0; print -r -- "$states_before" | rvd_states_restore "$logdir" || states_rc=$?
-# 印が子の実行中に消されていたら、改ざんとして扱う（印は置き直す）
-if (( blocked_before )) && ! rvd_reuse_blocked "$logdir"; then
-  print -u2 -- "→ Gemini レビューの実行中に「使い回し禁止」の印が消された。置き直して不合格（NEEDS_FIX）にする"
+# 印が子の実行中に変わっていたら（どちらかの置き場所の削除・新設）、改ざんとして扱う。印は両方に置いて使い回し禁止のままにする
+blocked_after="$(rvd_block_state "${block_files[1]}" "${block_files[2]}")"
+marker_tampered=0
+if [[ "$blocked_after" != "$blocked_before" ]]; then
+  marker_tampered=1
+  print -u2 -- "→ Gemini レビューの実行中に「使い回し禁止」の印が変わった（前: $blocked_before / 後: $blocked_after。inner=logs/ の中、outer=外）。両方に置いて（使い回し禁止のまま）不合格（NEEDS_FIX）にする"
   (( states_rc != 0 )) || states_rc=1
 fi
-if (( states_rc == 2 )) || { (( blocked_before )) && ! rvd_reuse_blocked "$logdir"; }; then
+if (( states_rc == 2 || marker_tampered )); then
   rvd_mark_blocked "$logdir" || print -u2 -- "→ 「使い回し禁止」の印を置けない。logs/ と ${XDG_STATE_HOME:-~/.local/state}/lanewright/ の権限を確かめる。次のレビューは --mode full --force で回す"
 fi
 if (( states_rc != 0 )); then
@@ -305,31 +354,37 @@ if [[ "$git_fp_after" != "$git_fp_before" ]]; then
   print -- "[run-gemini-review] $(lanes_now) git の制御ファイル（.git・commondir・gitdir・config・config.worktree・hooks）が変わった → git を実行せず停止" >> "$log"
   print -u2 -- "→ Gemini レビューの実行中に git の制御ファイルが変わった。git を実行せず停止（EXIT:4）。$wt/.git と $gitdir・$gitcommon の中身を手で確かめてから直す"
   print -- "EXIT:4" >> "$log"
+  # この系列の前回の CLEAN を失効させる（次の通常の起動で古い合格を返さない）。失効させられなければ「使い回し禁止」の印を置く
+  rvd_invalidate_state "$logdir" "$series" 4 "$label" || rvd_mark_blocked "$logdir" || true
   lanes_mark_done 4 "VERDICT: NEEDS_FIX" "git の制御ファイルの変更を検出（git 未実行）"
   exit 4
 fi
 elapsed=$(( ($(date +%s) - t0) / 60 ))
 
 # stream-json を厳密に読み、最後の result（status=SUCCESS の response）だけを本文にする（logs/<label>.last.md と logs/<label>.log）。
+# 読むのは親専用の写し（受け取り役がパイプで直接受け取ったもの。番号 3 で渡す）。子が書ける logs/<label>.json は読まない。
 # 同時に、書き込み系のツール呼び出し（run-gemini.sh の監査と同じ判定: ツール名に write / replace / edit / delete / move / rename /
 # create / append / copy / patch を含む tool の step_update）を数える。読み取り専用のレビューでは 1 件でも不合格。
+# 開始から記録できたことも確かめる: 1 行目が init のイベントでない（先頭の欠落・result だけ残った）・init が 2 回ある記録は不備。
 # 出力（標準出力）: status= / writes= / write_tools= / asks= / turns= / invalid=。終了コード: 0 = 本文あり / 4 = JSON の欠損・不正・
-# result の重複・終端でない / 5 = status が SUCCESS でない（本文は書かない＝VERDICT を拾わない）
+# init の欠落・result の重複・終端でない / 5 = status が SUCCESS でない（本文は書かない＝VERDICT を拾わない）
 conv_rc=0
-audit_out="$(python3 -I - "$json" "$body_log" "$log" <<'PY'
+audit_out="$(gem_stream_read "$GEM_STREAM_FD" python3 -I - "$body_log" "$log" <<'PY'
 import json, os, sys
-src, body_out, log_out = sys.argv[1:4]
+body_out, log_out = sys.argv[1:3]
 WRITE_HINT = ("write", "replace", "edit", "delete", "move", "rename", "create", "append", "copy", "patch")
 status, body, error, turns, asks = "NONE", "", "", 0, 0
 writes, write_tools, invalid = set(), set(), []
-results, last_event, events = 0, None, 0
+results, last_event, events, inits, first_init = 0, None, 0, 0, False
 try:
-    lines = open(src, encoding="utf-8").read().splitlines()
+    os.lseek(3, 0, os.SEEK_SET)
+    with os.fdopen(3, "rb", closefd=False) as f:
+        lines = f.read().decode("utf-8").splitlines()
 except (OSError, UnicodeError):
     lines = None; invalid.append("ログを読み取れない")
 if lines is not None and not lines:
     invalid.append("ログが空")
-for line in lines or []:
+for index, line in enumerate(lines or []):
     try:
         d = json.loads(line)
     except (ValueError, TypeError):
@@ -338,6 +393,10 @@ for line in lines or []:
         invalid.append("イベントの形式が不正"); continue
     events += 1
     last_event = d["event"]
+    if d["event"] == "init":
+        inits += 1
+        first_init = first_init or index == 0
+        continue
     if d["event"] == "result":
         r = d.get("result")
         if not isinstance(r, dict) or r.get("status") not in ("SUCCESS", "ERROR"):
@@ -368,6 +427,10 @@ if results > 1 or (results == 1 and last_event != "result"):
     invalid.append("結果が重複、または終端ではない")
 if results == 0 and lines:
     invalid.append("終了結果が欠損")
+if lines and not first_init:
+    invalid.append("開始の記録（先頭の init）が無い")
+if inits > 1:
+    invalid.append("開始の記録（init）が重複")
 ok = not invalid and status == "SUCCESS" and bool(body.strip())
 def new_file(path):
     # 既存の物（symlink・ハードリンク）は辿らず、必ず新しい普通のファイルとして作る（子の回収後に呼ぶ）
@@ -382,7 +445,7 @@ try:
 except OSError:
     watch = ""
 one = " ".join(str(error).split())[:300]
-meta = (f"[meta] status={status} turns={turns} events={events} writes={len(writes)} asks={asks} audit_errors={len(invalid)}"
+meta = (f"[meta] status={status} turns={turns} events={events} inits={inits} writes={len(writes)} asks={asks} audit_errors={len(invalid)}"
         + (f" error={one}" if one else "") + "\n")
 with new_file(body_out) as f:
     f.write(body if ok else "")
@@ -418,7 +481,7 @@ else
 fi
 [[ "$verdict" == "VERDICT: PASS" ]] && verdict="VERDICT: CLEAN"
 (( rc == 0 )) || verdict="VERDICT: NONE"   # agy が非 0 で終わった・見張りで止めた本文の VERDICT は採用しない
-head_after="$(git rev-parse --short=12 HEAD)"
+head_after="$(git -C "$wt" rev-parse --short=12 HEAD)"
 # P0/P1 と明示 CLEAN の矛盾は必ず不合格
 typeset -A sev; for k in P0 P1 P2 P3; do sev[$k]=$(lanes_count_findings "$body_log" $k); done
 sevsum="P0:${sev[P0]} P1:${sev[P1]} P2:${sev[P2]} P3:${sev[P3]}"
@@ -472,15 +535,21 @@ conditions_after="$(review_context)" || conditions_after=ERROR
 guard_after="$(rvd_git_guard "$wt")" || guard_after=ERROR
 dirty=0
 if [[ "$snapshot_after" == ERROR || "$snapshot_before" != "$snapshot_after" || "$conditions_after" != "$context" \
-    || "$guard_after" == ERROR || "$guard_before" != "$guard_after" ]] || (( state_tampered || writes_n > 0 )); then
+    || "$guard_after" == ERROR || "$guard_before" != "$guard_after" ]] || (( state_tampered || writes_n > 0 || GEM_PUBLIC_TAMPERED )); then
   dirty=1; verdict="VERDICT: NEEDS_FIX"
   [[ "$gate" == STOP_P0P1 ]] || gate=FIX
-  (( rc != 0 )) || rc=4
+  # 書き込みの試み・改ざんは、agy 自身の失敗（非 0 の終了・見張りの停止）より優先して EXIT:4 にする（呼び出し元が CLI の障害と
+  # 監査の違反を区別できるように）。agy の終了コードは証跡の「読み取り専用の確認」の行に別に残す
+  rc=4
   (( writes_n == 0 )) || print -u2 -- "→ Gemini レビューが書き込み系のツールを ${writes_n} 件呼んだ（${write_tools:-名前不明}）。読み取り専用のレビューとして不合格（NEEDS_FIX）にする"
+  (( ! GEM_PUBLIC_TAMPERED )) || print -u2 -- "→ Gemini レビューの実行中に logs/$json:t（公開用の stream-json）が消された・書き換えられた。判定は受け取った中身で行い、改ざんとして不合格（NEEDS_FIX）にする"
 fi
 (( rc != 0 )) || [[ "$verdict" == 'VERDICT: CLEAN' || "$verdict" == 'VERDICT: NEEDS_FIX' ]] || rc=3
 # 周回の上限を超えて CLEAN にならなければ ESCALATE（人に返す）。続けるなら人が直して LANES_REVIEW_MAX_ROUNDS を上げる
 gate="$(rvd_escalate "$round" "$verdict" "$gate")"
+publish_note=""
+if (( GEM_PUBLIC_TAMPERED )); then publish_note+=" / 公開用の json（$json:t）が実行中に消された・書き換えられた（改ざん。不合格）"; fi
+if (( GEM_PUBLISH_FAILED )); then publish_note+=" / 公開用の json（$json:t）を受け取った中身で置き換えられず消した"; fi
 
 {
   print -- "## Gemini レビュー証跡（$label）"
@@ -494,7 +563,7 @@ gate="$(rvd_escalate "$round" "$verdict" "$gate")"
   print -- "- 必須検証の成功確認: $checks（仕組みがあると見た項目: ${checks_present:-なし}。その項目の「該当なし（未導入）」・NA は受け付けない）"
   rvd_checks_evidence
   [[ -n "$followups" ]] && print -- "- 元の判定: $raw_verdict / P2/P3 の保存先: $followups"
-  print -- "- 読み取り専用の確認: 書き込みの試み ${writes_n} 件${write_tools:+（$write_tools）}（1 件でもあれば不合格）/ 承認・質問ツール ${asks_n} 回 / agy: $gstatus / JSON の不備 ${invalid_n} 件${invalid_kinds:+（$invalid_kinds）} / 見張り: $stop_line"
+  print -- "- 読み取り専用の確認: 書き込みの試み ${writes_n} 件${write_tools:+（$write_tools）}（1 件でもあれば不合格）/ 承認・質問ツール ${asks_n} 回 / agy: $gstatus・終了コード $agy_rc / JSON の不備 ${invalid_n} 件${invalid_kinds:+（$invalid_kinds）} / 見張り: $stop_line$publish_note"
   [[ -z "$same_engine_line" ]] || print -r -- "$same_engine_line"
   print -- "- 実行: $started 開始 / 約 ${elapsed} 分 / EXIT:$rc"
   print -- "- HEAD: $head → $head_after / 内容・履歴・条件の変更検出 $dirty（0=なし、1=あり）"
@@ -507,5 +576,14 @@ cat "$evidence"
 final_rc=$rc
 (( rc == 0 )) && rvd_save_state "$logdir" "$series" "$round" "$(git -C "$wt" rev-parse HEAD)" "$verdict" "$gate" "$label" "$context" "$snapshot_after" "$review_base" "$log" "$pending_note" "$blocking_previous"
 (( rc == 0 )) && [[ "$verdict" != "VERDICT: CLEAN" && "$verdict" != "VERDICT: NEEDS_FIX" ]] && final_rc=3   # 完走したのに VERDICT が無い
-lanes_mark_done "$final_rc" "$verdict" "gemini rc=$rc gate=$gate $sevsum"
+# 書き込みの試み・改ざん（EXIT:4）で不合格にしたら、この系列の前回の CLEAN を失効させる（書き込みが拒否されてツリーが変わらなくても、
+# 次の通常の起動が同じ HEAD の省略・delta で古い合格を返さない）。失効させられなければ「使い回し禁止」の印を置く
+if (( dirty )); then
+  if ! rvd_invalidate_state "$logdir" "$series" "$rc" "$label"; then
+    print -u2 -- "→ この系列（$series）の前回の再利用の記録を失効させられない。「使い回し禁止」の印を置く"
+    rvd_mark_blocked "$logdir" || print -u2 -- "→ 「使い回し禁止」の印も置けない。次のレビューは --mode full --force で回す"
+  fi
+fi
+exec {GEM_STREAM_FD}<&- 2>/dev/null || true
+lanes_mark_done "$final_rc" "$verdict" "gemini rc=$rc agy_rc=$agy_rc gate=$gate $sevsum"
 exit $final_rc
