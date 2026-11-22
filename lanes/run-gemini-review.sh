@@ -235,7 +235,7 @@ if (( skip_same )); then
     skip_fail="証跡（${evidence:t}）"
   else
     lanes_mark_done 0 "$prev_v" "skip-same-head round=$round"
-    if (( LANES_DONE_OK )); then
+    if (( ${LANES_DONE_OK:-0} )); then
       print -r -- "$ev_text"
       exit 0
     fi
@@ -709,6 +709,7 @@ evidence_text() {
   print -- "- ログ: $log（本文）/ $body_log（最後の応答）/ $json（生）/ $final（渡した全文）"
   print -- "- 作業場所（scratch）: $scratch（${LANES_BASE_BRANCH:-develop} へのマージ後の cleanup で削除）"
 }
+
 # ---- 記録の確定 ----
 # 確定するのは、agy が 0 で終わり、VERDICT が CLEAN か NEEDS_FIX で、ここまでの記録（公開ログ・後回し票の写し）が全部書けたときだけ。
 # 順番: 書く先の確認 → ログの末尾（確定見込みの判定）→ 確認中の記録の写し → 証跡（<label>.evidence.md）→ 後回し票（該当時）
@@ -753,7 +754,7 @@ elif (( finalize )); then
     else
       [[ -z "$fu_stage" ]] || fu_published=1
       lanes_mark_done "$final_rc" "$done_verdict" "$done_note"
-      if (( ! LANES_DONE_OK )); then
+      if (( ! ${LANES_DONE_OK:-0} )); then
         fail_reason="記録を書けない: 終了記録（${LANES_DONEFILE:t}）"
       else
         state_tried=1

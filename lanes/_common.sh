@@ -1312,7 +1312,7 @@ lanes_rewrite_done() {
   (( ZSH_SUBSHELL )) && return 0
   [[ -n "${LANES_DONEFILE:-}" ]] && (( ${LANES_DONE_WRITTEN:-0} )) || return 0
   lanes_write_done "$@"
-  if (( ! LANES_DONE_OK )) && lanes_logdir_intact 2>/dev/null; then
+  if (( ! ${LANES_DONE_OK:-0} )) && lanes_logdir_intact 2>/dev/null; then
     rm -f -- "$LANES_DONEFILE" 2>/dev/null || true
     [[ ! -e "$LANES_DONEFILE" && ! -L "$LANES_DONEFILE" ]] \
       || ( print -u2 -- "error: 終了記録（${LANES_DONEFILE:t}）を書き直せず、消せもしない。中身が今回の結果と違う。手で消す: $LANES_DONEFILE" ) || true
