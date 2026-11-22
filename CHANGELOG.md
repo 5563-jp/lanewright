@@ -13,10 +13,15 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   **選んだときだけ動く**（`run-review.sh --engine gemini` か設定の `LANES_REVIEW_ENGINE=gemini`。構成に gemini があるときだけ）。既定のレビュー役（構成で決まる Codex / Claude）は変わらない。
   - 読み取り専用は、`agy` を `--mode plan`・`--sandbox`（端末サンドボックス）・`--settings`（起動単位の設定。利用者の設定ファイルは変えない）で起動して強制する。
     `--settings` の拒否は固定（MCP・ファイルの書き込み・URL の読み込みと実行・Claude レビューの固定の拒否の一覧のコマンドの分＝commit・push・stash・tag・PR のマージ・デプロイ・別のエージェントの起動など）で、設定キーでは緩められない。
-    `--dangerously-skip-permissions`・`accept-edits`・`auto` は使わない。端末サンドボックスを有効にできない・`agy --help` に `--sandbox` / `--settings` / `--mode`（plan）が無い・本体 checkout なら起動しない。
+    `--dangerously-skip-permissions`・`accept-edits`・`auto` は使わない。端末サンドボックスを有効にできない・`agy --help` に `--sandbox` / `--settings` / `--mode`（plan）が無い
+    （オプション名は単語として照合し、`--model` の説明の「plan」では通さない）・登録済みの linked worktree でない（本体 checkout・管理領域を外に置いた本体・submodule）なら起動しない。
+  - 書き込みの監査と最後の応答は、受け取り役（`lanes/gemini-stream-tee.py`）が `agy` の標準出力をパイプで直接受け取った親専用の写しで判定する（子が書ける `logs/<label>.json` は判定に使わず、
+    子の回収後に受け取った中身で置き換える。実行中に書き換えられていたら改ざんとして `EXIT:4`）。1 行目が `init` でない記録（先頭の欠落・`result` だけ残った記録）は `VERDICT: NONE`。
+  - 親（ランチャ）はレビュー対象の worktree へ `cd` せず（子だけを worktree で起動する）、親の `python3` は `-I` で動かす（レビュー対象の `json.py` などを読まない）。
   - 守りの強さは Codex・Claude のレビューと同じ: 親の chk-run の記録の使い回し・`LANES_REVIEW_REQUIRE_CHECKS=1` の起動前の停止・API キーを外す・MCP 拒否・子の git の通信止め・
     子の前後の比較（作業ツリー・git の管理フォルダ・git の制御ファイルを git を呼ぶ前に・全部の系列の再利用の記録・「使い回し禁止」の印。変わっていれば `NEEDS_FIX`・`EXIT:4`）。
-    加えて、stream-json の書き込み系のツール呼び出し（拒否されて書けなかった試みも含む）が 1 件でもあれば `NEEDS_FIX`・`EXIT:4`（証跡に件数）。
+    加えて、stream-json の書き込み系のツール呼び出し（拒否されて書けなかった試みも含む）が 1 件でもあれば `NEEDS_FIX`・`EXIT:4`（証跡に件数。`agy` の失敗の終了コードより優先し、`agy` の終了コードは証跡に別に書く）。
+    「使い回し禁止」の印は置き場所（`logs/` の中と外）ごとに前後を比べる。書き込みの試み・改ざんで不合格にしたら、その系列の前回の `CLEAN` を失効させる（次の通常の起動で古い合格を返さない）。
   - 周回の仕組み（`review-dedup.zsh` の full / delta / 同じ HEAD の省略・未解決指摘の引き継ぎ・round 3 以降の P2/P3 の後回し・`ESCALATE`）と、
     VERDICT・P0〜P3・GATE の判定は Claude レビューと同じ順番・同じ条件（同じ本文なら同じ判定になることをテストで確かめた）。
   - **実装と同じ道具でレビューしない**: Gemini で実装した worktree（`logs/` に Gemini 実装の記録がある）では起動しない（`EXIT:2`。Codex か Claude のレビューを案内する）。
@@ -45,6 +50,15 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 - `chk-run.sh` は `LANES_REVIEW_ENGINE` を入力の指紋に入れない（起動のときだけ渡しても親の記録を使い回せる）。
   **上げた後は、`chk-run.sh` を 1 回通し直す**（`chk-run.sh` の中身が変わったので、前の版の確認済みの記録は 1 回だけ使えなくなる）。
   `_common.sh` も変わったので、Codex・Claude のレビューも、上げた後の最初の 1 回は同じ HEAD でも前回の結果を使わずにレビューし直す（版を上げたときのいつもの動き）。
+- 全ランチャ: 呼び出し元の `GIT_DIR`・`GIT_WORK_TREE`・`GIT_INDEX_FILE`・`GIT_OBJECT_DIRECTORY` などリポジトリの場所の環境変数を `_common.sh` を読んだ時点で外す
+  （`chk-run.sh --query` と入口から振り分け先への引き渡しのときだけ元に戻す）。Gemini の実装・レビューは、git から見た最上位が渡した worktree であることも確かめる。
+- 全ランチャ: 親の `python3`（`_common.sh`・`review-dedup.zsh`・`chk-run.sh`・監督役）を `-I` で動かす（作業場所の同名のモジュールや `PYTHON*` の環境変数を読まない）。
+- `LANES_SCRATCH_ROOT` が相対パスなら、起動した場所を起点に絶対パスへ直す（ランチャが途中で `cd` しても、検査・作成・子への引き渡しが同じ場所を指す）。
+- dry-run（Codex・Claude・Gemini のレビューと Gemini 実装）も、指示書を書く前に `logs/` と書き込み先を確かめる（`logs/` や書き込み先が前の実行の子の置いたリンクでも辿らない。台帳に載せられなければ書かずに止める）。
+- `run-review.sh` は、優先順位を解決した後のレビュー役を振り分け先と起動前点検に渡す（設定が `LANES_REVIEW_ENGINE=gemini` でも、`--engine codex` / `claude` の起動を使わない Gemini の点検で止めない）。
+- `run-codex-review.sh` は、テンプレの役名を Codex に読み替えてから worktree のパス・枝名を埋め込む（`Claude` を含むパス・枝名を書き換えない）。
+- `lanes-roles.sh --print` の「レビューの独立性」は、`LANES_REVIEW_ENGINE` で選んだレビュー役に合わせて出す（`--env` は構成の既定のまま）。
+- `run-gemini.sh` も、登録済みの linked worktree だけで起動し、`agy` の出力を受け取り役で受けて、子の回収後に受け取った中身と突き合わせる（消された・書き換えられた → `EXIT:4`）。1 行目が `init` でない記録は監査の不備として扱う。
 
 ## [0.1.7] - Cloudflare Workers + vinext の構成の生成物があっても確認の結果を記録する / Record checks with Cloudflare Workers + vinext generated output
 

@@ -71,7 +71,8 @@ zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> [label] [--engine codex|cla
   どうしても回すときだけ `--allow-same-engine` を付けます（証跡に「同じ道具のレビュー」の行が残ります）。
 - Gemini レビューが向くのは、Claude で実装した変更を、Codex とは別の目でもう 1 回見たいとき（③で Claude 以外の目を足したいときなど）です。
 - **P0 / P1 を直した後の再レビューや、認証・課金・データ削除などリスクの高い差分は、既定のレビュー役で回すのが無難です。** Gemini レビューは足す目として使い、既定のレビューの代わりにしないでください。
-- Gemini レビューの読み取り専用は、`agy` の `--mode plan`・端末サンドボックス・起動単位の設定の拒否（MCP・ファイルの書き込み・URL・commit や push などのコマンド）で強制し、前後の比較と書き込みの試みの数で確かめます（`docs/config.md`「レビュー役を選ぶ・Gemini でレビューする」）。
+- Gemini レビューの読み取り専用は、`agy` の `--mode plan`・端末サンドボックス・起動単位の設定の拒否（MCP・ファイルの書き込み・URL・commit や push などのコマンド）で強制し、前後の比較と書き込みの試みの数で確かめます（`docs/config.md`「レビュー役を選ぶ・Gemini でレビューする」）。書き込みの試みは、ランチャが `agy` の出力をパイプで直接受け取った写しで数えます（子が書けるログは判定に使いません）。
+- `lanes-roles.sh --print` の「レビューの独立性」は、`LANES_REVIEW_ENGINE` で選んだレビュー役に合わせて出ます（例: ② claude-codex でも `LANES_REVIEW_ENGINE=claude` なら「弱い」）。`--env` の `LANES_REVIEW_INDEPENDENT` は構成の既定のレビュー役のままです。
   ターミナルのコマンドは作業場所（scratch）などに書けるので、作業ツリーへの書き込みは前後の比較で気づく守りです（Codex の読み取り専用の閉じ込めほど強くはありません）。
 
 ## 選び方

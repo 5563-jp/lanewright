@@ -117,7 +117,9 @@ Gemini を含む構成では、`run-gemini.sh` が必須にしている macOS �
 - `--allow-path`（必須・複数可）: 保存してよい相対パス。ファイルは完全一致、末尾 `/` は配下全体。範囲外の変更は `EXIT:4`。
 - 開始時に未保存の変更があれば拒否します。commit はランチャが担当し、今回の `$LANES_SCRATCH/COMMIT_MSG.txt` と許可範囲の差分だけを検証成功後に保存します（古いメッセージは開始・再試行の前に退避）。
 - `agy` には `--sandbox`・`--settings`（`mcp(*)` の呼び出し拒否など）・`ANTIGRAVITY_HEADLESS=true` を強制します。書けるのは worktree と scratch だけで、Git の管理領域（`.git` 本体・フック・設定）は渡しません。
-  **なぜ**: `.git/hooks` に書かれると、ランチャの `git commit` のときにそのコードが走ってしまうため。そのため本体 checkout（`.git` がディレクトリ）では起動せず、専用の linked worktree が前提です。`agy` の終了後、git を実行する前に worktree の `.git` ファイルが変わっていないことも確かめます（変わっていれば `EXIT:4`）。
+  **なぜ**: `.git/hooks` に書かれると、ランチャの `git commit` のときにそのコードが走ってしまうため。そのため本体 checkout では起動せず、登録済みの専用の linked worktree が前提です（`.git` がファイルというだけでは通しません。管理領域を外に置いた本体 checkout・通常の submodule も弾きます。`_common.sh` の `lanes_require_linked_worktree`）。`agy` の終了後、git を実行する前に worktree の `.git` ファイルが変わっていないことも確かめます（変わっていれば `EXIT:4`）。
+- 呼び出し元の `GIT_DIR`・`GIT_WORK_TREE` などのリポジトリの場所の環境変数は外し、git から見た最上位が渡した worktree であることを確かめます（全ランチャ共通。`_common.sh` を読んだ時点で外す）。
+- `agy` の出力（stream-json）は受け取り役（`gemini-stream-tee.py`）がパイプで受け取り、書き込み監査は子の回収後に受け取った中身で置き換えた `logs/<label>.json` を読みます。子が実行中に `logs/<label>.json`（再実行の前の `<label>.try1.json` も）を消した・書き換えたら `EXIT:4`。
 - `main` / `master` / 統合先 / detached HEAD（枝に乗っていない状態）では push しません。`--no-push` は通常終了時もローカル保存まで。
 - 時間の上限: 子プロセスが無く出力が `GEMINI_IDLE_GRACE`（既定 60 秒、再開後は `GEMINI_IDLE_RESUME_GRACE` 既定 300 秒）止まれば強制停止（`EXIT:3`）。子が実行中なら idle でも待ちます。出力が `GEMINI_NOOUTPUT_SEC`（既定 600 秒）止まれば停止して作業中の差分を `$LANES_SCRATCH/wip.patch` に保存（`EXIT:8`）。全体の上限は `GEMINI_PRINT_TIMEOUT`（既定 `75m`）。
 - 異常終了でも、許可範囲の差分・今回のメッセージ・書き込み監査・`--verify` の成功が揃えば救済 commit しますが、終了コードは `3` のままで push しません。
@@ -126,13 +128,15 @@ Gemini を含む構成では、`run-gemini.sh` が必須にしている macOS �
 
 #### `run-gemini-review.sh` の補足
 - 構成（`LANES_TOOLS`）に gemini が無ければ起動しません（`exit 2`）。モデルと effort は `GEMINI_REVIEW_MODEL` / `GEMINI_REVIEW_EFFORT`（既定は空＝付けない。実装用の `GEMINI_MODEL` / `GEMINI_EFFORT` とは別）。
-- 読み取り専用: `agy` を `--mode plan --sandbox --settings '<JSON>'` で起動し、`--dangerously-skip-permissions`・`accept-edits`・`auto` は使いません。`--settings` の拒否は固定（`_common.sh` の `lanes_gemini_review_settings`）で、MCP（`mcp(*)`）・ファイルの書き込み（`write_file(*)`・`write_file(/)`）・URL・commit や push などのコマンド（Claude レビューの固定の拒否の一覧のコマンドの分）です。`ANTIGRAVITY_HEADLESS=true`・stdin は `/dev/null`・`--add-dir` は scratch だけ・子の `GIT_CONFIG_GLOBAL` は scratch の最小 gitconfig・`GIT_OPTIONAL_LOCKS=0`・`GIT_PAGER=cat`・git の通信は止めます。macOS の端末サンドボックスを有効にできない・`agy --help` に `--sandbox` / `--settings` / `--mode`（plan）が無い・本体 checkout（`.git` がディレクトリ）なら起動しません。
-- 前後の比較（Codex レビューと同じ）: 作業ツリー（無視対象も）・指示と条件・git の管理フォルダ（設定・hooks・タグ・stash）・git の制御ファイル（`.git`・`commondir`・`gitdir`・`config`・hooks。子の後は git を呼ぶ前に比べ、変わっていれば git を実行せずに `EXIT:4`）・再利用の記録・「使い回し禁止」の印。変わっていたら `NEEDS_FIX`・`EXIT:4`。
+- 親（ランチャ）は対象の worktree へ `cd` しません（子だけを worktree で起動する）。親の `python3` は `-I`（作業場所や `PYTHON*` の環境変数を見ない）で動かすので、レビュー対象に `json.py` のような標準ライブラリと同じ名前のファイルがあっても読みません。呼び出し元の `GIT_DIR` などは外し、git から見た最上位が渡した worktree であることを確かめます。
+- 読み取り専用: `agy` を `--mode plan --sandbox --settings '<JSON>'` で起動し、`--dangerously-skip-permissions`・`accept-edits`・`auto` は使いません。`--settings` の拒否は固定（`_common.sh` の `lanes_gemini_review_settings`）で、MCP（`mcp(*)`）・ファイルの書き込み（`write_file(*)`・`write_file(/)`）・URL・commit や push などのコマンド（Claude レビューの固定の拒否の一覧のコマンドの分）です。`ANTIGRAVITY_HEADLESS=true`・stdin は `/dev/null`・`--add-dir` は scratch だけ・子の `GIT_CONFIG_GLOBAL` は scratch の最小 gitconfig・`GIT_OPTIONAL_LOCKS=0`・`GIT_PAGER=cat`・git の通信は止めます。macOS の端末サンドボックスを有効にできない・`agy --help` に `--sandbox` / `--settings` / `--mode`（plan）が無い（オプション名は単語として照合する。`--model` の説明の「plan」では通さない）・登録済みの linked worktree でない（本体 checkout・管理領域を外に置いた本体・submodule）なら起動しません。
+- 前後の比較（Codex レビューと同じ）: 作業ツリー（無視対象も）・指示と条件・git の管理フォルダ（設定・hooks・タグ・stash）・git の制御ファイル（`.git`・`commondir`・`gitdir`・`config`・hooks。子の後は git を呼ぶ前に比べ、変わっていれば git を実行せずに `EXIT:4`）・再利用の記録・「使い回し禁止」の印（`logs/` の中と外を置き場所ごとに。片方だけの削除・実行中の新設も）・公開用の `logs/<label>.json`（受け取った中身と違えば）。変わっていたら `NEEDS_FIX`・`EXIT:4`。実行中に `logs/` そのものを差し替えられたら、記録を書かずに `EXIT:5` で止め、`logs/` の外に「使い回し禁止」の印を置きます。
+- 書き込みの試み・改ざんで不合格（`EXIT:4`）にしたら、その系列の前回の `CLEAN` を失効させます（次の通常の起動で同じ HEAD の省略・delta に使わない。前回が `NEEDS_FIX` の記録は未解決の指摘を引き継ぐためそのまま残す）。
 - 書き込みの試み: stream-json の `step_update` のうち、ツール名に `write` / `replace` / `edit` / `delete` / `move` / `rename` / `create` / `append` / `copy` / `patch` を含む呼び出し（`run-gemini.sh` の監査と同じ判定。同じ `step_index` の経過は 1 件）が 1 件でもあれば `NEEDS_FIX`・`EXIT:4`。拒否されて書けなかった試みも数えます。証跡の「読み取り専用の確認」の行に件数とツール名が出ます。
-- 本文: 最後の `result`（`status=SUCCESS` の `response`）だけを `logs/<label>.last.md` と `logs/<label>.log` に書き、判定・指摘数・必須検証・解消宣言はこの本文だけを読みます。JSON の不正行・`result` の欠損・重複・終端でない `result`・`status=ERROR` は `VERDICT: NONE`。
+- 本文: 最後の `result`（`status=SUCCESS` の `response`）だけを `logs/<label>.last.md` と `logs/<label>.log` に書き、判定・指摘数・必須検証・解消宣言はこの本文だけを読みます。読むのは、受け取り役（`gemini-stream-tee.py`）が `agy` の標準出力をパイプで直接受け取った親専用の写しです（子が書ける `logs/<label>.json` は判定の正本にしません。子の回収後に受け取った中身で置き換えます）。1 行目が `init` でない（先頭の欠落・`result` だけ残った記録）・`init` の重複・JSON の不正行・`result` の欠損・重複・終端でない `result`・`status=ERROR` は `VERDICT: NONE`。
 - 見張りは `run-gemini.sh` と同じ（`gemini-agy.zsh`）: 出力が `GEMINI_REVIEW_NOOUTPUT_SEC`（既定 600 秒）止まれば `EXIT:8`、idle のまま子が無ければ `EXIT:3`、全体の上限は `GEMINI_REVIEW_PRINT_TIMEOUT`（既定 `45m`）。
-- 同じ道具でレビューしない: `logs/` に Gemini 実装の記録（`.pid` の `lane=gemini`・Gemini 実装の証跡の見出し。回転したものも）があれば、排他を取る前に止めます（`EXIT:2`。`.done` に理由と「Codex か Claude のレビューを使う」の案内）。`--allow-same-engine` を付けたときだけ回し、証跡に「同じ道具のレビュー」の行を残します。
-- 出力と終了コード: 出力は他のレビューと同じ（`logs/<label>.{log,json,stderr.log,prompt.md,evidence.md,last.md,pid,done}`・`.<系列>.review-state`・`<系列>.followups.md`）。証跡は「## Gemini レビュー証跡（<label>）」で、行の並びと文言は Claude レビューと同じに「- レビューエンジン: gemini」と「- 読み取り専用の確認」の行を足したもの。終了コードは `agy` の rc（非 0 はそのまま）、見張りの停止は idle `3` / 無出力 `8`、改ざん・書き込みの試みは `4`、rc 0 で VERDICT が取れなければ `3`、引数・前提の誤りは `2`。
+- 同じ道具でレビューしない: `logs/` に Gemini 実装の記録（`.pid` の `lane=gemini`・Gemini 実装の証跡の見出し。回転したものも）があれば、排他を取る前に止めます（`EXIT:2`。`.done` に理由と「Codex か Claude のレビューを使う」の案内）。候補の記録を読めない（確かめられない）ときも「記録なし」とは扱わずに止めます。`--allow-same-engine` を付けたときだけ回し、証跡に「同じ道具のレビュー」の行を残します。
+- 出力と終了コード: 出力は他のレビューと同じ（`logs/<label>.{log,json,stderr.log,prompt.md,evidence.md,last.md,pid,done}`・`.<系列>.review-state`・`<系列>.followups.md`）。証跡は「## Gemini レビュー証跡（<label>）」で、行の並びと文言は Claude レビューと同じに「- レビューエンジン: gemini」と「- 読み取り専用の確認」の行を足したもの。終了コードは `agy` の rc（非 0 はそのまま）、見張りの停止は idle `3` / 無出力 `8`、改ざん・書き込みの試みは `4`（`agy` の失敗の終了コードより優先。`agy` の終了コードは証跡の「読み取り専用の確認」の行と `.done` の `agy_rc=` に残る）、rc 0 で VERDICT が取れなければ `3`、引数・前提の誤りは `2`、実行中の `logs/` の差し替えは `5`。
 
 ### 監視
 | スクリプト | 使い方 | 何をするか |
@@ -162,6 +166,7 @@ Gemini を含む構成では、`run-gemini.sh` が必須にしている macOS �
 | `lanes-roles.sh` / `lanes-doctor.sh` | 役割の割り振り / 起動前点検（2 章） |
 | `review-dedup.zsh` | 同じレビューを繰り返さない仕組み（6 章） |
 | `gemini-agy.zsh` | `agy` の起動と見張り（子プロセスの記録・idle・無出力の停止）。`run-gemini.sh` と `run-gemini-review.sh` が使う |
+| `gemini-stream-tee.py` | `agy` の標準出力をパイプで受け取り、公開用の `logs/<label>.json` と親専用の写し（子が名前で開けない一時ファイル）の両方へ書く受け取り役。`gemini-agy.zsh` が起動する |
 | `codex-review-output.py` | Codex レビューの JSON から最終本文と完了記録を作る |
 | `lanes_monitor.py` / `lanes_watch.py` | 監視の本体 |
 | `vercel_autoredeploy.py` | Vercel の自動再デプロイ（11 章・任意。`LANES_VERCEL_PROJECT` が空なら無効） |
@@ -452,8 +457,8 @@ zsh lanes/prepare-screen-qa.sh <checkout> [label] [--url <preview-url>] [--viewp
 | 1 | `chk-run.sh`: 確認コマンドの失敗・fetch / merge の失敗・検証中の入力の変化 / `lanes-watch.sh --check`: `WATCH STALE`・`WATCH DEAD` / `after-develop-merge.sh`: QA worktree の準備失敗 |
 | 2 | 使い方・前提の誤り（引数不足、未ログイン・API キー起動、MCP 遮断の失敗、排他ロック取得不可、fetch 失敗、python3 なし、同じ label の二重起動、cwd が削除対象の中、`LANES_BASE_BRANCH` が枝名として不正、`chk-run.sh` の確認コマンドが未設定、`prepare-screen-qa.sh` の URL が決まらない） |
 | 3 | レビュー・QA・`run-codex.sh`: `VERDICT: NONE`（完走せず・解釈不能）または子の回収未確認 / `run-gemini.sh`: `agy` の異常終了・idle 強制停止（救済 commit でも 3・push なし） / `run-gemini-review.sh`: idle 強制停止・stream-json の不備（`VERDICT: NONE`） |
-| 4 | `run-gemini.sh`: 書き込み監査失敗・`--allow-path` 外の変更・`.git` ファイルの変更 / レビュー・QA: 実行中に作業ツリーや条件が変わった（または result イベント無し） / `run-gemini-review.sh`: 書き込み系のツールの呼び出し（試みを含む）・git の制御ファイルの変更（git を呼ばずに停止） / `run-codex.sh`: `VERDICT: NEEDS_FIX`・実行中に git の制御ファイル（`.git`・`commondir`・`gitdir`・`config`・`config.worktree`・hooks）が変わった（git を呼ばずに停止） / cleanup: 未 commit・未追跡ファイルで停止 |
-| 5 | `run-gemini.sh`: 今回の `COMMIT_MSG.txt` 無し・commit 失敗 / レビュー・QA: Claude の `is_error` / cleanup・`after-develop-merge.sh`: 未マージ / 全ランチャ: 実行中に子が `logs/` を差し替えた（記録を書かずに止めるので `.done` は無く、`lanes-status.sh` は DEAD と出す） |
+| 4 | `run-gemini.sh`: 書き込み監査失敗・`--allow-path` 外の変更・`.git` ファイルの変更・実行中の `logs/` の stream-json の書き換え / レビュー・QA: 実行中に作業ツリーや条件が変わった（または result イベント無し） / `run-gemini-review.sh`: 書き込み系のツールの呼び出し（試みを含む。`agy` の失敗の終了コードより優先）・git の制御ファイルの変更（git を呼ばずに停止）・公開用の `logs/<label>.json` の書き換え・「使い回し禁止」の印の変化（系列の前回の `CLEAN` を失効させる） / `run-codex.sh`: `VERDICT: NEEDS_FIX`・実行中に git の制御ファイル（`.git`・`commondir`・`gitdir`・`config`・`config.worktree`・hooks）が変わった（git を呼ばずに停止） / cleanup: 未 commit・未追跡ファイルで停止 |
+| 5 | `run-gemini.sh`: 今回の `COMMIT_MSG.txt` 無し・commit 失敗 / レビュー・QA: Claude の `is_error` / cleanup・`after-develop-merge.sh`: 未マージ / 全ランチャ: 実行中に子が `logs/` を差し替えた（記録を書かずに止めるので `.done` は無く、`lanes-status.sh` は DEAD と出す。`run-gemini-review.sh` は止める前に `logs/` の外へ「使い回し禁止」の印を置く） |
 | 6 | `run-gemini.sh`: push 失敗 / cleanup: `.env*` が本体と不一致 |
 | 7 | `run-gemini.sh`: `--verify` の失敗 / cleanup: 実行中レーン・一時 PostgreSQL の照合や停止の失敗・枝の先端の変化 |
 | 8 | `run-gemini.sh`: 無出力で停止（差分は `wip.patch`） / `run-gemini-review.sh`: 無出力で停止（`GEMINI_REVIEW_NOOUTPUT_SEC`） / cleanup: scratch だけ保全（`after-develop-merge.sh` は QA へ進む） |
