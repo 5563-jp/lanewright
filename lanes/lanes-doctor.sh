@@ -147,7 +147,8 @@ if (( roles_ok )); then
       gem_help="$(ANTIGRAVITY_HEADLESS=true "$GEMINI_BIN" --help < /dev/null 2>&1)" || gem_help=""
       gem_missing=()
       for option in --sandbox --settings --mode; do [[ "$gem_help" == *"$option"* ]] || gem_missing+=("$option"); done
-      [[ "$gem_help" == *plan* ]] || gem_missing+=("--mode plan")
+      # plan は --mode の行の中にあること（help の別の場所の語では通さない。ランチャと同じ確かめ方）
+      [[ "${(j: :)${(@M)${(@f)gem_help}:#*--mode*}}" == *plan* ]] || gem_missing+=("--mode plan")
       if (( ${#gem_missing} )); then
         ng "gemini レビュー: agy が ${(j:・:)gem_missing} に対応していない。run-gemini-review.sh は読み取り専用を強制できないので起動しない（agy update で新しくする）"
       else

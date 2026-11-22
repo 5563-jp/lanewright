@@ -55,7 +55,8 @@ if '--help' in args:
     h = os.environ.get('GT_HELP', 'full')
     opts = ['--add-dir', '--effort', '--model', '--output-format', '--print', '--print-timeout', '--settings', '--sandbox']
     if h == 'no-sandbox': opts.remove('--sandbox')
-    if h != 'no-mode': opts.append('--mode  Set the agent execution mode (accept-edits, auto' + ('' if h == 'no-plan' else ', plan') + ')')
+    if h != 'no-mode': opts.append('--mode  Set the agent execution mode (accept-edits, auto' + ('' if h in ('no-plan', 'plan-elsewhere') else ', plan') + ')')
+    if h == 'plan-elsewhere': opts.append('--remote-agent  research and write a plan for your review')
     print('\n'.join(opts)); sys.exit(0)
 st0, dn = os.fstat(0), os.stat('/dev/null')
 keys = ('ANTIGRAVITY_HEADLESS', 'TMPDIR', 'LANES_SCRATCH', 'GIT_OPTIONAL_LOCKS', 'GIT_PAGER', 'GIT_CONFIG_GLOBAL', 'GIT_ALLOW_PROTOCOL',
@@ -254,7 +255,7 @@ check('指示書: テンプレの役名を Gemini に読み替え、案件の指
       merged.startswith('# レビュー本線（Gemini）') and '案件固有の検証指示（テスト）' in merged and 'このレビューの閉じ込め' in merged
       and '**全部** 列挙する' in merged and '## 秘密の値の扱い' in merged and merged.rstrip().endswith('VERDICT: CLEAN\nVERDICT: NEEDS_FIX')
       and 'Claude' not in merged.split('# 案件固有の指示')[0] and (lanes / 'templates/codex-review-focus.md').read_text().strip() in merged)
-for help_kind, why in (('no-mode', '--mode'), ('no-plan', 'plan'), ('no-sandbox', '--sandbox')):
+for help_kind, why in (('no-mode', '--mode'), ('no-plan', 'plan'), ('plan-elsewhere', '--mode の行の plan'), ('no-sandbox', '--sandbox')):
     r, cap, done = gem(wt, 'j3', help=help_kind, env={})
     check(f'agy --help に {why} が無ければ起動しない', r.returncode == 2 and cap is None and 'EXIT:2' in done, out(r))
 main = T / 'main-checkout'; main.mkdir(); git(main, 'init', '-q', '-b', 'main')
@@ -474,8 +475,9 @@ p = doctor()
 check('doctor: 既定の設定では Gemini レビューの点検を足さない', p.returncode == 0 and 'gemini レビュー' not in p.stdout, p.stdout)
 p = doctor(env={'LANES_REVIEW_ENGINE': 'gemini'})
 check('doctor: LANES_REVIEW_ENGINE=gemini なら agy の --sandbox・--settings・--mode plan を確かめる', p.returncode == 0 and 'ok   gemini レビュー: agy が --sandbox・--settings・--mode plan に対応' in p.stdout, p.stdout)
-p = doctor(env={'LANES_REVIEW_ENGINE': 'gemini'}, help='no-plan')
-check('doctor: agy の --mode に plan が無ければ NG', p.returncode == 2 and 'NG   gemini レビュー: agy が --mode plan に対応していない' in p.stdout, p.stdout)
+for help_kind in ('no-plan', 'plan-elsewhere'):
+    p = doctor(env={'LANES_REVIEW_ENGINE': 'gemini'}, help=help_kind)
+    check(f'doctor: agy の --mode の行に plan が無ければ NG（{help_kind}）', p.returncode == 2 and 'NG   gemini レビュー: agy が --mode plan に対応していない' in p.stdout, p.stdout)
 p = doctor(env={'LANES_REVIEW_ENGINE': 'gemini', 'LANES_TOOLS': 'claude codex'})
 check('doctor: LANES_REVIEW_ENGINE=gemini なのに構成に gemini が無ければ NG', p.returncode == 2 and 'LANES_REVIEW_ENGINE=gemini だが構成' in p.stdout, p.stdout)
 def roles(tools, extra_env=None):

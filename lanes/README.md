@@ -451,15 +451,15 @@ zsh lanes/prepare-screen-qa.sh <checkout> [label] [--url <preview-url>] [--viewp
 | 0 | 正常（cleanup は dry-run でも 0。`lanes-watch.sh` は WAKE 検知・時間上限・`WATCH OK`） |
 | 1 | `chk-run.sh`: 確認コマンドの失敗・fetch / merge の失敗・検証中の入力の変化 / `lanes-watch.sh --check`: `WATCH STALE`・`WATCH DEAD` / `after-develop-merge.sh`: QA worktree の準備失敗 |
 | 2 | 使い方・前提の誤り（引数不足、未ログイン・API キー起動、MCP 遮断の失敗、排他ロック取得不可、fetch 失敗、python3 なし、同じ label の二重起動、cwd が削除対象の中、`LANES_BASE_BRANCH` が枝名として不正、`chk-run.sh` の確認コマンドが未設定、`prepare-screen-qa.sh` の URL が決まらない） |
-| 3 | レビュー・QA・`run-codex.sh`: `VERDICT: NONE`（完走せず・解釈不能）または子の回収未確認 / `run-gemini.sh`: `agy` の異常終了・idle 強制停止（救済 commit でも 3・push なし） |
-| 4 | `run-gemini.sh`: 書き込み監査失敗・`--allow-path` 外の変更・`.git` ファイルの変更 / レビュー・QA: 実行中に作業ツリーや条件が変わった（または result イベント無し） / `run-codex.sh`: `VERDICT: NEEDS_FIX`・実行中に git の制御ファイル（`.git`・`commondir`・`gitdir`・`config`・`config.worktree`・hooks）が変わった（git を呼ばずに停止） / cleanup: 未 commit・未追跡ファイルで停止 |
+| 3 | レビュー・QA・`run-codex.sh`: `VERDICT: NONE`（完走せず・解釈不能）または子の回収未確認 / `run-gemini.sh`: `agy` の異常終了・idle 強制停止（救済 commit でも 3・push なし） / `run-gemini-review.sh`: idle 強制停止・stream-json の不備（`VERDICT: NONE`） |
+| 4 | `run-gemini.sh`: 書き込み監査失敗・`--allow-path` 外の変更・`.git` ファイルの変更 / レビュー・QA: 実行中に作業ツリーや条件が変わった（または result イベント無し） / `run-gemini-review.sh`: 書き込み系のツールの呼び出し（試みを含む）・git の制御ファイルの変更（git を呼ばずに停止） / `run-codex.sh`: `VERDICT: NEEDS_FIX`・実行中に git の制御ファイル（`.git`・`commondir`・`gitdir`・`config`・`config.worktree`・hooks）が変わった（git を呼ばずに停止） / cleanup: 未 commit・未追跡ファイルで停止 |
 | 5 | `run-gemini.sh`: 今回の `COMMIT_MSG.txt` 無し・commit 失敗 / レビュー・QA: Claude の `is_error` / cleanup・`after-develop-merge.sh`: 未マージ / 全ランチャ: 実行中に子が `logs/` を差し替えた（記録を書かずに止めるので `.done` は無く、`lanes-status.sh` は DEAD と出す） |
 | 6 | `run-gemini.sh`: push 失敗 / cleanup: `.env*` が本体と不一致 |
 | 7 | `run-gemini.sh`: `--verify` の失敗 / cleanup: 実行中レーン・一時 PostgreSQL の照合や停止の失敗・枝の先端の変化 |
-| 8 | `run-gemini.sh`: 無出力で停止（差分は `wip.patch`） / cleanup: scratch だけ保全（`after-develop-merge.sh` は QA へ進む） |
+| 8 | `run-gemini.sh`: 無出力で停止（差分は `wip.patch`） / `run-gemini-review.sh`: 無出力で停止（`GEMINI_REVIEW_NOOUTPUT_SEC`） / cleanup: scratch だけ保全（`after-develop-merge.sh` は QA へ進む） |
 | 10〜14 | `lanes-status.sh`: RUNNING 10 / STALLED 11 / DEAD 12 / FAILED 13 / NONE 14（DONE は 0） |
 | 129 / 130 / 143 | ランチャ・ウォッチが HUP / INT / TERM で終了（`.done` の補足に理由） |
-| その他 | CLI（claude / codex）の終了コードをそのまま返す（非 0 なら VERDICT は NONE） |
+| その他 | CLI（claude / codex / agy）の終了コードをそのまま返す（非 0 なら VERDICT は NONE） |
 
 `run-impl.sh` / `run-review.sh` は振り分け先のランチャの終了コードに従います。`lanes-doctor.sh` は揃っていれば 0、足りなければ 2 です。
 
@@ -476,6 +476,8 @@ zsh lanes/prepare-screen-qa.sh <checkout> [label] [--url <preview-url>] [--viewp
 | `CLAUDE_BIN` `CODEX_BIN` `GEMINI_BIN` | `command -v claude` / `codex` / `agy` | 各 CLI のパス |
 | `CLAUDE_MODEL` `CODEX_MODEL` `GEMINI_MODEL` | 空 | 空なら `--model` を付けず CLI の既定モデル |
 | `CLAUDE_EFFORT` `CODEX_EFFORT` `GEMINI_EFFORT` | `xhigh` / `xhigh` / `high` | effort（考える深さ。空なら付けない。上限はモデルごとに違う）。そのレーンで渡す設定のモデルと effort は `logs/<label>.pid`（`model=` / `effort=`）と証跡に残る。起動ごとに変える書き方は `docs/config.md` |
+| `GEMINI_REVIEW_MODEL` `GEMINI_REVIEW_EFFORT` | 空 / 空 | Gemini レビュー（`run-gemini-review.sh`）のモデルと effort（空なら付けない。実装用の `GEMINI_MODEL` / `GEMINI_EFFORT` とは別） |
+| `GEMINI_REVIEW_PRINT_TIMEOUT` `GEMINI_REVIEW_NOOUTPUT_SEC` | `45m` / `600` | Gemini レビューの全体の上限（`--print-timeout`）と、出力が止まったら止めるまでの秒数（`EXIT:8`） |
 | `LANES_CHECK_CMD` | 空 | `chk-run.sh` の確認コマンド（`.lanes/check.sh` が優先。どちらも無ければ `chk-run.sh` は exit 2） |
 | `LANES_SCREEN_QA_MAP` | 空 | 画面 QA の対応表（`--url` / `--viewpoints` が優先） |
 | `LANES_VERCEL_PROJECT` `LANES_VERCEL_SCOPE` | 空 | 自動再デプロイ（`LANES_VERCEL_PROJECT` が空なら無効。`LANES_VERCEL_SCOPE` が空なら `--scope` を付けない） |
@@ -486,6 +488,7 @@ zsh lanes/prepare-screen-qa.sh <checkout> [label] [--url <preview-url>] [--viewp
 | `LANES_PROMPT_MAX_BYTES` | `200000` | プロンプトの上限（巨大な diff を埋め込む事故の検出） |
 | `LANES_REVIEW_REUSE_CHECKS` | `1` | 1 ならレビューランチャが `chk-run.sh --query` で問い合わせ、親の確認済みの記録があれば必須検証を回させない（6 章「必須検証の使い回し」）。0 なら問い合わせない |
 | `LANES_REVIEW_REQUIRE_CHECKS` | `0` | 1 なら、親の確認済みの記録を使えない（`no-record` / `uncommitted` / `input-changed`）とき、レビューの子を起動せずに止める（`EXIT:2`・`note=起動前の誤り`）。その起動だけ記録なしで回すなら `--allow-missing-checks`。0 なら今までどおり起動する（`docs/config.md`） |
+| `LANES_REVIEW_ENGINE` | 空 | `run-review.sh` が振り分けるレビュー役（空なら構成のレビュー役。`codex` / `claude` / `gemini`。`--engine` が勝つ。`chk-run.sh` の指紋には入らない） |
 
 数値のキー（`LANES_STALL_MINUTES` `LANES_NOTIFY` `LANES_PROMPT_MAX_BYTES` `LANES_DOWNLOADS_SCAN` `LANES_DETACH_QA` `LANES_REVIEW_REUSE_CHECKS` `LANES_REVIEW_REQUIRE_CHECKS`）は `lanes.env` が整数か確かめ、数字以外なら計算に使わずに exit 2 で止まります（0 / 1 のキーと 1 以上のキーの別は `docs/config.md`）。ランチャ（`run-*.sh`）では、その label の排他を取れれば今回の失敗（`EXIT:2`・`note=起動前の誤り: 設定の誤り: ...`）を `.done` に残すので、前回成功した label でも `lanes-status.sh` は `FAILED` を返します。
 
@@ -507,7 +510,7 @@ LANES_TEST_SOCKET_ROOT=/Users/you/tmp/s zsh selftest.sh   # TMPDIR が深いと�
 LANES_LINT_STRICT=1 zsh selftest.sh --test tests/test-lint.sh   # shellcheck が未導入なら赤にする（公開前の確認など）
 ```
 `selftest.sh` はスタブ（本物の代わりに決まった応答を返す偽物）の CLI を入れた一時 HOME で、指定した構成ごとに `lanes/tests/test-*.sh` と `tests/test-*.sh` を回し、最後に「構成 × テスト」の表を出します（`LANES_PRIVATE_DENYLIST` を渡せば `selftest.sh` の中の `test-no-private.sh` にも届きます）。
-- 構成ごとに回すのは、先頭の 15 行に `# selftest: 構成ごと` の行があるテスト（呼び出し元の `LANES_TOOLS` で結果が変わるもの。今は `test-common-security.sh` と `test-gemini-launcher.sh`）だけです。
+- 構成ごとに回すのは、先頭の 15 行に `# selftest: 構成ごと` の行があるテスト（呼び出し元の `LANES_TOOLS` で結果が変わるもの。今は `test-common-security.sh` と `test-gemini-launcher.sh`）だけです（`test-gemini-review.sh` は中で構成を固定・切り替えるので 1 回だけ）。
   それ以外（`LANES_TOOLS` を見ない、または `test-roles.sh` / `test-doctor.sh` のように中で変数を外して 4 構成を自分で試すもの）は最初の構成で 1 回だけ回し、2 つ目以降の構成の列には同じ結果を `＝緑` のように「＝」付きで流用します（合計の行の「流用」の数）。
   `--every-profile` を付けると、前と同じく全部のテストを構成ごとに回します。新しいテストが呼び出し元の `LANES_TOOLS` を読むなら、先頭のコメントに `# selftest: 構成ごと` の行を足してください。
 - 表の `緑(一部)` は、その構成では一部を停止の確認だけにしたもの・道具が無くて一部の検査を省いたもの（テストの出力の `LANES_PARTIAL: <理由>` の行。理由は表の下に並べます。例: shellcheck が未導入のときの `tests/test-lint.sh`）。

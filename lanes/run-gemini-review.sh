@@ -179,7 +179,10 @@ gem_help="$(ANTIGRAVITY_HEADLESS=true "$GEMINI_BIN" --help < /dev/null 2>&1)" ||
 for option in --sandbox --settings --mode; do
   [[ "$gem_help" == *"$option"* ]] || lanes_die "agy が $option に未対応 → 起動禁止（読み取り専用を強制できない）"
 done
-[[ "$gem_help" == *plan* ]] || lanes_die "agy の --mode に plan が無い → 起動禁止（読み取り専用を強制できない）"
+# plan は --mode の行の中にあること（help の別の場所の語では通さない）
+gem_mode_lines="${(j: :)${(@M)${(@f)gem_help}:#*--mode*}}"
+[[ "$gem_mode_lines" == *plan* ]] || lanes_die "agy の --mode に plan が無い → 起動禁止（読み取り専用を強制できない）"
+unset gem_mode_lines
 unset gem_help
 
 branch="$(git -C "$wt" branch --show-current 2>/dev/null)"; [[ -n "$branch" ]] || branch="(detached)"
