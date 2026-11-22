@@ -8,7 +8,9 @@
 #   LANES_PROFILE            full / claude-codex / claude-gemini / claude-only
 #   LANES_ROLE_IMPL          実装役（claude か "claude gemini"）
 #   LANES_ROLE_REVIEW        レビュー役（codex か claude）
-#   LANES_REVIEW_INDEPENDENT 1 = 実装と別系統の道具でレビュー / 0 = 同じ系統（独立性が弱い）
+#   LANES_REVIEW_INDEPENDENT 1 = 実装と別系統の道具でレビュー / 0 = 同じ系統（独立性が弱い）。構成の既定のレビュー役のもの
+# レビュー役は構成で決まる（codex か claude）。Gemini レビュー（run-gemini-review.sh）は明示したときだけ使う
+# （run-review.sh --engine gemini か LANES_REVIEW_ENGINE=gemini）。--print に案内を出す。--env の出力は変えない
 # 構成の表（docs/roles.md と同じ）:
 #   ① full          claude codex gemini → 実装 Claude と Gemini / レビュー Codex
 #   ② claude-codex  claude codex        → 実装 Claude            / レビュー Codex
@@ -79,11 +81,33 @@ lanes_roles_print() {
   print -r -- "構成: $mark $LANES_PROFILE（道具: $LANES_TOOLS_NORMALIZED）"
   print -r -- "実装: $impl_line"
   print -r -- "レビュー: $review_line"
+  # Gemini レビュー（明示したときだけ使う）の案内。既定のレビュー役の表示は上のまま
+  if lanes_roles_has_tool gemini; then
+    print -r -- "Gemini レビュー: 明示したときだけ（run-review.sh --engine gemini → run-gemini-review.sh・読み取り専用）。Gemini で実装した worktree には使わない（同じ道具でレビューしない）"
+  fi
+  # 設定でレビュー役を指定しているとき（LANES_REVIEW_ENGINE）は、run-review.sh の振り分け先を出す（--engine を付けた起動はそちらが勝つ）
+  if [[ -n "${LANES_REVIEW_ENGINE:-}" ]]; then
+    if [[ "$LANES_REVIEW_ENGINE" == claude ]] || lanes_roles_has_tool "$LANES_REVIEW_ENGINE"; then
+      print -r -- "レビュー役の指定: LANES_REVIEW_ENGINE=$LANES_REVIEW_ENGINE（run-review.sh は --engine が無ければ run-$LANES_REVIEW_ENGINE-review.sh へ振り分ける）"
+    else
+      print -r -- "注意: LANES_REVIEW_ENGINE=$LANES_REVIEW_ENGINE だが構成に $LANES_REVIEW_ENGINE が無い（run-review.sh は --engine が無ければ止まる）"
+    fi
+  fi
   if (( LANES_REVIEW_INDEPENDENT )); then
     print -r -- "レビューの独立性: あり（実装と別系統の道具で見る）"
   else
     print -r -- "レビューの独立性: 弱い"
     print -r -- "注意: レビューが実装と同じ系統の道具（Claude）なので独立性が弱い。同じ思い込みを見落としやすいので、人の目での確認や CI（自動テストの仕組み）を厚めにする。codex を足すと ② か ① になる"
+  fi
+  # 上の行は構成の既定のレビュー役のもの。設定で別のレビュー役を指定しているときは、その独立性も 1 行出す
+  # （Claude はどの構成でも実装役なので弱い。Codex は実装に使わない。Gemini は Gemini で実装した worktree では起動しないので、Claude の実装に対して別系統）
+  if [[ -n "${LANES_REVIEW_ENGINE:-}" && "$LANES_REVIEW_ENGINE" != "$LANES_ROLE_REVIEW" ]] \
+      && { [[ "$LANES_REVIEW_ENGINE" == claude ]] || lanes_roles_has_tool "$LANES_REVIEW_ENGINE"; }; then
+    if [[ "$LANES_REVIEW_ENGINE" == claude ]]; then
+      print -r -- "指定のレビュー役（LANES_REVIEW_ENGINE=claude）の独立性: 弱い（実装と同じ系統の道具）"
+    else
+      print -r -- "指定のレビュー役（LANES_REVIEW_ENGINE=$LANES_REVIEW_ENGINE）の独立性: あり（実装と別系統の道具で見る）"
+    fi
   fi
 }
 

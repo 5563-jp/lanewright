@@ -1,7 +1,8 @@
 #!/bin/zsh -f
 # 起動前点検（doctor = 健康診断）。今の構成（LANES_TOOLS）で使う道具がそろっているかを確かめる。
-# 使い方: lanes-doctor.sh [--quiet] [<worktree>]
+# 使い方: lanes-doctor.sh [--quiet] [--review-engine codex|claude|gemini] [<worktree>]
 #   --quiet     問題が無ければ何も出さない（run-impl.sh / run-review.sh が起動前に使う）。問題があれば同じ一覧を出す
+#   --review-engine  点検で前提にするレビュー役（設定の LANES_REVIEW_ENGINE より勝つ。run-review.sh が振り分けたレビュー役を渡す）
 #   <worktree>  （任意）レーンを走らせる作業ツリー。渡すと、ランチャが書く logs/ が git に無視されているかも見る
 #               （無視されていなければ注意だけ。未追跡の logs/ が残り、誤って commit される原因になる）
 # 見るもの:
@@ -12,17 +13,24 @@
 #       Codex : codex login status が ChatGPT でのログイン
 #       Gemini: agy にはログイン確認のサブコマンドが無いので、ログイン情報の置き場所（~/.gemini/antigravity-cli）の有無
 #               （確認は弱いので、通っても注意を出す）。あわせて端末サンドボックス（/usr/bin/sandbox-exec）を有効にできるか
+#               Gemini レビューを使うとき（LANES_REVIEW_ENGINE=gemini か --review-engine gemini）だけ、構成に gemini があるかと、
+#               agy が --sandbox・--settings・--mode plan に対応しているか（agy --help）も見る（既定の設定では見ない）
 #   - ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY 等が設定されていても、ランチャは起動時に外す（表示だけ。失敗にはしない）
 # 設定値の誤り（lanes.env が見つけたもの）も NG の 1 行として並べる（誤った値は既定に戻して残りを点検する）。
 # 足りないものは全部並べてから exit 2。全部そろえば exit 0。ログイン状態の本文（鍵の断片が混ざりうる）は表示しない。
 set -euo pipefail
 LANES_DIR="${0:A:h}"
-usage="使い方: lanes-doctor.sh [--quiet] [<worktree>]"
+usage="使い方: lanes-doctor.sh [--quiet] [--review-engine codex|claude|gemini] [<worktree>]"
 quiet=0
 worktree=""
+review_engine=""; review_engine_given=0
 while (( $# )); do
   case "$1" in
     --quiet) quiet=1; shift ;;
+    --review-engine)
+      (( $# >= 2 )) || { print -u2 -- "ERROR: --review-engine に値が無い / $usage"; exit 2; }
+      [[ "$2" == (codex|claude|gemini) ]] || { print -u2 -- "ERROR: --review-engine は codex か claude か gemini（渡されたのは '$2'）"; exit 2; }
+      review_engine="$2"; review_engine_given=1; shift 2 ;;
     -h|--help) print -r -- "$usage"; exit 0 ;;
     -*) print -u2 -- "ERROR: 不明なオプション: $1 / $usage"; exit 2 ;;
     *)
@@ -60,6 +68,8 @@ if command -v gh >/dev/null 2>&1; then ok "gh（任意）"; else note "gh（GitH
 typeset +x LANES_DEFER_CONFIG_ERROR=1
 source "$LANES_DIR/lanes.env"
 [[ -z "${LANES_CONFIG_ERROR:-}" ]] || ng "設定の誤り: $LANES_CONFIG_ERROR（誤った値は既定に戻して残りを点検した。直してから再実行する）"
+# 点検で前提にするレビュー役（--review-engine が設定に勝つ）
+(( review_engine_given )) || review_engine="${LANES_REVIEW_ENGINE:-}"
 if [[ -f "$LANES_CONF" ]]; then ok "設定ファイル: $LANES_CONF"; else note "設定ファイルが無い（既定値で動く）: $LANES_CONF"; fi
 # 司令塔（LANES_COMMANDER）は運用の印。ランチャや判定の動きは変えず、監視の回し方の案内だけを変える
 case "$LANES_COMMANDER" in
@@ -136,12 +146,38 @@ if (( roles_ok )); then
         fi ;;
     esac
   done
+  # Gemini レビュー（run-gemini-review.sh）を使うときだけ、agy の有無・サンドボックスに加えて、読み取り専用を強制するのに
+  # 要る agy のオプション（--sandbox / --settings / --mode plan）も見る。既定（レビュー役の指定が空）では何も足さない
+  if [[ "$review_engine" == gemini ]]; then
+    if ! lanes_roles_has_tool gemini; then
+      ng "Gemini レビューを使う指定（LANES_REVIEW_ENGINE / --review-engine）だが構成（LANES_TOOLS=\"$LANES_TOOLS_NORMALIZED\"）に gemini が無い。構成に gemini を足すか、指定を外す"
+    elif (( ! ${+functions[lanes_help_has_option]} )); then
+      ng "gemini レビュー: python3 が無いので agy のオプションを確かめられない"
+    elif [[ -n "${GEMINI_BIN:-}" && -f "$GEMINI_BIN" && -x "$GEMINI_BIN" ]]; then
+      gem_help="$(ANTIGRAVITY_HEADLESS=true "$GEMINI_BIN" --help < /dev/null 2>&1)" || gem_help=""
+      gem_missing=()
+      # オプション名は単語として照合する（*--mode* だと --model の行にも当たる。ランチャと同じ _common.sh の関数）
+      for option in --sandbox --settings --mode; do lanes_help_has_option "$gem_help" "$option" || gem_missing+=("$option"); done
+      if (( ! ${gem_missing[(Ie)--mode]} )) && ! lanes_agy_help_mode_has_plan "$gem_help"; then gem_missing+=("--mode plan"); fi
+      if (( ${#gem_missing} )); then
+        ng "gemini レビュー: agy が ${(j:・:)gem_missing} に対応していない。run-gemini-review.sh は読み取り専用を強制できないので起動しない（agy を新しくする）"
+      else
+        ok "gemini レビュー: agy が --sandbox・--settings・--mode plan に対応（run-review.sh は run-gemini-review.sh へ振り分ける）"
+      fi
+      unset gem_help gem_missing
+    fi
+  fi
   # 環境変数の effort が、設定ファイル（無ければ既定）と違う値で勝っているときは知らせる（ランチャも起動時に同じ注意を 1 行出す）
   if (( ${+functions[lanes_effort_override_note]} )); then
     for tool in ${(s: :)LANES_TOOLS_NORMALIZED}; do
       effort_note="$(lanes_effort_override_note "${(U)tool}_EFFORT" 2>&1)" || effort_note=""
       [[ -z "$effort_note" ]] || note "${effort_note#注意: }"
     done
+    # Gemini レビューの effort（GEMINI_REVIEW_EFFORT）も同じく（Gemini レビューを使うときだけ）
+    if [[ "$review_engine" == gemini ]]; then
+      effort_note="$(lanes_effort_override_note GEMINI_REVIEW_EFFORT 2>&1)" || effort_note=""
+      [[ -z "$effort_note" ]] || note "${effort_note#注意: }"
+    fi
   fi
 fi
 
