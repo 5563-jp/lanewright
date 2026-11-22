@@ -185,7 +185,13 @@ else
   for f in "$log" "$json" "$err" "$evidence" "$final" "$body_log"; do lanes_rotate_log "$f"; done
 fi
 mkdir -p "$logdir"
-(( ! dry )) || lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
+if (( dry )); then
+  # dry-run は lanes_mark_start（logs/ の symlink・中の symlink の検査）を通らないので、書く前に同じことを確かめる。
+  # logs/ が symlink なら書かない。<label>.dry-run.prompt.md が symlink なら、辿らずにその名前を外してから新しく作る（フォルダなら止める）
+  [[ -d "$logdir" && ! -L "$logdir" ]] || lanes_die "logs/ が本物のフォルダではない（symlink など）→ dry-run でも書かない: $logdir"
+  lanes_fresh_file "$final"
+  lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
+fi
 # レーン専用の作業場所（TMPDIR / LANES_SCRATCH）。agy に書かせてよいのはここだけ（--add-dir）。マージ後 cleanup が消す
 if (( dry )); then scratch="$(lanes_scratch_path "$wt" "$label")"; else lanes_scratch_prepare "$wt" "$label" gemini-review; scratch="$LANES_SCRATCH"; fi
 # 親は子の起動前に / へ移る（下）ので、子へ渡す場所（--add-dir・TMPDIR・GIT_CONFIG_GLOBAL）は絶対パスでなければならない
@@ -225,7 +231,7 @@ delta_note=""
 # テンプレ（Claude レビュー用を流用し、役名だけ Gemini に読み替え）+ 置き場所 + 閉じ込めの説明 + 案件固有の指示 + ランチャの追記
 # （delta の説明・前回の未解決指摘・受け入れ済みの限界・必須検証のきまり）+ 出し方（Codex レビューと同じ codex-review-focus.md）を結合して残す
 LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" python3 -I - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" \
-    "$(rvd_checks_rule)" "$delta_note" "$unresolved_note" "$(lanes_scratch_rule "$scratch")" "$focus" <<'PY'
+    "$(rvd_checks_rule)" "$delta_note" "$unresolved_note" "$(lanes_scratch_rule "$scratch")" "$focus" <<'PY' || lanes_die "結合済みプロンプト（${final:t}）を書けない（同じ名前の物が置かれている・logs/ を書けない）"
 import os, sys, pathlib
 tpl, case, out, wt, branch, head, base, mode, date, checks_rule, delta_note, unresolved, scratch_rule, focus = sys.argv[1:15]
 # 役名だけ Gemini に読み替える。実際のパス・枝名（{{WORKTREE}} など）を埋め込む前に置き換える（パス・枝名の中の文字は変えない）
@@ -241,10 +247,19 @@ extra = [p.rstrip() for p in (delta_note, unresolved, os.environ.get("LANES_ACCE
 rule = checks_rule.rstrip()
 extra.append(rule if rule.startswith("#") else "# 必須検証の成功行\n- " + rule)
 f = pathlib.Path(focus).read_text(encoding="utf-8").rstrip()
-pathlib.Path(out).write_text(t.rstrip() + "\n\n" + scratch_rule.rstrip() + "\n\n" + jail
-                             + "\n\n---\n\n# 案件固有の指示（司令塔が記入）\n\n" + c.rstrip()
-                             + "\n\n---\n\n" + "\n\n".join(extra) + "\n\n" + f
-                             + "\n\n最終行は次のいずれか1行だけ:\nVERDICT: CLEAN\nVERDICT: NEEDS_FIX\n", encoding="utf-8")
+text = (t.rstrip() + "\n\n" + scratch_rule.rstrip() + "\n\n" + jail
+        + "\n\n---\n\n# 案件固有の指示（司令塔が記入）\n\n" + c.rstrip()
+        + "\n\n---\n\n" + "\n\n".join(extra) + "\n\n" + f
+        + "\n\n最終行は次のいずれか1行だけ:\nVERDICT: CLEAN\nVERDICT: NEEDS_FIX\n")
+# 書き先は回転か lanes_fresh_file で空けてある。logs/ を symlink を辿らずに開き、その中に新しいファイルとして作る
+# （同じ名前の物が置き直されていたら・symlink なら書かずに失敗する。O_EXCL・O_NOFOLLOW）
+d = os.open(os.path.dirname(out), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    fd = os.open(os.path.basename(out), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666, dir_fd=d)
+finally:
+    os.close(d)
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    fh.write(text)
 PY
 
 # 起動単位の設定（拒否の固定の一覧。_common.sh の lanes_gemini_review_settings。利用者の設定ファイルは変えない）

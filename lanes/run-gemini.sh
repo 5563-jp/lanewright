@@ -126,7 +126,13 @@ if (( ! dry )); then
   for f in "$log" "$json" "$err" "$evidence" "$final" "$json1" "$err1"; do lanes_rotate_log "$f"; done
 fi
 mkdir -p "$logdir"
-(( ! dry )) || lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
+if (( dry )); then
+  # dry-run は lanes_mark_start（logs/ の symlink・中の symlink の検査）を通らないので、書く前に同じことを確かめる（run-gemini-review.sh と同じ）。
+  # logs/ が symlink なら書かない。<label>.dry-run.prompt.md が symlink なら、辿らずにその名前を外してから新しく作る（フォルダなら止める）
+  [[ -d "$logdir" && ! -L "$logdir" ]] || lanes_die "logs/ が本物のフォルダではない（symlink など）→ dry-run でも書かない: $logdir"
+  lanes_fresh_file "$final"
+  lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
+fi
 if (( dry )); then scratch="$(lanes_scratch_path "$wt" "$label")"; else lanes_scratch_prepare "$wt" "$label" gemini; scratch="$LANES_SCRATCH"; fi
 
 lanes_require_prompt "$prompt"
