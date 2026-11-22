@@ -30,10 +30,11 @@ Mac に入れた Claude Code・Codex・Gemini（Antigravity CLI `agy`）の CLI�
   `lanes-status.sh` が `RUNNING` / `STALLED`（止まっている疑い）/ `DONE` / `FAILED` / `DEAD`（落ちた）を 1 行で返す。
 - **レビューを飛ばせない**: 実装とは別のレーンが読み取り専用でレビューし、最終行の `VERDICT: CLEAN`（指摘なし）/ `VERDICT: NEEDS_FIX`（直しが要る）で判定する。
   途中で切れた出力や曖昧な文は「CLEAN」と見なさない。
-- **同じ確認を繰り返さない**: 2 回目からのレビューは前回からの差分だけを見る（Codex・Claude どちらのレビューも `--mode auto`）。親が同じ中身で確認コマンド（`chk-run.sh`）を通していれば、レビューは型検査・lint・単体テストを回し直さずにその記録を使う（`LANES_REVIEW_REUSE_CHECKS`）。
+- **同じ確認を繰り返さない**: 2 回目からのレビューは前回からの差分だけを見る（Codex・Claude・Gemini どのレビューも `--mode auto`）。親が同じ中身で確認コマンド（`chk-run.sh`）を通していれば、レビューは型検査・lint・単体テストを回し直さずにその記録を使う（`LANES_REVIEW_REUSE_CHECKS`）。
 - **事故を起こしにくい**: API キーではなくサブスク（月額契約）のログインでだけ起動する。全レーンで MCP（外部サービスへ AI が直接つながる仕組み）を読み込まない。
   同じ label の二重起動は拒否する。マージ後の後片付けは未保存の変更があれば止まる。
 - **道具の組み合わせを選べる**: Claude だけでも動く。Codex や Gemini を足すと役割が自動で割り振られる（[docs/roles.md](docs/roles.md)）。
+  レビュー役は `run-review.sh --engine codex|claude|gemini` で選び直せる。Gemini レビュー（読み取り専用）は選んだときだけ動き、Gemini で実装した worktree には使わない（実装と同じ道具でレビューしない）。
 
 ## 全体の流れ
 
@@ -46,7 +47,7 @@ Mac に入れた Claude Code・Codex・Gemini（Antigravity CLI `agy`）の CLI�
    ├─▶ run-impl.sh  ── 実装レーン（Claude / Gemini）── commit
    │        │ 60 秒以内に lanes-status.sh で生死を確認
    │        ▼ DONE
-   ├─▶ run-review.sh ── レビューレーン（Codex、無ければ別セッションの Claude・読み取り専用）
+   ├─▶ run-review.sh ── レビューレーン（Codex、無ければ別セッションの Claude・読み取り専用。--engine gemini で Gemini も選べる）
    │        │ VERDICT: NEEDS_FIX → 実装レーンで直す → もう一度レビュー
    │        ▼ VERDICT: CLEAN
    ├─▶ 最終の確認（chk-run.sh）→ PR 作成（証跡 evidence.md を本文に貼る）

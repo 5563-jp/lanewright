@@ -6,6 +6,46 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+0.1.8 の候補 / Candidate for 0.1.8
+
+### 足したこと / Added
+- Gemini（Antigravity CLI `agy`）でレビューするランチャ `lanes/run-gemini-review.sh`。レビュー役を Codex だけに偏らせず、別の目を足したいときに使う。
+  **選んだときだけ動く**（`run-review.sh --engine gemini` か設定の `LANES_REVIEW_ENGINE=gemini`。構成に gemini があるときだけ）。既定のレビュー役（構成で決まる Codex / Claude）は変わらない。
+  - 読み取り専用は、`agy` を `--mode plan`・`--sandbox`（端末サンドボックス）・`--settings`（起動単位の設定。利用者の設定ファイルは変えない）で起動して強制する。
+    `--settings` の拒否は固定（MCP・ファイルの書き込み・URL の読み込みと実行・Claude レビューの固定の拒否の一覧のコマンドの分＝commit・push・stash・tag・PR のマージ・デプロイ・別のエージェントの起動など）で、設定キーでは緩められない。
+    `--dangerously-skip-permissions`・`accept-edits`・`auto` は使わない。端末サンドボックスを有効にできない・`agy --help` に `--sandbox` / `--settings` / `--mode`（plan）が無い・本体 checkout なら起動しない。
+  - 守りの強さは Codex・Claude のレビューと同じ: 親の chk-run の記録の使い回し・`LANES_REVIEW_REQUIRE_CHECKS=1` の起動前の停止・API キーを外す・MCP 拒否・子の git の通信止め・
+    子の前後の比較（作業ツリー・git の管理フォルダ・git の制御ファイルを git を呼ぶ前に・全部の系列の再利用の記録・「使い回し禁止」の印。変わっていれば `NEEDS_FIX`・`EXIT:4`）。
+    加えて、stream-json の書き込み系のツール呼び出し（拒否されて書けなかった試みも含む）が 1 件でもあれば `NEEDS_FIX`・`EXIT:4`（証跡に件数）。
+  - 周回の仕組み（`review-dedup.zsh` の full / delta / 同じ HEAD の省略・未解決指摘の引き継ぎ・round 3 以降の P2/P3 の後回し・`ESCALATE`）と、
+    VERDICT・P0〜P3・GATE の判定は Claude レビューと同じ順番・同じ条件（同じ本文なら同じ判定になることをテストで確かめた）。
+  - **実装と同じ道具でレビューしない**: Gemini で実装した worktree（`logs/` に Gemini 実装の記録がある）では起動しない（`EXIT:2`。Codex か Claude のレビューを案内する）。
+    どうしても回すときだけ `--allow-same-engine`（証跡に残る）。
+  - 証跡は「## Gemini レビュー証跡（<label>）」。行の並びは Claude レビューと同じで、「- レビューエンジン: gemini」と「- 読み取り専用の確認」の行が足される。
+    出力は他のレビューと同じ（`logs/<label>.{log,json,stderr.log,prompt.md,evidence.md,last.md,pid,done}`）。
+  - 見張りは Gemini 実装と同じ（出力が止まったら `EXIT:8`、idle のまま子が無ければ `EXIT:3`、全体の上限は `--print-timeout`）。
+- `run-review.sh --engine codex|claude|gemini`（`run-impl.sh` の `--engine` と同じ流儀）。優先順は `--engine` ＞ `LANES_REVIEW_ENGINE` ＞ 構成のレビュー役。
+  構成に無い道具・知らない値は今回の失敗（`EXIT:2`）として `.done` に残す。
+- 設定キー: `LANES_REVIEW_ENGINE`（既定は空＝構成のレビュー役）・`GEMINI_REVIEW_MODEL` / `GEMINI_REVIEW_EFFORT`（既定は空＝付けない。実装用の `GEMINI_MODEL` / `GEMINI_EFFORT` とは別）・
+  `GEMINI_REVIEW_PRINT_TIMEOUT`（既定 `45m`）・`GEMINI_REVIEW_NOOUTPUT_SEC`（既定 600 秒）。`GEMINI_REVIEW_EFFORT` も、環境変数が設定ファイルに勝ったときに注意を 1 行出す。
+- `lanes-doctor.sh` は、`LANES_REVIEW_ENGINE=gemini` のときだけ、構成に gemini があるかと、`agy` が `--sandbox`・`--settings`・`--mode plan` に対応しているかも見る（既定の設定の点検結果は変わらない）。
+- `lanes-roles.sh --print` は、構成に gemini があるとき「Gemini レビューは `--engine gemini` で選べる」と案内する（`--env` の出力は変わらない）。
+- 監視（`lanes-monitor.sh`）は、Gemini レビューのレーンに `[gemini-review]` の印を付け、動いているときだけ要約に「Gemini レビュー N」を足す（Gemini 実装の数には入れない）。
+
+### 実機で確かめたこと / Verified on a real CLI
+- `agy` 1.5.14 で、使い捨ての git リポの linked worktree に、このランチャと同じ起動の仕方（`--mode plan`・端末サンドボックス・同じ `--settings`）で
+  「ファイルを作る・書き換える・`git add -A && git commit` する・`git log` する」を頼んだ。`write_file`・`edit_file` の呼び出しと commit は deny ルールで拒否され、
+  作業ツリーも HEAD も変わらなかった。result は `{"event":"result","result":{"status":"SUCCESS","response":…,"num_turns":…,"usage":…}}` の形で 1 回だけ出た。
+- 最初の試しでは deny に相対パスの `write_file(.)` を入れていて、端末サンドボックスの設定エラー（`readonly .: non-absolute file path`）になり、読み取りのコマンドまで動かなかった。
+  外して試し直すと `git log` などは動いた（ターミナルからの書き込みは作業場所の scratch に向かった）。キットの固定の一覧には相対パスを入れていない。
+- plan モードだけでは道具の呼び出しは止まらず、止めていたのは deny ルールだった。実機の stream-json の形（個人のパスを消したもの）を `lanes/tests/fixtures/gemini-review/` に残し、テストで同じ数え方をしている。
+
+### 変えたこと / Changed
+- `agy` の起動と見張り（子プロセスの記録・idle・無出力の停止）を `lanes/gemini-agy.zsh` に切り出し、`run-gemini.sh` と `run-gemini-review.sh` で同じものを使う（`run-gemini.sh` の動きは変わらない）。
+- `chk-run.sh` は `LANES_REVIEW_ENGINE` を入力の指紋に入れない（起動のときだけ渡しても親の記録を使い回せる）。
+  **上げた後は、`chk-run.sh` を 1 回通し直す**（`chk-run.sh` の中身が変わったので、前の版の確認済みの記録は 1 回だけ使えなくなる）。
+  `_common.sh` も変わったので、Codex・Claude のレビューも、上げた後の最初の 1 回は同じ HEAD でも前回の結果を使わずにレビューし直す（版を上げたときのいつもの動き）。
+
 ## [0.1.7] - Cloudflare Workers + vinext の構成の生成物があっても確認の結果を記録する / Record checks with Cloudflare Workers + vinext generated output
 
 ### 直したこと / Fixed

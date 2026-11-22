@@ -14,8 +14,9 @@
 | ④ `claude-only` | `claude` | Claude | Claude（同上） | **弱い** |
 
 - Claude は必須です（実装の主力で、③④ではレビューも担います）。
-- Gemini（Antigravity CLI `agy`）はレビューには使いません。軽い実装専用です。
+- Gemini（Antigravity CLI `agy`）は、構成のレビュー役にはなりません。実装では軽い作業を受け持ちます。
   `run-impl.sh ... --engine gemini --verify "<検証コマンド>" --allow-path <相対パス>` のように、検証コマンドと保存してよいパスを必ず渡します。
+  レビューにも使えますが、選んだときだけです（`run-review.sh --engine gemini`。下の「レビュー役を選び直す」）。
 - 割り振りの結果は変数で出ます: `LANES_PROFILE`（構成名）、`LANES_ROLE_IMPL`（`claude` か `claude gemini`）、
   `LANES_ROLE_REVIEW`（`codex` か `claude`）、`LANES_REVIEW_INDEPENDENT`（独立したレビューなら `1`、そうでなければ `0`）。
 
@@ -26,7 +27,7 @@ zsh <kit>/lanes/lanes-roles.sh --print   # 今の構成と割り振りを表示�
 zsh <kit>/lanes/lanes-doctor.sh [<worktree>]   # 起動前点検。--quiet なら問題が無いとき何も出さない。worktree を渡すと logs/ が無視されているかも見る
 zsh <kit>/lanes/run-impl.sh <worktree> <prompt.md> [label] [--engine claude|gemini] [--dry-run] \
     [gemini 用: --verify "<検証コマンド>" --allow-path <相対パス> ... --no-push]
-zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> [label] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--dry-run]
+zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> [label] [--engine codex|claude|gemini] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--dry-run]
 ```
 
 - `lanes-doctor.sh` は、構成に入っている道具が入っているか・サブスク（月額契約）でログインしているか（API キーでの起動になっていないか）を確かめ、
@@ -51,7 +52,7 @@ zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> [label] [--mode auto|full|d
 | `--force` | 同じ head でもレビューし直す |
 | `--round N` | round 3 以降の P2/P3 後回しの判定に使う（label 末尾の `-r<N>` でも可） |
 
-レビュー役（codex / claude）も再利用の条件に入るので、構成を変えたら前回の結果は使いません。
+レビュー役（codex / claude / gemini）も再利用の条件に入るので、構成やレビュー役を変えたら前回の結果は使いません。
 親が同じ中身で `chk-run.sh` を通した記録があれば、どちらのレビューでも必須検証（typecheck / lint / unit）をレビューの中で回させません
 （`LANES_REVIEW_REUSE_CHECKS`。`lanes/README.md` の 6 章「必須検証の使い回し」）。何を確かめたことになるかは確認コマンドの中身次第です。
 
@@ -60,6 +61,18 @@ zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> [label] [--mode auto|full|d
 - Claude に固定するもの: 課金・認証・本番 DB に関わる作業、重い端末作業、設計の判断が重い作業。
 - Gemini を優先してよいもの: 仕様が固まっていて、目安として 6 ファイル・400 行までの作業。
 - 迷ったら Claude。Gemini の実装もレビューは必ず通します。
+
+### レビュー役を選び直す（`--engine`・Gemini レビュー）
+
+既定のレビュー役（上の表）は変わりません。起動ごとに `run-review.sh --engine codex|claude|gemini`、いつも変えるなら設定の `LANES_REVIEW_ENGINE` で選び直せます（優先順は `--engine` ＞ `LANES_REVIEW_ENGINE` ＞ 構成）。
+構成に無い道具（例: ④で `--engine gemini`）は exit 2 で止まります。
+
+- **実装と同じ道具でレビューしない**のが原則です。同じ道具は同じところを見落としやすいからです。Gemini で実装した worktree（`logs/` に Gemini 実装の記録がある）を Gemini でレビューしようとすると、`run-gemini-review.sh` は起動せずに exit 2 で「Codex か Claude のレビューを使う」と案内します。
+  どうしても回すときだけ `--allow-same-engine` を付けます（証跡に「同じ道具のレビュー」の行が残ります）。
+- Gemini レビューが向くのは、Claude で実装した変更を、Codex とは別の目でもう 1 回見たいとき（③で Claude 以外の目を足したいときなど）です。
+- **P0 / P1 を直した後の再レビューや、認証・課金・データ削除などリスクの高い差分は、既定のレビュー役で回すのが無難です。** Gemini レビューは足す目として使い、既定のレビューの代わりにしないでください。
+- Gemini レビューの読み取り専用は、`agy` の `--mode plan`・端末サンドボックス・起動単位の設定の拒否（MCP・ファイルの書き込み・URL・commit や push などのコマンド）で強制し、前後の比較と書き込みの試みの数で確かめます（`docs/config.md`「レビュー役を選ぶ・Gemini でレビューする」）。
+  ターミナルのコマンドは作業場所（scratch）などに書けるので、作業ツリーへの書き込みは前後の比較で気づく守りです（Codex の読み取り専用の閉じ込めほど強くはありません）。
 
 ## 選び方
 
