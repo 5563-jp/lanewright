@@ -10,12 +10,18 @@
 #   ある場合だけ後回し票を保存して CLEAN へ進める。周回の上限（LANES_REVIEW_MAX_ROUNDS）を超えて CLEAN にならなければ GATE: ESCALATE。
 #   必須検証の使い回し（親の chk-run.sh の記録）・LANES_REVIEW_REQUIRE_CHECKS=1 の起動前の停止・--allow-missing-checks も同じ。
 # 再利用の記録（logs/.<系列>.review-state）の扱い（このランチャだけの単純な方式）:
-#   子（agy）を起動する直前に、その系列の記録を「確認中」（IN_PROGRESS）に書き換える（rvd_mark_in_progress）。
-#   公開ログ（<label>.last.md と <label>.log）・後回し票（該当時）・証跡（<label>.evidence.md と .log の末尾）が全部書けて、
-#   agy が 0 で終わり、VERDICT が CLEAN か NEEDS_FIX のときだけ、最後に rvd_save_state で確定する。
+#   子（agy）を起動する直前に、その系列の記録を「確認中」（IN_PROGRESS）に書き換える（rvd_mark_in_progress。前回の未解決指摘の
+#   本文を読み切ってから書き換える）。確定するのは agy が 0 で終わり、VERDICT が CLEAN か NEEDS_FIX で、読み取り専用の監査を通り、
+#   公開ログ（<label>.last.md と <label>.log）が書けたときだけ。確定の順番は、書く先（.done・証跡・ログ・後回し票・記録）の確認 →
+#   ログの末尾 → 再利用の記録（rvd_save_state）→ 証跡（<label>.evidence.md）→ 後回し票（該当時）→ 終了記録（.done を読み戻して確かめる）。
+#   合格の証跡と標準出力の表示は全部が書けてから出す。途中で失敗したら確定した分（再利用の記録・後回し票）を戻し、証跡・ログの末尾を
+#   失敗（VERDICT: NONE・EXIT:3）で書き直す（合格の表示を残さない）。後回し票は確定まで scratch の写しに足すだけ（失格の回は公開しない）。
 #   agy の失敗・見張りの停止・中断・強制終了・書き込みの試みや作業ツリーの変更（EXIT:4）・記録の書き込みの失敗では確定しない
 #   （IN_PROGRESS のまま残る）。次の起動は前回の記録を使わない（古い CLEAN で省略・delta にしない。rvd_prev_record）。
 #   前回が NEEDS_FIX だったときの未解決指摘だけは、IN_PROGRESS の記録に持ち越して次の起動へ引き継ぐ（rvd_carried_record）。
+#   終了記録（.done）の書き先がフォルダなどで書けないと分かっていれば、記録に触る前に止める（EXIT:2）。
+# 親（このランチャ）は起動の最初に / へ移る（子の agy だけを worktree で起動する）。親の python は作業場所のモジュールを読まない。
+# dry-run も logs/ とプロンプトの書き先を確かめ、symlink を辿らずに書く。
 # 同じ道具でレビューしない: この worktree の logs/ に Gemini 実装（run-gemini.sh）の記録が 1 本でもあれば起動しない（exit 2）。
 #   Codex か Claude のレビュー（run-review.sh --engine codex|claude）を使う。どうしても回すときだけ --allow-same-engine（証跡に残る）
 # 読み取り専用の強制:
@@ -217,7 +223,7 @@ if (( dry )); then
 fi
 # レーン専用の作業場所（TMPDIR / LANES_SCRATCH）。agy に書かせてよいのはここだけ（--add-dir）。マージ後 cleanup が消す
 if (( dry )); then scratch="$(lanes_scratch_path "$wt" "$label")"; else lanes_scratch_prepare "$wt" "$label" gemini-review; scratch="$LANES_SCRATCH"; fi
-# 親は子の起動前に / へ移る（下）ので、子へ渡す場所（--add-dir・TMPDIR・GIT_CONFIG_GLOBAL）は絶対パスでなければならない
+# 親は起動の最初に / へ移っているので、子へ渡す場所（--add-dir・TMPDIR・GIT_CONFIG_GLOBAL）は絶対パスでなければならない
 [[ "$scratch" == /* ]] || lanes_die "scratch の置き場所が絶対パスでない: $scratch（LANES_SCRATCH_ROOT を絶対パスで書く）"
 
 lanes_check_gemini_subscription
@@ -323,7 +329,8 @@ guard_before="$(rvd_git_guard "$wt")" || lanes_die "レビュー前の git 管�
 git_fp_before="$(lanes_git_ctl_fingerprint "$wt" "$gitdir" "$gitcommon")" || lanes_die "起動前の git 制御ファイルの確認に失敗"
 # 子を起動する直前に、この系列の記録を確認中（IN_PROGRESS）にする。ここから先で確定（rvd_save_state）まで進めずに終わったら、
 # 次の起動は前回の記録（古い CLEAN を含む）を使わない。前回 NEEDS_FIX の未解決指摘だけは持ち越す
-rvd_mark_in_progress "$logdir" "$series" "$round" "$label" "$record" "$prev_v" || lanes_die "再利用の記録（logs/.$series.review-state）を確認中にできない"
+rvd_mark_in_progress "$logdir" "$series" "$round" "$label" "$record" "$prev_v" \
+  || lanes_die "再利用の記録（logs/.$series.review-state）を確認中にできない（記録を読めない・書けない、または前回の未解決指摘の本文を読めない）。記録は変えていない"
 started="$(lanes_now)"; t0=$(date +%s)
 
 # レビューの子から push（と fetch）をできなくする（読み取り専用の役。git の通信は要らない）
@@ -519,7 +526,8 @@ PY
 )" || inline=""
   if [[ "$inline" == 'VERDICT: CLEAN' || "$inline" == 'VERDICT: NEEDS_FIX' ]]; then
     inline_copy="$(mktemp "${LANES_SCRATCH%/}/verdict-inline.XXXXXX")" || inline_copy=""
-    if [[ -n "$inline_copy" ]] && { cat -- "$body_log"; print -r -- ""; print -r -- "$inline"; } > "$inline_copy"; then
+    # 写しは本文を読み切れたときだけ使う（cat の失敗を最後の print の成功で隠さない。本文の無い写しで判定を作らない）
+    if [[ -n "$inline_copy" ]] && { cat -- "$body_log" && print -r -- "" && print -r -- "$inline"; } > "$inline_copy"; then
       again="$(lanes_extract_verdict "$inline_copy")"
       if [[ "$again" == 'VERDICT: CLEAN' || "$again" == 'VERDICT: NEEDS_FIX' ]]; then
         verdict="$again"; verdict_note="本文の途中の独立した行の VERDICT を採用（${inline#VERDICT: }）"
@@ -642,7 +650,7 @@ evidence_text() {
   print -- "- 読み取り専用の確認: 書き込みの試み ${writes_n} 件${write_tools:+（$write_tools）}（1 件でもあれば不合格）/ 承認・質問ツール ${asks_n} 回 / agy: $gstatus・終了コード $agy_rc / JSON の不備 ${invalid_n} 件${invalid_kinds:+（$invalid_kinds）} / 見張り: $stop_line"
   [[ -z "$same_engine_line" ]] || print -r -- "$same_engine_line"
   print -- "- 実行: $started 開始 / 約 ${elapsed} 分 / EXIT:$2"
-  [[ -z "${3:-}" ]] || print -r -- "- 記録の確定: できなかった（$3）。再利用の記録は確定していない（確認中（IN_PROGRESS）のまま。次の起動は前回の結果を使わずに回す）"
+  [[ -z "${3:-}" ]] || print -r -- "- 記録の確定: できなかった（$3）。再利用の記録は確定していない（次の起動は前回の結果を使わずに回す）"
   print -- "- HEAD: $head → $head_after / 内容・履歴・条件の変更検出 $dirty（0=なし、1=あり）"
   print -- "- ログ: $log（本文）/ $body_log（最後の応答）/ $json（生）/ $final（渡した全文）"
   print -- "- 作業場所（scratch）: $scratch（${LANES_BASE_BRANCH:-develop} へのマージ後の cleanup で削除）"
@@ -708,7 +716,7 @@ elif (( finalize )); then
   fi
 fi
 if [[ -n "$fail_reason" ]]; then
-  print -u2 -- "→ $fail_reason。再利用の記録は確定しない（確認中（IN_PROGRESS）のまま）。logs/ の権限・空きを確かめて回し直す"
+  print -u2 -- "→ $fail_reason。再利用の記録は確定しない（次の起動は前回の結果を使わずに回す）。logs/ の権限・空きを確かめて回し直す"
   (( final_rc != 0 )) || final_rc=3
   done_verdict="VERDICT: NONE"; done_note+=" / $fail_reason"
   # 確定まで進めた分を元に戻す。再利用の記録は確認中へ（戻せなければ消す＝次の起動は前回の記録を使わない）、後回し票は公開前の中身へ
