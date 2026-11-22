@@ -21,6 +21,8 @@
 #   前回が NEEDS_FIX だったときの未解決指摘だけは、IN_PROGRESS の記録に持ち越して次の起動へ引き継ぐ（rvd_carried_record）。
 #   終了記録（.done）の書き先がフォルダなどで書けないと分かっていれば、記録に触る前に止める（EXIT:2）。
 # 親（このランチャ）は起動の最初に / へ移る（子の agy だけを worktree で起動する）。親の python は作業場所のモジュールを読まない。
+#   その前に、必須検証の使い回しの問い合わせ（chk-run.sh --query）を起動元の場所・環境のまま済ませ（親の chk-run.sh と同じ条件で照合する）、
+#   相対パスで書いた設定（LANES_CONF・LANES_SCRATCH_ROOT・パスの *_BIN）を起動元を基準に絶対パスへ直す。
 # dry-run も logs/ とプロンプトの書き先を確かめ、symlink を辿らずに書く。
 # 同じ道具でレビューしない: この worktree の logs/ に Gemini 実装（run-gemini.sh）の記録が 1 本でもあれば起動しない（exit 2）。
 #   Codex か Claude のレビュー（run-review.sh --engine codex|claude）を使う。どうしても回すときだけ --allow-same-engine（証跡に残る）
@@ -74,12 +76,22 @@ while (( $# )); do
 done
 wt="${wt:A}"; prompt="${prompt:A}"
 [[ -n "$label" ]] || label="${prompt:t:r}"
-# 親（このランチャ）は、引数のパスを絶対パスに決めた直後に / へ移る。対象の worktree の中から呼ばれても、親が動かす python
-# （_common.sh・review-dedup.zsh の判定や記録）が作業場所の中の同じ名前のモジュール（json.py など）を読まないようにする。
+# 必須検証の使い回しの問い合わせ（chk-run.sh --query）は、親が chk-run.sh を回したのと同じ場所・同じ環境で、/ へ移る前・
+# 設定のパスを絶対パスに直す前に呼ぶ（Codex・Claude のレビューと同じ）。指紋には環境変数（相対パスで書いた LANES_CONF もそのままの値）が
+# 入り、相対パスの CHK_CACHE は今の場所から探すので、ここで値や場所を変えると、同じ中身でも記録と合わなくなる（input-changed・no-record）。
+# 問い合わせの中の python（chk-run.sh の read_state）は -I の分離モードで動き、worktree の json.py などを読まない。
+# scratch や git の通信止めを export する前でもある。ランチャの記録（logs/ の直下の .pid・ログ・起動ログなど）は指紋に入らない
+rvd_checks_query "$LANES_DIR" "$wt"
+# 親（このランチャ）は、引数のパスを絶対パスに決めて問い合わせを済ませた直後に / へ移る。対象の worktree の中から呼ばれても、親が動かす
+# python（_common.sh・review-dedup.zsh の判定や記録）が作業場所の中の同じ名前のモジュール（json.py など）を読まないようにする。
 # 子（agy）だけを worktree で起動する（gemini-agy.zsh の run_agy_once）。以後の git は必ず -C "$wt" で呼ぶ。
-# 今の場所からの相対パスで書いた設定（LANES_CONF・パスで書いた GEMINI_BIN）は、移る前に絶対パスに直す（PATH で探す名前だけの値はそのまま）
+# 今の場所からの相対パスで書いた設定（LANES_CONF・LANES_SCRATCH_ROOT・パスで書いた GEMINI_BIN / CLAUDE_BIN / CODEX_BIN）は、移る前に
+# 起動元の場所を基準に絶対パスに直す（/ を基準に読まない・作らない。PATH で探す名前だけの値はそのまま）
 [[ -z "${LANES_CONF:-}" || "$LANES_CONF" == /* ]] || LANES_CONF="${LANES_CONF:a}"
+[[ -z "${LANES_SCRATCH_ROOT:-}" || "$LANES_SCRATCH_ROOT" == /* ]] || LANES_SCRATCH_ROOT="${LANES_SCRATCH_ROOT:a}"
 [[ -z "${GEMINI_BIN:-}" || "$GEMINI_BIN" == /* || "$GEMINI_BIN" != */* ]] || GEMINI_BIN="${GEMINI_BIN:a}"
+[[ -z "${CLAUDE_BIN:-}" || "$CLAUDE_BIN" == /* || "$CLAUDE_BIN" != */* ]] || CLAUDE_BIN="${CLAUDE_BIN:a}"
+[[ -z "${CODEX_BIN:-}" || "$CODEX_BIN" == /* || "$CODEX_BIN" != */* ]] || CODEX_BIN="${CODEX_BIN:a}"
 builtin cd -q /
 # ここから排他を取るまでの誤り（--mode・--round・--base の値など）は、取れれば今回の .done に残す（前回の DONE を残したまま止まらない）
 lanes_early_target "$wt" "$label" "$dry"
@@ -95,9 +107,7 @@ else
     || lanes_die "比較起点 origin/${LANES_BASE_BRANCH:-develop} が無い。その枝の無い repo では --base <sha|branch> を指定する（統合先は LANES_BASE_BRANCH で変えられる）"
 fi
 review_base="$base"
-# 必須検証の使い回しの問い合わせ。指紋に環境変数が入るので、scratch や git の通信止めを export する前に、
-# 親が chk-run.sh を回したのと同じ環境で呼ぶ。ランチャの記録（logs/ の直下の .pid・ログ・起動ログなど）は指紋に入らない
-rvd_checks_query "$LANES_DIR" "$wt"
+# 必須検証の使い回しの問い合わせの結果（問い合わせは / へ移る前に済ませた）
 [[ "$RVD_CHECKS_REUSE" == yes ]] && LANES_REVIEW_CHECKS_REUSED=1 || LANES_REVIEW_CHECKS_REUSED=0
 checks_key="$(rvd_checks_key)"
 
@@ -225,9 +235,12 @@ if (( dry )); then
   lanes_fresh_file "$final"
   lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
 fi
-# レーン専用の作業場所（TMPDIR / LANES_SCRATCH）。agy に書かせてよいのはここだけ（--add-dir）。マージ後 cleanup が消す
+# レーン専用の作業場所（TMPDIR / LANES_SCRATCH）。agy に書かせてよいのはここだけ（--add-dir）。マージ後 cleanup が消す。
+# 親は起動の最初に / へ移っているので、子へ渡す場所（--add-dir・TMPDIR・GIT_CONFIG_GLOBAL）は絶対パスでなければならない。
+# 相対パスで書いた LANES_SCRATCH_ROOT は / へ移る前に起動元を基準に絶対パスへ直してある。それでも絶対パスでなければ、フォルダや .lane を
+# 作る前に止める（/ を基準に作らない）
+[[ "$LANES_SCRATCH_ROOT" == /* ]] || lanes_die "LANES_SCRATCH_ROOT が絶対パスでない: '$LANES_SCRATCH_ROOT'（絶対パスで書く）→ scratch を作らずに止める"
 if (( dry )); then scratch="$(lanes_scratch_path "$wt" "$label")"; else lanes_scratch_prepare "$wt" "$label" gemini-review; scratch="$LANES_SCRATCH"; fi
-# 親は起動の最初に / へ移っているので、子へ渡す場所（--add-dir・TMPDIR・GIT_CONFIG_GLOBAL）は絶対パスでなければならない
 [[ "$scratch" == /* ]] || lanes_die "scratch の置き場所が絶対パスでない: $scratch（LANES_SCRATCH_ROOT を絶対パスで書く）"
 
 lanes_check_gemini_subscription
