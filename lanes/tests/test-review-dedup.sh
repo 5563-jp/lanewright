@@ -435,7 +435,8 @@ def main_only(name):
     (wt / 'a.txt').write_text('変更'); git(wt, 'commit', '-qam', 'test: 変更')
     return wt, first
 def dry(script, wt, label, *args):
-    env = dict(os.environ, RVD_CAPTURE=str(root / 'unused.json'), RVD_PROMPT=str(prompt), RVD_WT=str(wt), CHK_CACHE=str(root / 'chk-cache' / 'passed.tsv'))
+    # 本番の起動（launch）と同じ環境にそろえる（呼び出し元の LANES_CHECK_CMD などが残っていると、再利用の条件が本番の起動とずれる）
+    env = dict(launch_env(wt, '', '', '', 0, None), RVD_CAPTURE=str(root / 'unused.json'))
     return subprocess.run(['zsh', '-f', str(lanes / script), str(wt), str(prompt), label, *args, '--dry-run'],
                           env=env, capture_output=True, text=True, timeout=30)
 wt, first = main_only('main-only')

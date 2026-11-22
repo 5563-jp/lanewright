@@ -9,7 +9,8 @@
 #   3. 1 のときでも、記録を使えるなら起動する。値は chk-run.sh の入力の指紋に入らない（chk-run.sh は値なしで通し、
 #      起動のときだけ環境変数で 1 を渡しても記録が合う）。止まった後に chk-run.sh を通せば、同じ label でやり直せる
 #   4. --allow-missing-checks を付けた起動は記録なしで回り、証跡にその旨が残る
-#   5. 1 のときでも、確認コマンドが未設定の案件・LANES_REVIEW_REUSE_CHECKS=0・問い合わせの失敗などは止めない
+#   5. 1 のときでも、確認コマンドが未設定の案件・LANES_REVIEW_REUSE_CHECKS=0・記録の後で照合できなくなった（unresolvable など）は止めない。
+#      問い合わせそのものの失敗（query-failed）は止める（記録を確かめられないまま「必須検証あり」として起動しない）
 #   6. 前回 CLEAN の後で記録が合わなくなったら、同じ head でも前回の結果を使わずに止める（抜け道を付ければ回る）
 #   7. 入口（run-review.sh）経由でも、Claude のレビュー（run-claude-review.sh）でも同じ。入口は --allow-missing-checks を渡す
 #   8. --dry-run でも止まる。値は 0 か 1 だけ（ほかの値は設定の誤りとして止まる）
@@ -181,15 +182,15 @@ t() {   # <REQUIRE> <REUSE> <理由> <allow> → block / pass と、抜け道を
   local -a msg_lines
   if rvd_checks_block "$4"; then msg_lines=("${(@f)RVD_CHECKS_BLOCK}"); print -r -- "block allowed=$RVD_CHECKS_ALLOWED lines=${#msg_lines}"; else print -r -- "pass allowed=$RVD_CHECKS_ALLOWED msg=[$RVD_CHECKS_BLOCK]"; fi
 }
-for r in no-record uncommitted input-changed; do t 1 no "$r" 0; t 1 no "$r" 1; t 0 no "$r" 0; done
-for r in no-check cache-link unresolvable state-error '問い合わせに失敗（exit 3）' 'chk-run.sh が無い' '答えの形が不正' ''; do t 1 no "$r" 0; done
+for r in no-record uncommitted input-changed query-failed; do t 1 no "$r" 0; t 1 no "$r" 1; t 0 no "$r" 0; done
+for r in no-check cache-link unresolvable state-error 'chk-run.sh が無い' ''; do t 1 no "$r" 0; done
 t 1 yes '' 0; t 1 off 'LANES_REVIEW_REUSE_CHECKS=0' 0
 UNIT
 out="$(zsh -f "$T/unit.zsh" "$LANES_DIR" 2>&1)" || { print -u2 -r -- "$out"; fail "関数単体の確認が失敗"; }
-want_unit="$(for i in 1 2 3; do print -r -- 'block allowed=0 lines=1'; print -r -- 'pass allowed=1 msg=[]'; print -r -- 'pass allowed=0 msg=[]'; done
-  for i in 1 2 3 4 5 6 7 8 9 10; do print -r -- 'pass allowed=0 msg=[]'; done)"
+want_unit="$(for i in 1 2 3 4; do print -r -- 'block allowed=0 lines=1'; print -r -- 'pass allowed=1 msg=[]'; print -r -- 'pass allowed=0 msg=[]'; done
+  for i in 1 2 3 4 5 6 7 8; do print -r -- 'pass allowed=0 msg=[]'; done)"
 [[ "$out" == "$want_unit" ]] || { print -u2 -r -- "$out"; fail "止める・止めないの振り分けが違う"; }
-pass "振り分け: 3 つの理由だけを止め（文言は 1 行）、確認コマンドなし・照合できない・問い合わせの失敗・記録あり・問い合わせなしは止めない"
+pass "振り分け: 4 つの理由（記録なし・未 commit・入力の変化・問い合わせの失敗）だけを止め（文言は 1 行）、確認コマンドなし・照合できない・記録あり・問い合わせなしは止めない"
 
 # ---- 9. 入口（run-review.sh）経由でも、Claude のレビューでも同じ。入口は --allow-missing-checks を渡す ----
 rrun run-review.sh "$b" r9 --base origin/develop

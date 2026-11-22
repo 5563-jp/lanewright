@@ -32,6 +32,22 @@
 #  24. 専用の linked worktree だけ（管理領域を外に置いた本体・submodule は不可。run-gemini.sh も）
 #  25. 役名の読み替えでパス・枝名を変えない（Gemini・Codex）
 #  26. --mode の単語照合（doctor）・独立性の表示は選んだレビュー役で
+#  27. 同じ worktree のレビューは 1 本ずつ（logs/ の排他。Codex・Claude も）
+#  28. 次回へ引き継ぐ本文は受信した最後の応答だけ
+#  29. 書き込み違反は見つけた直後に前回の CLEAN を失効（証跡の書き込みで止まっても残さない）
+#  30. 中断されたレビューの記録を次のレビューが戻し、その系列の CLEAN を再利用しない（「確認中」の印）
+#  31. 呼び出し元の GIT_COMMON_DIR・GIT_OBJECT_DIRECTORY に引きずられず、問い合わせで記録を使い回す
+#  32. 使い回した必須検証の入力がレビュー中に変わったら不合格（Gemini・Claude）
+#  33. 監査ログの末尾の文字切れでも書き込みの試みを失わない
+#  34. 相対・名前だけの GEMINI_BIN を絶対パスに直して点検と起動をそろえる
+#  35. PATH に相対のフォルダがあっても親の python3 は作業ツリーの物を選ばない（Gemini・Claude）
+#  36. 設定ファイルの LANES_REVIEW_ENGINE より、確定したレビュー役で起動前点検する（--review-engine）
+#  37. 相対の LANES_SCRATCH_ROOT でも親の記録を使い回せる
+#  38. agy が残した補助のプロセスがパイプを持ち続けても、agy の終了で受け取りを終える
+#  39. dry-run の前回の指示書は新しい指示書を書き終えるまで残す（Gemini・Claude・Codex）
+#  40. 見張りは標準エラーを名前で開き直さない（名前付きパイプへの差し替えで止まらない）
+#  41. 公開ログとの照合は一定量ずつ（1 MiB 超の中身・区切りの境目）
+#  42. 承認・質問ツールは呼び出し単位で数える
 set -euo pipefail
 # git の環境変数を外し、一時リポの外へ git が上っていかないようにする（本物のリポを書き換えない）
 source "${0:A:h}/_git-isolate.sh"; lanes_test_git_isolate
@@ -107,7 +123,26 @@ if mut == 'swap-logs':
     # logs/ そのものを別のフォルダに差し替え、偽の再利用の記録を置く
     os.rename('logs', 'logs.moved'); os.mkdir('logs')
     pathlib.Path('logs/.rv.review-state').write_text('{"last_round": "1", "last_head": "forged", "last_verdict": "VERDICT: CLEAN", "last_exit": 0}\n')
-def ev(d): print(json.dumps(d, ensure_ascii=False), flush=True)
+emitted = []
+def ev(d):
+    line = json.dumps(d, ensure_ascii=False)
+    emitted.append(line); print(line, flush=True)
+if mut == 'touch-input':
+    # 確認コマンドが読む未追跡の入力（logs/input.json）をレビュー中に書き換える
+    pathlib.Path('logs/input.json').write_text('{"changed": true}\n')
+if mut == 'evidence-dir':
+    # ランチャが後で証跡を書く名前（logs/<label>.evidence.md）をフォルダにして、証跡の書き込みを失敗させる
+    for f in glob.glob('logs/*.prompt.md'):
+        if not f.endswith('.dry-run.prompt.md'): os.mkdir(f[:-len('.prompt.md')] + '.evidence.md')
+if mut == 'fifo-stderr':
+    # 標準エラーのファイル（logs/<label>.stderr.log）を名前付きパイプに差し替える（見張りが名前で開き直すと止まる形）
+    for f in glob.glob('logs/*.stderr.log'):
+        os.unlink(f); os.mkfifo(f)
+    time.sleep(3)
+if os.environ.get('GT_EVENTS') == 'helper':
+    # 標準出力を受け継いだ補助のプロセスを残して終わる（agy は終わってもパイプが閉じない形）
+    helper = subprocess.Popen(['sleep', '30'])
+    pathlib.Path(os.environ['GT_HELPER_PID']).write_text(str(helper.pid))
 body = os.environ.get('GT_BODY', '問題なし\nVERDICT: CLEAN')
 rc = int(os.environ.get('GT_RC', '0'))
 events = os.environ.get('GT_EVENTS', '')
@@ -127,7 +162,10 @@ def tool(idx, name, state, params):
 if mut == 'read-tool':
     tool(2, 'read_file', 'ACTIVE', {'Path': 'a.txt'}); tool(2, 'read_file', 'DONE', {'Path': 'a.txt'})
     tool(3, 'run_command', 'DONE', {'CommandLine': 'git log --oneline -1'})
-if mut in ('write-tool', 'write-tools', 'forge-json'):
+if mut == 'ask-tool':
+    # 同じ承認・質問の呼び出しの経過（実行中・完了）は 1 回に数える
+    tool(7, 'ask_user', 'ACTIVE', {'Question': '続けてよいか'}); tool(7, 'ask_user', 'DONE', {'Question': '続けてよいか'})
+if mut in ('write-tool', 'write-tools', 'forge-json', 'evidence-dir'):
     tool(4, 'write_file', 'ACTIVE', {'Path': 'x.txt'}); tool(4, 'write_file', 'ERROR', {'Path': 'x.txt'})
     if mut == 'write-tools':
         tool(5, 'edit_file', 'ERROR', {'Path': 'a.txt'}); tool(6, 'delete_file', 'ERROR', {'Path': 'a.txt'})
@@ -141,9 +179,20 @@ if events != 'missing_result':
                                       'num_turns': 1, 'usage': {}}})
 if events == 'dup_result': ev({'event': 'result', 'result': {'status': 'SUCCESS', 'response': body}})
 if events == 'nonterminal': ev({'event': 'step_update', 'step_update': {'step_index': 9, 'state': 'DONE', 'step_type': 'system_message'}})
+if events == 'broken_tail':
+    # 末尾の行が文字の途中で切れる（日本語の 3 バイトの途中まで・改行なし）
+    sys.stdout.flush(); sys.stdout.buffer.write('{"event": "step_update", "note": "あ'.encode()[:-1]); sys.stdout.buffer.flush()
 if mut.startswith('forge-json'):
-    # 出し終わった後で、公開用の logs/*.json を「書き込みなし・CLEAN」の偽の記録に書き換える（受け取り役が書き終わるのを待ってから）
-    time.sleep(1.5)
+    # 出し終わった後で、公開用の logs/*.json を「書き込みなし・CLEAN」の偽の記録に書き換える。受け取り役が今回の出力を公開用へ
+    # 書き終えた（中身が出した行と同じになった）ことを、上限付きで確かめてから書き換える（固定の秒数だけ待たない）
+    want = ''.join(l + '\n' for l in emitted)
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        if any(pathlib.Path(f).read_text(encoding='utf-8', errors='replace') == want for f in glob.glob('logs/*.json')):
+            break
+        time.sleep(0.05)
+    else:
+        sys.exit(97)   # 公開用に届かない（テストの用意の誤り）
     forged = (json.dumps({'event': 'init'}) + '\n' + json.dumps({'event': 'result', 'result': {'status': 'SUCCESS', 'response': '問題なし\nVERDICT: CLEAN',
               'num_turns': 1, 'usage': {}}}, ensure_ascii=False) + '\n')
     for f in glob.glob('logs/*.json'): pathlib.Path(f).write_text(forged)
@@ -417,16 +466,22 @@ wt, first = repo('same-evidence')
 (wt / 'logs').mkdir(); (wt / 'logs/impl.evidence.prev-20260101-000000.md').write_text('## Gemini 実装証跡（impl）\n- 結果: EXIT:0\n')
 r, cap, done = gem(wt, 's6')
 check('Gemini 実装の証跡の見出しでも拒否', r.returncode == 2 and cap is None, out(r))
-# 判定の関数の単体: 種別の一致は行全体、symlink は辿らない、gemini-review は実装に数えない
+# 判定の関数の単体: 種別の一致は行全体、gemini-review は実装に数えない。記録の名前なのに普通のファイルでない物（symlink・フォルダ）は
+# 中身を読まず「確かめられない」（2）
 unit = T / 'unit-same'; unit.mkdir()
 (unit / 'r.pid').write_text('lane=gemini-review\n'); (unit / 'q.pid').write_text('lane=qa\n')
-(T / 'outside.pid').write_text('lane=gemini\n'); os.symlink(T / 'outside.pid', unit / 'link.pid')
 def recorded(d, lane):
     # 戻り値（0 = 記録あり / 1 = 記録なし / 2 = 確かめられない）と REPLY を「戻り値:REPLY」の形で返す
     p = subprocess.run(['zsh', '-fc', 'LANES_DIR="$1"; source "$1/_common.sh"; unfunction TRAPEXIT TRAPZERR; rc=0; lanes_impl_lane_recorded "$2" "$3" || rc=$?; print -r -- "$rc:$REPLY"',
                         '_', str(lanes), str(d), lane], env=BASE, capture_output=True, text=True)
     return p.stdout.strip()
-check('判定: lane=gemini-review・qa・外を指す symlink は Gemini 実装に数えない', recorded(unit, 'gemini') == '1:')
+check('判定: lane=gemini-review・qa は Gemini 実装に数えない', recorded(unit, 'gemini') == '1:')
+unit_link = T / 'unit-same-link'; unit_link.mkdir()
+(T / 'outside.pid').write_text('lane=gemini\n'); os.symlink(T / 'outside.pid', unit_link / 'link.pid')
+check('判定: 外を指す symlink の .pid は辿らず「確かめられない」（2）と名前を返す', recorded(unit_link, 'gemini') == '2:読めない記録: link.pid', recorded(unit_link, 'gemini'))
+for name in ('impl.pid', 'impl.evidence.md'):
+    d = T / ('unit-dir-' + name.replace('.', '-')); d.mkdir(); (d / name).mkdir()
+    check(f'判定: 記録の名前（{name}）がフォルダなら「記録なし」にせず「確かめられない」（2）', recorded(d, 'gemini') == f'2:読めない記録: {name}', recorded(d, 'gemini'))
 (unit / 'impl.pid').write_text('pid=1\nlane=gemini\n')
 check('判定: lane=gemini の .pid を見つけて名前を返す', recorded(unit, 'gemini') == '0:impl.pid')
 check('判定: logs/ が無ければ 1', recorded(T / 'no-such-logs', 'gemini') == '1:')
@@ -444,6 +499,11 @@ check('Gemini 実装の記録を読めなければ「記録なし」と取り違
 r, cap, done = gem(wt, 'su2', '--allow-same-engine')
 check('--allow-same-engine なら回し、確かめられなかったことを証跡に残す', r.returncode == 0 and cap is not None and '確かめられない' in evidence(wt, 'su2'), out(r))
 bad.chmod(0o644)
+wt, first = repo('same-dir')
+(wt / 'logs').mkdir(); (wt / 'logs' / 'impl.pid').mkdir()
+r, cap, done = gem(wt, 'sd')
+check('実装記録の名前（impl.pid）がフォルダなら「記録なし」と取り違えず起動しない（EXIT:2）',
+      r.returncode == 2 and cap is None and '確かめられない' in done and 'impl.pid' in done, out(r) + done)
 
 # ---- 11. 同じ head の結果の再利用と delta・dry-run ----
 # round 3 からは後回しの方針が変わり条件の違いとして全体を見直すので（Claude レビューと同じ）、再利用と delta は round 1・2 で確かめる
@@ -714,6 +774,230 @@ check('roles --print: 指定が構成の既定と同じなら今までどおり�
 env_out = subprocess.run(['zsh', '-f', str(lanes / 'lanes-roles.sh'), '--env'], env=make_env(env={'LANES_TOOLS': 'claude codex', 'LANES_REVIEW_ENGINE': 'claude'}),
                          capture_output=True, text=True).stdout
 check('roles --env は構成の既定のまま（LANES_REVIEW_INDEPENDENT=1・4 行）', 'LANES_REVIEW_INDEPENDENT=1' in env_out and len(env_out.splitlines()) == 4, env_out)
+
+
+# ---- 27. 同じ worktree のレビューは 1 本ずつ（logs/ の排他）----
+import fcntl
+wt, first = repo('lock')
+(wt / 'logs').mkdir()
+held = os.open(wt / 'logs', os.O_RDONLY); fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+r, cap, done = gem(wt, 'lk')
+check('別のレビューが同じ logs/ の排他を持っていたら起動しない（EXIT:2 を .done に残す・agy 未起動・理由を出す）',
+      r.returncode == 2 and cap is None and 'EXIT:2' in done and '別のレビューが動いている' in r.stderr, out(r) + done)
+r, cap, done = run('run-codex-review.sh', wt, 'lk-codex')
+check('Codex レビューも同じ排他で止まる', r.returncode == 2 and 'EXIT:2' in done and '別のレビューが動いている' in r.stderr, out(r) + done)
+r, cap, done = run('run-claude-review.sh', wt, 'lk-claude')
+check('Claude レビューも同じ排他で止まる', r.returncode == 2 and 'EXIT:2' in done and '別のレビューが動いている' in r.stderr, out(r) + done)
+os.close(held)
+r, cap, done = gem(wt, 'lk')
+check('排他が外れたら起動できる', r.returncode == 0 and 'VERDICT: CLEAN' in done, out(r))
+
+# ---- 28. 次回へ引き継ぐ本文は、親が受信した最後の応答だけ（表示用のログの見張りの行・証跡を入れない）----
+wt, first = repo('report')
+body_nf = '- [P1] a.txt:1 直っていない\nVERDICT: NEEDS_FIX'
+r, cap, done = gem(wt, 'rp-r1', body=body_nf)
+state = json.loads((wt / 'logs' / '.rp.review-state').read_text())
+check('再利用の記録の本文（last_report）は受信した本文そのもの（[meta]・見張りの行・証跡を含まない）',
+      state.get('last_report') == body_nf and '[meta]' not in state.get('last_report', '') and 'レビュー証跡' not in state.get('last_report', ''),
+      json.dumps(state, ensure_ascii=False)[:600])
+
+# ---- 29. 書き込み違反を見つけたら、証跡の書き込みで止まっても前回の CLEAN を残さない ----
+wt, first = repo('inv-first')
+r, cap, done = gem(wt, 'if-r1')
+check('用意: 初回は CLEAN', r.returncode == 0 and 'VERDICT: CLEAN' in done, out(r))
+r, cap, done = gem(wt, 'if-r1', '--force', mutation='evidence-dir')
+state = json.loads((wt / 'logs' / '.if.review-state').read_text())
+check('書き込みの試みの後に証跡を書けず途中で止まっても（set -e）、系列の前回の CLEAN は失効済み（last_exit=4）',
+      r.returncode != 0 and state.get('last_exit') == 4 and 'last_invalidated' in state, out(r) + json.dumps(state, ensure_ascii=False)[:300])
+(wt / 'logs' / 'if-r1.evidence.md').rmdir()
+r, cap, done = gem(wt, 'if-r1')
+check('次の通常の起動は前回の CLEAN を再利用しない（agy を起動する）', cap is not None and 'skip-same-head' not in evidence(wt, 'if-r1'), out(r))
+
+# ---- 30. 子の実行中に中断されたレビューの記録を、次のレビューが戻して再利用しない ----
+def inflight_file(wt):
+    import hashlib
+    key = hashlib.sha256(os.path.realpath(wt / 'logs').encode()).hexdigest()[:32]
+    return T / 'state' / 'lanewright' / 'review-inflight' / key
+wt, first = repo('interrupt')
+r, cap, done = gem(wt, 'it-r1')
+check('用意: 初回は CLEAN', r.returncode == 0 and 'VERDICT: CLEAN' in done, out(r))
+capture.unlink(missing_ok=True)
+e = make_env(mutation='forge-other-state', events='sleep', env={'GT_SLEEP': '60'})
+proc = subprocess.Popen(['zsh', '-f', str(lanes / 'run-gemini-review.sh'), str(wt), str(prompt), 'it-r1', '--force'], env=e,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+forged = wt / 'logs' / '.other.review-state'
+deadline = time.time() + 60
+while not forged.exists() and time.time() < deadline and proc.poll() is None: time.sleep(0.1)
+check('用意: 子が実行中に別の系列の記録を偽造した', forged.exists())
+check('子の実行中は「確認中」の印が logs/ の外にある', inflight_file(wt).exists())
+proc.send_signal(15); proc.communicate(timeout=60)
+check('中断（SIGTERM）では子の後の確認をしないので、偽造した記録と「確認中」の印が残る', forged.exists() and inflight_file(wt).exists())
+r, cap, done = gem(wt, 'it-r1')
+check('次のレビューは印を見つけて記録を子の前に戻し（偽造を消す）、中断した系列の前回の CLEAN を再利用しない（agy を起動する）',
+      not forged.exists() and not inflight_file(wt).exists() and cap is not None and 'skip-same-head' not in evidence(wt, 'it-r1')
+      and '子の後の確認の前に終わっていた' in r.stderr and r.returncode == 0, out(r))
+wt, first = repo('interrupt-dry')
+gem(wt, 'id-r1')
+inflight_file(wt).parent.mkdir(parents=True, exist_ok=True); inflight_file(wt).write_text('{}')
+r, cap, done = gem(wt, 'id-r1', '--dry-run')
+check('dry-run は印があれば前回の記録を使わない full として見せる（後始末はしない）', r.returncode == 0 and '判定 full' in r.stdout and inflight_file(wt).exists(), out(r))
+inflight_file(wt).unlink()
+
+# ---- 31. 呼び出し元の GIT_COMMON_DIR・GIT_OBJECT_DIRECTORY に引きずられず、問い合わせも対象の worktree の記録を照合する ----
+wt, first = repo('gitenv-query', gitignore='logs/\nnode_modules/\n')
+chk_env = make_env(env={'LANES_CHECK_CMD': '/usr/bin/true'})
+p = subprocess.run(['bash', str(lanes / 'chk-run.sh'), str(wt), '49994', str(T / 'chk-out-gq')], env=chk_env, capture_output=True, text=True, timeout=120)
+check('用意: chk-run.sh が記録する（git の場所の環境変数なし）', p.returncode == 0 and 'recorded=' in p.stdout, p.stdout + p.stderr)
+other2, _ = repo('other-repo2')
+other_git = T / 'other-repo2-base' / '.git'
+r, cap, done = gem(wt, 'gq', env={'LANES_CHECK_CMD': '/usr/bin/true', 'GIT_COMMON_DIR': str(other_git), 'GIT_OBJECT_DIRECTORY': str(other_git / 'objects')})
+check('呼び出し元に GIT_COMMON_DIR・GIT_OBJECT_DIRECTORY があっても、chk-run.sh の問い合わせは外してから照合し、記録を使い回す',
+      r.returncode == 0 and '親の chk-run の記録を使用' in evidence(wt, 'gq'), out(r) + evidence(wt, 'gq'))
+
+# ---- 32. 使い回した必須検証の入力（未追跡の logs/input.json など）がレビュー中に変わったら不合格 ----
+# 指紋には環境変数も入るので、chk-run.sh はレビューと同じ環境（偽の CLI の動きを切り替える GT_*・STUB_* も同じ値）で回す
+wt, first = repo('recheck', gitignore='logs/\nnode_modules/\n')
+(wt / 'logs').mkdir(); (wt / 'logs' / 'input.json').write_text('{"changed": false}\n')
+def chk_record(port, outname, **kw):
+    p = subprocess.run(['bash', str(lanes / 'chk-run.sh'), str(wt), str(port), str(T / outname)], env=make_env(**kw),
+                       capture_output=True, text=True, timeout=120)
+    check(f'用意: chk-run.sh が記録する（logs/input.json を入力に含む・{outname}）', p.returncode == 0 and 'recorded=' in p.stdout, p.stdout + p.stderr)
+chk_env = {'LANES_CHECK_CMD': '/usr/bin/true'}
+chk_record(49993, 'chk-out-rc0', env=chk_env)
+r, cap, done = gem(wt, 'rc0', env=chk_env)
+check('対照: 入力が変わらなければ記録を使い回して CLEAN（終了時の照合も通る）', r.returncode == 0 and 'VERDICT: CLEAN' in done and '親の chk-run の記録を使用' in evidence(wt, 'rc0'), out(r))
+chk_record(49993, 'chk-out-rc1', mutation='touch-input', env=chk_env)
+r, cap, done = gem(wt, 'rc1', mutation='touch-input', env=chk_env)
+check('レビュー中に確認コマンドの入力（logs/input.json）が変わったら NEEDS_FIX・EXIT:4（古い検証結果で CLEAN にしない）',
+      r.returncode == 4 and 'VERDICT: NEEDS_FIX' in done and '親の chk-run の記録を使用' in evidence(wt, 'rc1') and '入力がレビュー中に変わった' in evidence(wt, 'rc1'),
+      out(r) + evidence(wt, 'rc1'))
+(wt / 'logs' / 'input.json').write_text('{"changed": false}\n')
+claude_env = dict(chk_env, STUB_RUN="printf '%s\\n' '{\"changed\": true}' > logs/input.json")
+chk_record(49993, 'chk-out-rc2', env=claude_env)
+r, cap, done = run('run-claude-review.sh', wt, 'rc2', env=claude_env)
+check('Claude レビューも、使い回した記録の入力がレビュー中に変わったら NEEDS_FIX・EXIT:4',
+      r.returncode == 4 and 'VERDICT: NEEDS_FIX' in done and '入力（確認コマンドが読むファイル' in r.stderr, out(r) + done)
+
+# ---- 33. 監査ログの末尾が文字の途中で切れても、それまでの書き込みの試みを失わない ----
+wt, first = repo('broken-tail')
+r, cap, done = gem(wt, 'bt-r1')
+check('用意: 初回は CLEAN', r.returncode == 0 and 'VERDICT: CLEAN' in done, out(r))
+r, cap, done = gem(wt, 'bt-r1', '--force', mutation='write-tool', events='broken_tail')
+ev_text = evidence(wt, 'bt-r1'); state = json.loads((wt / 'logs' / '.bt.review-state').read_text())
+check('末尾が文字切れでも、書き込みの試み 1 件で EXIT:4・NEEDS_FIX（不正行は監査の不備として記録）・前回の CLEAN を失効',
+      r.returncode == 4 and 'VERDICT: NEEDS_FIX' in done and '書き込みの試み 1 件' in ev_text and '文字コードの不正行' in ev_text and state.get('last_exit') == 4,
+      out(r) + ev_text)
+
+# ---- 34. 相対パスの GEMINI_BIN は点検の前に絶対パスへ直し、同じ実行ファイルで起動する ----
+wt, first = repo('relbin')
+r, cap, done = gem(wt, 'rb', cwd=T, env={'GEMINI_BIN': 'bin/agy'})
+check('GEMINI_BIN が相対パス（起動した場所から bin/agy）でも、点検したのと同じ agy を worktree で起動する',
+      r.returncode == 0 and cap is not None and 'VERDICT: CLEAN' in done, out(r))
+r, cap, done = gem(wt, 'rb2', cwd=T, env={'GEMINI_BIN': 'agy'})
+check('GEMINI_BIN が名前だけ（agy）なら PATH から探して絶対パスで起動する', r.returncode == 0 and cap is not None, out(r))
+
+# ---- 35. PATH に相対のフォルダがあっても、親の python3（監督役・受け取り役・Codex/Claude レビューの判定）は作業ツリーの物を選ばない ----
+wt, first = repo('relpath-py')
+plant_log = T / 'planted-python3.log'
+real_py = shutil.which('python3', path=BASE['PATH'])
+(wt / 'python3').write_text(f'#!/bin/sh\necho "$*" >> {str(plant_log)!r}\nexec {real_py!r} "$@"\n'); (wt / 'python3').chmod(0o755)
+git(wt, 'add', 'python3'); git(wt, 'commit', '-qm', 'test: 作業ツリーに python3 を置く')
+rel_path = '.' + os.pathsep + BASE['PATH']
+r, cap, done = gem(wt, 'rpy', cwd=T, env={'PATH': rel_path})
+lines = plant_log.read_text().splitlines() if plant_log.exists() else []
+check('Gemini: PATH の . で作業ツリーの python3 を、監督役・受け取り役に選ばない（子の agy が使うのは自由）',
+      r.returncode == 0 and 'VERDICT: CLEAN' in done and not any(l.startswith('-I') for l in lines), out(r) + '\n'.join(lines[:5]))
+plant_log.unlink(missing_ok=True)
+r, cap, done = run('run-claude-review.sh', wt, 'rpy-claude', cwd=T, env={'PATH': rel_path})
+lines = plant_log.read_text().splitlines() if plant_log.exists() else []
+check('Claude: 作業ツリーへ移った後の親の python3（監督役・判定）も、作業ツリーの物を選ばない',
+      r.returncode == 0 and 'VERDICT: CLEAN' in done and not any(l.startswith('-I') for l in lines), out(r) + '\n'.join(lines[:5]))
+
+# ---- 36. 設定ファイルに LANES_REVIEW_ENGINE=gemini と書いてあっても、--engine codex / claude の起動前点検は確定したレビュー役で回す ----
+conf = T / 'engine-gemini.conf'
+conf.write_text('LANES_REVIEW_ENGINE=gemini\nLANES_TOOLS="claude codex"\n')
+wt, first = repo('conf-engine')
+for eng, lane in (('codex', 'codex-review'), ('claude', 'claude-review')):
+    r, cap, done = run('run-review.sh', wt, 'ce-' + eng, '--engine', eng, env={'LANES_CONF': str(conf)})
+    pidf = wt / 'logs' / f'ce-{eng}.pid'
+    check(f'設定ファイルに LANES_REVIEW_ENGINE=gemini（構成に gemini 無し）と値をそのまま書いても、--engine {eng} の起動は Gemini の点検で止まらない',
+          r.returncode == 0 and cap is None and pidf.exists() and f'lane={lane}' in pidf.read_text(), out(r) + done)
+p = subprocess.run(['zsh', '-f', str(lanes / 'lanes-doctor.sh'), '--quiet', '--review-engine', 'codex'], env=make_env(env={'LANES_CONF': str(conf)}),
+                   capture_output=True, text=True, timeout=60)
+check('lanes-doctor.sh --review-engine codex は設定ファイルの後に当てる（gemini の点検をしない）', p.returncode == 0, p.stdout + p.stderr)
+p = subprocess.run(['zsh', '-f', str(lanes / 'lanes-doctor.sh'), '--quiet'], env=make_env(env={'LANES_CONF': str(conf)}), capture_output=True, text=True, timeout=60)
+check('対照: 引数が無ければ設定ファイルの LANES_REVIEW_ENGINE=gemini で点検する（構成に gemini が無いので NG）', p.returncode == 2 and 'LANES_REVIEW_ENGINE=gemini だが構成' in p.stdout, p.stdout)
+p = subprocess.run(['zsh', '-f', str(lanes / 'lanes-doctor.sh'), '--review-engine', 'bogus'], env=make_env(), capture_output=True, text=True, timeout=60)
+check('lanes-doctor.sh --review-engine の知らない値は exit 2', p.returncode == 2, p.stdout + p.stderr)
+
+# ---- 37. 相対の LANES_SCRATCH_ROOT でも、親の chk-run.sh とレビューの問い合わせで指紋がそろい、記録を使い回せる ----
+wt, first = repo('relscratch-chk', gitignore='logs/\nnode_modules/\n')
+rel_env = {'LANES_CHECK_CMD': '/usr/bin/true', 'LANES_SCRATCH_ROOT': 'rel-scratch-chk'}
+p = subprocess.run(['bash', str(lanes / 'chk-run.sh'), str(wt), '49992', str(T / 'chk-out-rs')], env=make_env(env=rel_env), capture_output=True, text=True, timeout=120, cwd=T)
+check('用意: 相対の LANES_SCRATCH_ROOT で chk-run.sh が記録する', p.returncode == 0 and 'recorded=' in p.stdout, p.stdout + p.stderr)
+r, cap, done = gem(wt, 'rsc', cwd=T, env=rel_env)
+check('相対の LANES_SCRATCH_ROOT でも、同じ場所から起動したレビューは親の記録を使い回す（設定の読み込みで絶対パスに直す）',
+      r.returncode == 0 and '親の chk-run の記録を使用' in evidence(wt, 'rsc'), out(r) + evidence(wt, 'rsc'))
+
+# ---- 38. agy が標準出力を受け継いだ補助のプロセスを残しても、agy の終了で受け取りを終える ----
+wt, first = repo('helper')
+helper_pid = T / 'helper.pid'
+t0 = time.time()
+r, cap, done = gem(wt, 'hp', events='helper', env={'GT_HELPER_PID': str(helper_pid), 'GEMINI_REVIEW_NOOUTPUT_SEC': '25'})
+took = time.time() - t0
+hp = int(helper_pid.read_text()) if helper_pid.exists() else 0
+def alive(pid):
+    try: os.kill(pid, 0); return True
+    except ProcessLookupError: return False
+    except PermissionError: return True
+check('補助のプロセスがパイプを持ち続けても、無出力の停止にならず CLEAN・EXIT:0（受け取り役が agy の終了を見張る）',
+      r.returncode == 0 and 'VERDICT: CLEAN' in done and took < 20, out(r) + f'\n所要 {took:.1f} 秒')
+check('残った補助のプロセスは監督役が止めて回収する', hp > 0 and not alive(hp))
+
+# ---- 39. dry-run の前回の指示書は、新しい指示書を書き終えるまで消さない ----
+wt, first = repo('dry-keep')
+r, cap, done = gem(wt, 'dk', '--dry-run')
+dp = wt / 'logs' / 'dk.dry-run.prompt.md'
+before = dp.read_text()
+r, cap, done = gem(wt, 'dk', '--dry-run', help='no-sandbox')
+check('dry-run の途中の確かめ（agy の --sandbox）で止まっても、前回の指示書は残る', r.returncode == 2 and dp.exists() and dp.read_text() == before, out(r))
+for script, lb in (('run-claude-review.sh', 'dkc'), ('run-codex-review.sh', 'dkx')):
+    r, cap, done = run(script, wt, lb, '--dry-run')
+    dpx = wt / 'logs' / f'{lb}.dry-run.prompt.md'
+    old = dpx.read_text()
+    # ログインの確かめ（logs/ と書き込み先を確かめた後）で止める
+    r, cap, done = run(script, wt, lb, '--dry-run', env={'STUB_CLAUDE_AUTH': 'none', 'STUB_CODEX_AUTH': 'none'})
+    check(f'dry-run（{script}）も途中で止まったら前回の指示書を残す', r.returncode == 2 and dpx.read_text() == old, out(r))
+
+# ---- 40. 見張りは標準エラーのファイルを名前で開き直さない（名前付きパイプに差し替えられても止まらない）----
+wt, first = repo('fifo')
+t0 = time.time()
+r, cap, done = gem(wt, 'ff', mutation='fifo-stderr', timeout=90)
+check('子が標準エラーのファイルを名前付きパイプに差し替えても、見張りは止まらず、子の後に logs/ の特殊ファイルとして EXIT:5 で止める',
+      r.returncode == 5 and time.time() - t0 < 60, out(r))
+
+# ---- 41. 公開ログとの照合は一定量ずつ読み比べる（1 MiB を超える中身でも正しく比べる）----
+cmp_dir = T / 'cmp'; cmp_dir.mkdir()
+def check_public(private, public, allow):
+    (cmp_dir / 'priv').write_bytes(private)
+    if public is None:
+        (cmp_dir / 'pub.json').unlink(missing_ok=True)
+    else:
+        (cmp_dir / 'pub.json').write_bytes(public)
+    p = subprocess.run(['zsh', '-fc', 'LANES_DIR="$1"; source "$1/_common.sh"; unfunction TRAPEXIT TRAPZERR; source "$1/gemini-agy.zsh"; exec {fd}<"$2"; gem_check_public "$fd" "$3" "$4"',
+                        '_', str(lanes), str(cmp_dir / 'priv'), str(cmp_dir / 'pub.json'), str(allow)], env=BASE, capture_output=True, text=True)
+    return p.returncode
+big = b'x' * (2 * 1024 * 1024 + 123)
+check('照合: 同じ中身（2 MiB 超）は同じ', check_public(big, big, 0) == 0)
+check('照合: 2 つ目の区切りで 1 バイト違えば違う', check_public(big, big[:1500000] + b'y' + big[1500001:], 0) == 1)
+check('照合: 公開用が頭の部分（区切りの境目ちょうど）なら、見張りで止めたときだけ同じ', check_public(big, big[:1024 * 1024], 1) == 0 and check_public(big, big[:1024 * 1024], 0) == 1)
+check('照合: 公開用の方が長ければ違う', check_public(big, big + b'z', 1) == 1)
+check('照合: 公開用が無ければ違う', check_public(big, None, 1) == 1)
+
+# ---- 42. 承認・質問ツールは呼び出し単位で数える ----
+wt, first = repo('asks')
+r, cap, done = gem(wt, 'as', mutation='ask-tool')
+check('同じ承認・質問の呼び出しの経過（実行中・完了）は 1 回に数える', r.returncode == 0 and '承認・質問ツール 1 回' in evidence(wt, 'as'), evidence(wt, 'as'))
 
 print(f'PASS: {passed} 件 / EXIT:0')
 PY

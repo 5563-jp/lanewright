@@ -65,6 +65,8 @@ J
 mkdir -p src docs; echo x > src/a.ts; echo d > docs/a.md; git add -A; git commit -qm c1 || exit 1
 # 確認コマンドは設定キー LANES_CHECK_CMD で渡す（対象リポに .lanes/check.sh があればそちらが優先）
 unset LANES_CHECK_CMD
+# 利用者の設定ファイル（~/.config/lanewright/lanes.conf の LANES_CHECK_CMD など）を読まない（設定に左右されない。未設定の確かめが通る）
+export LANES_CONF="$real_root/no-such.conf"
 export CHK_CACHE="$real_root/passed.tsv"
 # npm がネットワークに触らないようにする（更新のお知らせの確認を止め、オフラインで動かす）
 export npm_config_update_notifier=false npm_config_offline=true

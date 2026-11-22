@@ -58,7 +58,9 @@ print('SMOKE_OK')
     env={**os.environ, 'PATH':str(bindir)+os.pathsep+os.environ['PATH'], 'CASE_ROOT':str(root),
          'CHK_CACHE':str(root/'passed.tsv'),
          'LANES_CHECK_CMD':'npm run typecheck && npm run build && npm run smoke:iphone',
-         'GIT_CONFIG_GLOBAL':'/dev/null','GIT_CONFIG_NOSYSTEM':'1','LANES_NOTIFY':'0'}
+         'GIT_CONFIG_GLOBAL':'/dev/null','GIT_CONFIG_NOSYSTEM':'1','LANES_NOTIFY':'0',
+         # 利用者の設定ファイル（~/.config/lanewright/lanes.conf の LANES_CHECK_CMD など）を読まない（未設定の確かめが設定に左右されない）
+         'LANES_CONF':str(root/'no-such.conf')}
     for key in ('GIT_DIR','GIT_WORK_TREE','GIT_INDEX_FILE','GIT_COMMON_DIR'): env.pop(key,None)
     def git(*args):
         return subprocess.check_output(['git','-C',str(repo),*args],env=env,stderr=subprocess.DEVNULL,text=True).strip()
