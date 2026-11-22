@@ -105,6 +105,9 @@ lanes_claude_review_resolve() {
 # logs/ が無い（worktree が無い・一度も起動していない）ときは前回の記録も無いので何も作らない。dry-run は記録しない。
 # 下の内部の変数は外から持ち込ませない（呼び出し元の環境に同じ名前があっても、この起動の誤りとして扱わない）
 unset LANES_DEFERRED_ERROR LANES_EARLY_LABEL LANES_EARLY_LOGDIR LANES_CHECKS_PRESENT
+# 排他と終了記録の内部の状態（lanes_mark_start が決める）も外から持ち込ませない（持ち込まれた値で別の場所へ .done を書かない・
+# 排他を取ったことにしない）
+unset LANES_LOCK_FD LANES_PIDFILE LANES_DONEFILE LANES_DONE_WRITTEN LANES_DONE_OK
 # 1 = 必須検証（typecheck / lint / unit）は親の chk-run.sh の記録で済んでいる（レビューランチャが問い合わせて決める）。
 # 判定（lanes_parse_review）へ引数で渡す。環境から持ち込ませない（export しない・ここで 0 に戻す）
 typeset -g +x LANES_REVIEW_CHECKS_REUSED=0
@@ -150,14 +153,23 @@ lanes_record_early_failure() {
     return 0
   fi
   lanes_rotate_log "$pidfile"; lanes_rotate_log "$donefile"
+  if ! lanes_early_done "$logdir" "$label" "$msg"; then
+    print -u2 -- "NOTE: 今回の失敗の記録（$label.done）を書けない（logs/ の空き・権限・同じ名前のフォルダなど）。書きかけは残していない"
+    return 0
+  fi
+  print -u2 -- "NOTE: 今回の失敗を $donefile に残した（lanes-status.sh は FAILED を返す）"
+}
+# 起動前の誤りの終了記録（EXIT:2・VERDICT: NONE・note=起動前の誤り: <理由>）を書く。<logdir> <label> <理由>。
+# 一時ファイルに全文を書いてから置き換える（lanes_replace_file。書きかけを .done の名前で見せない）。0 = 書けた
+lanes_early_done() {
+  local msg="${3//$'\n'/ }"
   {
     print -- "EXIT:2"
     print -- "VERDICT: NONE"
     print -- "finished=$(lanes_now)"
     print -- "elapsed_min=0"
-    print -- "note=起動前の誤り: $msg"
-  } > "$donefile"
-  print -u2 -- "NOTE: 今回の失敗を $donefile に残した（lanes-status.sh は FAILED を返す）"
+    print -r -- "note=起動前の誤り: $msg"
+  } | lanes_replace_file "$1" "$2.done"
 }
 lanes_now() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 
@@ -841,17 +853,45 @@ lanes_record_child() {
   # 名前の付け替え（rename）で .pid を置き換える。パスで開き直さないので、作ってから書くまでの隙に差し替えられても外へ書かない。
   # rename は宛先の symlink を辿らず、その名前ごと置き換える（mv と違い、宛先がフォルダへのリンクでもその中へ移さない）
   print -r -- "${LANES_PIDFILE_BASE:-}"$'\n'"child_pid=$1"$'\n'"child_lstart=$LANES_CHILD_LSTART" \
-    | python3 -I -c 'import os,sys
-d=os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-name=sys.argv[2]; tmp=f".{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
-fd=os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666, dir_fd=d)
+    | lanes_replace_file "${LANES_PIDFILE:h}" "${LANES_PIDFILE:t}" || lanes_die "子の記録を .pid に書けない"
+}
+
+# <フォルダ> <名前>: 標準入力の全文を、同じフォルダの一時ファイル（.<名前>.<pid>.<英数字>.tmp。chk-run.sh が入力の指紋から外す形）に
+# 書き切ってディスクへ書き出し（fsync）、名前の付け替え（os.replace）で <名前> を置き換える。置き換えた後に読み戻し、
+# 書いた中身と同じかを確かめる。0 = 全文を置けた。1 = 置けなかった（一時ファイルは消し、元の <名前> の物には触らない）。
+# 容量不足・途中の中断でも、書きかけ（先頭の行だけなど）を <名前> で見せない（.done の EXIT:0 だけが残って DONE と読まれない）。
+# フォルダは symlink を辿らずに開き、一時ファイルは O_EXCL|O_NOFOLLOW で作る（子が置いたリンクの先へ書かない）。
+# 付け替えは宛先の symlink を辿らず、その名前ごと置き換える（mv と違い、宛先がフォルダならその中へ移さずに失敗する）
+lanes_replace_file() {
+  python3 -I -c 'import os, sys
+d, name = sys.argv[1], sys.argv[2]
 try:
-    with os.fdopen(fd, "wb") as f: f.write(sys.stdin.buffer.read())
-    os.replace(tmp, name, src_dir_fd=d, dst_dir_fd=d)
-except BaseException:
-    try: os.unlink(tmp, dir_fd=d)
-    except OSError: pass
-    raise' "${LANES_PIDFILE:h}" "${LANES_PIDFILE:t}" || lanes_die "子の記録を .pid に書けない"
+    data = sys.stdin.buffer.read()
+    dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError:
+    sys.exit(1)
+try:
+    tmp = f".{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666, dir_fd=dfd)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+    except BaseException:
+        try:
+            os.unlink(tmp, dir_fd=dfd)
+        except OSError:
+            pass
+        raise
+    rfd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd)
+    with os.fdopen(rfd, "rb") as f:
+        sys.exit(0 if f.read() == data else 1)
+except OSError:
+    sys.exit(1)
+finally:
+    os.close(dfd)' "$1" "$2"
 }
 
 # 専用のプロセス集団を監督する。監督役が最後まで残るので、親コマンド終了後の孫も回収できる。
@@ -1214,27 +1254,55 @@ lanes_logdir_check() {
   exit 5
 }
 
-# 終了を記録。$1=終了コード $2=VERDICT 行 $3=補足（任意）。二重書きしない。
+# 終了を記録。$1=終了コード $2=VERDICT 行 $3=補足（任意）。二重書きしない（LANES_DONE_WRITTEN=1 の後は何もしない。
+# トラップ（TRAPEXIT など）が、ランチャ自身の書いた今回の結果を上書きしないため）。
+# 書き方は、一時ファイルに全文を書き切ってから .done の名前へ置き換える（lanes_replace_file）。容量不足・途中の中断でも、
+# 先頭の EXIT:0 だけの書きかけを .done の名前で見せない（lanes-status.sh が DONE と取り違えない）。書けたかは LANES_DONE_OK
+# （1 = 全文を置けて読み戻せた。0 = 置けなかった＝.done は回転したまま無い・前の中身のまま）。書けなくても 0 を返す（set -e で止めない）。
 # zsh は関数形式の TRAPEXIT を `$(...)` の子シェル終了時にも走らせるので、子シェル（ZSH_SUBSHELL>0）からは絶対に書かない
 lanes_mark_done() {
-  local rc="$1" verdict="${2:-VERDICT: NONE}" note="${3:-}"
   (( ZSH_SUBSHELL )) && return 0
   [[ -n "${LANES_DONEFILE:-}" ]] || return 0
   (( ${LANES_DONE_WRITTEN:-1} )) && return 0
   LANES_DONE_WRITTEN=1
+  lanes_write_done "$@"
+  lanes_notify "$1" "${2:-VERDICT: NONE}"
+}
+# 置いた終了記録を、ランチャ自身が今回の結果で書き直す（lanes_mark_done の後だけ。トラップからは呼ばない）。引数は lanes_mark_done と同じ。
+# 使うのは、合格の .done を置いた後の確定（再利用の記録など）に失敗して、合格を取り下げるときだけ（run-gemini-review.sh）。
+# 書き直せなければ、前の .done を消す（合格のまま残さない。lanes-status.sh は DEAD を返す）。logs/ が差し替えられていたら何もしない
+lanes_rewrite_done() {
+  (( ZSH_SUBSHELL )) && return 0
+  [[ -n "${LANES_DONEFILE:-}" ]] && (( ${LANES_DONE_WRITTEN:-0} )) || return 0
+  lanes_write_done "$@"
+  if (( ! LANES_DONE_OK )) && lanes_logdir_intact 2>/dev/null; then
+    rm -f -- "$LANES_DONEFILE" 2>/dev/null || true
+    [[ ! -e "$LANES_DONEFILE" && ! -L "$LANES_DONEFILE" ]] \
+      || ( print -u2 -- "error: 終了記録（${LANES_DONEFILE:t}）を書き直せず、消せもしない。中身が今回の結果と違う。手で消す: $LANES_DONEFILE" ) || true
+  fi
+  lanes_notify "$1" "${2:-VERDICT: NONE}"
+}
+lanes_write_done() {   # lanes_mark_done / lanes_rewrite_done の中だけで使う
+  local rc="$1" verdict="${2:-VERDICT: NONE}" note="${3:-}"
+  typeset -g LANES_DONE_OK=0
   if ! lanes_logdir_intact; then
     print -u2 -- "error: logs/ が差し替えられているので .done を書かない: $LANES_LOGDIR"
     return 0
   fi
   local elapsed=$(( ($(date +%s) - LANES_T0) / 60 ))
-  {
+  if {
     print -- "EXIT:$rc"
-    print -- "$verdict"
+    print -r -- "$verdict"
     print -- "finished=$(lanes_now)"
     print -- "elapsed_min=$elapsed"
-    [[ -n "$note" ]] && print -- "note=$note"
-  } > "$LANES_DONEFILE"
-  lanes_notify "$rc" "$verdict"
+    if [[ -n "$note" ]]; then print -r -- "note=$note"; fi
+  } | lanes_replace_file "${LANES_DONEFILE:h}" "${LANES_DONEFILE:t}"; then
+    LANES_DONE_OK=1
+  else
+    # 子シェルの中で出す（閉じた stderr へ print -u2 すると、そのシェルごと止まるため）
+    ( print -u2 -- "error: 終了記録（${LANES_DONEFILE:t}）を書けない（logs/ の空き・権限・同じ名前のフォルダなど）。書きかけは残していない" ) || true
+  fi
+  return 0
 }
 
 # ランチャが途中で死んでも .done を残す（DEAD と FAILED を区別する）。kill -9 だけは残せない → lanes-status は DEAD と出す
