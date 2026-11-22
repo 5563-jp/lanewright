@@ -314,7 +314,8 @@ started="$(lanes_now)"; t0=$(date +%s)
 
 # レビューの子から push（と fetch）をできなくする（読み取り専用の役。git の通信は要らない）
 lanes_block_git_transport
-# agy は監督役（lanes_start_child）の下で起動し、見張りは Gemini 実装と同じ（gemini-agy.zsh の run_agy_once）。
+# agy は監督役（lanes_start_child_in。作業場所は worktree）の下で、受け取り役（gemini-stream-tee.py）を挟んで起動する。
+# 見張りは Gemini 実装と同じ（gemini-agy.zsh の run_agy_once）。
 # 見張りの行は子の起動前に開いた番号（fd）で logs/<label>.log へ書く（子が logs/ を差し替えても外へは書かない）
 GEM_TAG="[run-gemini-review]"
 source "$LANES_DIR/gemini-agy.zsh"

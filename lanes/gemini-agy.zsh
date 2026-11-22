@@ -23,9 +23,9 @@
 # 停止対象の同一性確認と回収は共通監督役が行う。
 typeset -gA GEM_TRACK PSL PSPP PSPG
 typeset -g GEM_PGID="" GEM_ROOT_LS=""
-# 親専用の写しを読む番号（最後の実行の分）と、これまでの実行の分の全部（再実行の前の分も、後で公開用を置き換え直せるように開いたまま持つ）
+# 親専用の写しを読む番号（最後の実行の分）。前の実行の分も閉じずに残すので、呼び出し元は番号を控えておけば後で読み直せる
+# （run-gemini.sh の再実行が、1 回目の記録を置き換え直すのに使う）
 typeset -g GEM_STREAM_FD="" GEM_STREAM_WFD=""
-typeset -ga GEM_STREAM_FDS=()
 # 見張りが数える「子が無い」ときのプロセスの数（監督役・受け取り役・agy）
 typeset -gi GEM_BASE_PROCS=3
 gem_ps_snapshot() {   # 全プロセスの ppid / pgid / lstart を 1 回の ps で取る（引数・環境は読まない）。呼び出し元のシェルで実行する
@@ -132,7 +132,6 @@ run_agy_once() {
   exec {GEM_STREAM_FD}<"$stream_tmp"
   rm -f -- "$stream_tmp"
   [[ ! -e "$stream_tmp" && ! -L "$stream_tmp" ]] || lanes_die "親専用の写しの名前を消せない: $stream_tmp"
-  GEM_STREAM_FDS+=("$GEM_STREAM_FD")
   ANTIGRAVITY_HEADLESS=true GIT_DIR="$gitdir" GIT_WORK_TREE="$wt" GIT_CONFIG_GLOBAL="$scratch/gitconfig" GIT_OPTIONAL_LOCKS=0 GIT_PAGER=cat \
     lanes_start_child_in "$wt" python3 -I "$LANES_DIR/gemini-stream-tee.py" "${j:h}" "${j:t}" -- "${cmd[@]}" -p "$(<"$final")" \
     < /dev/null >&$GEM_STREAM_WFD 2> "$e"
@@ -192,7 +191,7 @@ run_agy_once() {
   return 0
 }
 
-# 親専用の写し（番号 <fd>）を頭から読み直せるようにして、<コマンド...> の番号 3 に渡して実行する（監査の python が os.fdopen(3) で読む）
+# 親専用の写し（番号 <fd>）を、<コマンド...> の番号 3 に渡して実行する（監査の python が頭へ戻してから os.fdopen(3) で読む）
 gem_stream_read() {   # <fd> <コマンド...>
   local fd="$1"; shift
   [[ "$fd" == <-> ]] || return 1
