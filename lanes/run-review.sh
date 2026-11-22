@@ -80,6 +80,10 @@ case "$engine" in
 esac
 # 起動前点検は振り分け先が排他・終了記録（.pid / .done）を取った後に行う（失敗を今回の FAILED として残すため）
 export LANES_ENTRY_PREFLIGHT=1
+# 振り分け先と起動前点検（lanes-doctor.sh）が同じ確定値を見るように、優先順位を解決した後のレビュー役を渡す
+# （設定が LANES_REVIEW_ENGINE=gemini でも、--engine codex / claude で選んだ起動を、使わない Gemini の点検で止めない）。
+# chk-run.sh は LANES_REVIEW_ENGINE を外してから指紋を取るので、必須検証の記録の使い回しには影響しない
+export LANES_REVIEW_ENGINE="$engine"
 # _common.sh が外した API キーなどは、振り分け先が親の環境のまま chk-run.sh --query を呼べるよう元に戻して渡す
 # （振り分け先も _common.sh で外すので、CLI の子には届かない）
 lanes_restore_caller_auth_env

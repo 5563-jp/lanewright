@@ -8,7 +8,8 @@
 #   LANES_PROFILE            full / claude-codex / claude-gemini / claude-only
 #   LANES_ROLE_IMPL          実装役（claude か "claude gemini"）
 #   LANES_ROLE_REVIEW        レビュー役（codex か claude）
-#   LANES_REVIEW_INDEPENDENT 1 = 実装と別系統の道具でレビュー / 0 = 同じ系統（独立性が弱い）
+#   LANES_REVIEW_INDEPENDENT 1 = 実装と別系統の道具でレビュー / 0 = 同じ系統（独立性が弱い）。構成の既定のレビュー役のもの
+#                            （--print の「レビューの独立性」の行は、LANES_REVIEW_ENGINE で選んだレビュー役に合わせて出す）
 # レビュー役は構成で決まる（codex か claude）。Gemini レビュー（run-gemini-review.sh）は明示したときだけ使う
 # （run-review.sh --engine gemini か LANES_REVIEW_ENGINE=gemini。--print に案内を出す。--env の出力は変えない）
 # 構成の表（docs/roles.md と同じ）:
@@ -94,11 +95,36 @@ lanes_roles_print() {
       fi ;;
     claude) print -r -- "レビュー役の指定: LANES_REVIEW_ENGINE=claude（run-review.sh は --engine が無ければ run-claude-review.sh へ振り分ける）" ;;
   esac
-  if (( LANES_REVIEW_INDEPENDENT )); then
-    print -r -- "レビューの独立性: あり（実装と別系統の道具で見る）"
+  # 独立性は、実際に振り分けるレビュー役（LANES_REVIEW_ENGINE を書いていればそれ。構成に無い道具なら run-review.sh が止まるので構成の既定）で出す。
+  # Claude はどの構成でも実装役なので、Claude のレビューは独立性が弱い。Codex は実装に使わない。Gemini のレビューは Gemini で実装した
+  # worktree では起動しない（同じ道具でレビューしない）ので、Claude の実装に対して別系統になる。
+  # --env の LANES_REVIEW_INDEPENDENT は今までどおり構成の既定のレビュー役のもの（出力の形を変えない）
+  local chosen="$LANES_ROLE_REVIEW" independent="$LANES_REVIEW_INDEPENDENT" default_state chosen_name
+  case "${LANES_REVIEW_ENGINE:-}" in
+    claude) chosen=claude ;;
+    codex|gemini) if lanes_roles_has_tool "$LANES_REVIEW_ENGINE"; then chosen="$LANES_REVIEW_ENGINE"; fi ;;
+  esac
+  if [[ "$chosen" == "$LANES_ROLE_REVIEW" ]]; then
+    if (( LANES_REVIEW_INDEPENDENT )); then
+      print -r -- "レビューの独立性: あり（実装と別系統の道具で見る）"
+    else
+      print -r -- "レビューの独立性: 弱い"
+      print -r -- "注意: レビューが実装と同じ系統の道具（Claude）なので独立性が弱い。同じ思い込みを見落としやすいので、人の目での確認や CI（自動テストの仕組み）を厚めにする。codex を足すと ② か ① になる"
+    fi
+    return 0
+  fi
+  [[ "$chosen" == claude ]] && independent=0 || independent=1
+  (( LANES_REVIEW_INDEPENDENT )) && default_state="あり" || default_state="弱い"
+  case "$chosen" in claude) chosen_name=Claude ;; codex) chosen_name=Codex ;; *) chosen_name=Gemini ;; esac
+  if (( independent )); then
+    if [[ "$chosen" == gemini ]]; then
+      print -r -- "レビューの独立性: あり（LANES_REVIEW_ENGINE=gemini で選んだ Gemini のレビュー。Claude の実装と別系統の道具で見る。Gemini で実装した worktree では起動しない。構成の既定のレビュー役なら「$default_state」）"
+    else
+      print -r -- "レビューの独立性: あり（LANES_REVIEW_ENGINE=$chosen で選んだ $chosen_name のレビュー。実装と別系統の道具で見る。構成の既定のレビュー役なら「$default_state」）"
+    fi
   else
-    print -r -- "レビューの独立性: 弱い"
-    print -r -- "注意: レビューが実装と同じ系統の道具（Claude）なので独立性が弱い。同じ思い込みを見落としやすいので、人の目での確認や CI（自動テストの仕組み）を厚めにする。codex を足すと ② か ① になる"
+    print -r -- "レビューの独立性: 弱い（LANES_REVIEW_ENGINE=claude で選んだ Claude のレビュー。構成の既定のレビュー役なら「$default_state」）"
+    print -r -- "注意: レビューが実装と同じ系統の道具（Claude）なので独立性が弱い。同じ思い込みを見落としやすいので、人の目での確認や CI（自動テストの仕組み）を厚めにする。LANES_REVIEW_ENGINE を空に戻すと構成の既定のレビュー役（$LANES_ROLE_REVIEW）になる"
   fi
 }
 

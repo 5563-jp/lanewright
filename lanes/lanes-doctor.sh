@@ -143,12 +143,15 @@ if (( roles_ok )); then
   if [[ "${LANES_REVIEW_ENGINE:-}" == gemini ]]; then
     if ! lanes_roles_has_tool gemini; then
       ng "LANES_REVIEW_ENGINE=gemini だが構成（LANES_TOOLS=\"$LANES_TOOLS_NORMALIZED\"）に gemini が無い。構成に gemini を足すか、LANES_REVIEW_ENGINE を空に戻す"
+    elif (( ! ${+functions[lanes_help_has_option]} )); then
+      ng "gemini レビュー: python3 が無いので agy のオプションを確かめられない（_common.sh を読み込めない）"
     elif [[ -n "${GEMINI_BIN:-}" && -f "$GEMINI_BIN" && -x "$GEMINI_BIN" ]]; then
       gem_help="$(ANTIGRAVITY_HEADLESS=true "$GEMINI_BIN" --help < /dev/null 2>&1)" || gem_help=""
       gem_missing=()
-      for option in --sandbox --settings --mode; do [[ "$gem_help" == *"$option"* ]] || gem_missing+=("$option"); done
-      # plan は --mode の行の中にあること（help の別の場所の語では通さない。ランチャと同じ確かめ方）
-      [[ "${(j: :)${(@M)${(@f)gem_help}:#*--mode*}}" == *plan* ]] || gem_missing+=("--mode plan")
+      # オプション名は単語として照合する（*--mode* だと --model の行にも当たる。ランチャと同じ _common.sh の関数）
+      for option in --sandbox --settings --mode; do lanes_help_has_option "$gem_help" "$option" || gem_missing+=("$option"); done
+      # plan は --mode の行の中に単語としてあること（help の別の場所の語・--model の説明の語では通さない。ランチャと同じ確かめ方）
+      if (( ! ${gem_missing[(Ie)--mode]} )) && ! lanes_agy_help_mode_has_plan "$gem_help"; then gem_missing+=("--mode plan"); fi
       if (( ${#gem_missing} )); then
         ng "gemini レビュー: agy が ${(j:・:)gem_missing} に対応していない。run-gemini-review.sh は読み取り専用を強制できないので起動しない（agy update で新しくする）"
       else
