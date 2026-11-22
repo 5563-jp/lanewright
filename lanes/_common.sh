@@ -170,7 +170,7 @@ lanes_resolve_bin() {
 }
 
 # 環境変数の effort が、設定ファイル（無ければ既定）と違う値で勝っているときだけ、注意を 1 行出す（stderr）。
-# <キー> = CLAUDE_EFFORT / CODEX_EFFORT / GEMINI_EFFORT。各ランチャが、自分の使うキーについて起動時に 1 回呼ぶ。
+# <キー> = CLAUDE_EFFORT / CODEX_EFFORT / GEMINI_EFFORT / GEMINI_REVIEW_EFFORT。各ランチャが、自分の使うキーについて起動時に 1 回呼ぶ。
 # 経緯: アプリから起動したシェルが CLAUDE_EFFORT を環境変数として持っていて、設定ファイルに書いた値が黙って負けたことがあった。
 # 勝つ順番（環境変数 > 設定ファイル > 既定）は変えない。知らせるだけで、CLI に渡す値も子の環境も変えない
 lanes_effort_override_note() {
@@ -178,7 +178,7 @@ lanes_effort_override_note() {
   (( ${+LANES_EFFORT_FROM_ENV[$key]} )) || return 0   # 環境変数で渡されていない（lanes.env が控えを作る）
   now="${(P)key}"
   # 環境変数が無かったら何になるか（設定ファイル、無ければ既定）を、子シェルで設定を読み直して確かめる。今のシェルの値は変えない
-  conf_value="$( { unset CLAUDE_EFFORT CODEX_EFFORT GEMINI_EFFORT LANES_DEFER_CONFIG_ERROR
+  conf_value="$( { unset CLAUDE_EFFORT CODEX_EFFORT GEMINI_EFFORT GEMINI_REVIEW_EFFORT LANES_DEFER_CONFIG_ERROR
                    source "$LANES_DIR/lanes.env" && print -r -- "value:${(P)key}" } 2>/dev/null )" || return 0
   conf_value="${conf_value##*$'\n'}"   # 設定ファイルが何か出力していても、最後の 1 行だけを見る
   [[ "$conf_value" == value:* ]] || return 0
@@ -386,6 +386,76 @@ lanes_check_gemini_subscription() {
   lanes_resolve_bin GEMINI_BIN agy
   unset AGY_ADC_AUTH GOOGLE_APPLICATION_CREDENTIALS GOOGLE_GENAI_USE_VERTEXAI GOOGLE_CLOUD_PROJECT
   [[ "$(lanes_gemini_auth_state)" == subscription ]] || lanes_die "agy のログイン情報が無い（~/.gemini/antigravity-cli）→ 起動禁止。対話モードの agy でサブスクのアカウントにログインする"
+}
+
+# ---- Gemini レビュー（run-gemini-review.sh）の読み取り専用の担保（外から上書きできない部分）----
+# agy に起動単位で渡す設定（--settings。利用者の設定ファイルは変えない。deny は利用者の許可設定より優先される）を 1 行の JSON で出す。
+# 拒否（permissions.deny）:
+#   mcp(*)                                   … MCP（外部サービスにつなぐ追加の道具）の呼び出しすべて
+#   write_file(*) / write_file(/)            … ファイルの書き込み（作成・編集・削除・移動・名前の変更を含む書き込みの権限）すべて。
+#                                              相対パス（write_file(.) など）は書かない（agy 1.5.14 の実測: 端末サンドボックスの設定エラーになり、
+#                                              読み取りだけのコマンドも動かなくなる）
+#   read_url(*) / execute_url(*)             … URL の読み込み・実行（コードを外へ送る経路を減らす。Claude レビューも Web の道具を持たない）
+#   command(...)                             … Claude レビューの固定の拒否の一覧（LANES_CLAUDE_REVIEW_DENY_BASE）のうち、コマンド（Bash(...)）の
+#                                              分を agy の書き方に直したもの（commit・push・stash・ref の操作・PR のマージ・デプロイ・別のエージェントの起動など）
+# 残りは run-gemini.sh と同じ（作業場所の外を触らせない・端末サンドボックスを有効にする・既定のモデル提供元・クレジットを使わない）。
+# 外から足す・外す設定キーは持たない（Claude レビューの拒否の固定の一覧と同じく、環境変数や設定ファイルで緩められない）
+lanes_gemini_review_settings() {
+  python3 -I - "$LANES_CLAUDE_REVIEW_DENY_BASE" <<'PY_GEM_SETTINGS'
+import json, re, sys
+deny = ["mcp(*)", "write_file(*)", "write_file(/)", "read_url(*)", "execute_url(*)"]
+for item in sys.argv[1].split(","):
+    m = re.fullmatch(r"Bash\((.+?)[ \t]*\*\)", item.strip())
+    if m:
+        rule = "command(" + m.group(1).strip() + ")"
+        if rule not in deny:
+            deny.append(rule)
+print(json.dumps({"permissions": {"deny": deny}, "allowNonWorkspaceAccess": False, "enableTerminalSandbox": True,
+                  "modelProvider": "", "useG1Credits": False}, ensure_ascii=False, separators=(",", ":")))
+PY_GEM_SETTINGS
+}
+
+# 同じ道具でレビューしないための確かめ。logs/ に、その種別（.pid の lane=）の実装レーンの記録が 1 本でもあれば 0 を返し、
+# 見つけた記録の名前を REPLY に入れる。無ければ 1。<lane> は lanes_mark_start に渡す名前（gemini / codex / claude）。
+# 見るもの: logs/ の直下の <label>.pid（回転した .prev-* も）の「lane=<lane>」の行と、<label>.evidence.md（回転したものも）の
+# 1 行目の見出し（「## Gemini 実装証跡（」など）。.done には種別が無いので見ない。symlink・普通のファイルでないものは中身を読まない。git は呼ばない
+lanes_impl_lane_recorded() {   # <logdir> <lane>
+  local found
+  typeset -g REPLY=""
+  [[ -d "$1" && ! -L "$1" ]] || return 1
+  found="$(python3 -I - "$1" "$2" <<'PY_IMPL_LANE'
+import os, re, stat, sys
+d, lane = sys.argv[1:3]
+heads = {"gemini": "## Gemini 実装証跡（", "codex": "## Codex 実装証跡（", "claude": "## Claude 実装証跡（"}
+pid_re = re.compile(r".+\.pid")
+evidence_re = re.compile(r".+\.evidence(?:\.prev-[0-9]{8}-[0-9]{6}(?:-[0-9]+)?)?\.md")
+try:
+    entries = sorted(os.scandir(d), key=lambda e: e.name)
+except OSError:
+    sys.exit(1)
+for e in entries:
+    try:
+        s = e.stat(follow_symlinks=False)
+    except OSError:
+        continue
+    if not stat.S_ISREG(s.st_mode):
+        continue
+    try:
+        if pid_re.fullmatch(e.name):
+            with open(e.path, encoding="utf-8", errors="replace") as f:
+                if any(line.rstrip("\r\n") == "lane=" + lane for line in f):
+                    print(e.name); sys.exit(0)
+        elif evidence_re.fullmatch(e.name) and lane in heads:
+            with open(e.path, encoding="utf-8", errors="replace") as f:
+                if f.readline().startswith(heads[lane]):
+                    print(e.name); sys.exit(0)
+    except OSError:
+        continue
+sys.exit(1)
+PY_IMPL_LANE
+)" || return 1
+  REPLY="$found"
+  return 0
 }
 
 # 「枝 @ HEAD (origin/<統合先の枝> @ SHA)」。統合先は LANES_BASE_BRANCH
@@ -975,7 +1045,7 @@ lanes_start_child() {
 }
 
 # 記録用: このレーンが CLI に渡す設定のモデルと effort（考える深さ）を LANES_REC_MODEL / LANES_REC_EFFORT に入れる。
-# <lane> = lanes_mark_start に渡す名前（claude / claude-review / qa / codex / codex-review / gemini）。知らない名前は 1 を返す。
+# <lane> = lanes_mark_start に渡す名前（claude / claude-review / qa / codex / codex-review / gemini / gemini-review）。知らない名前は 1 を返す。
 # 空（引数を付けない＝CLI の既定に任せる）は空のまま。後から「どの設定で回したか」を集計できるように .pid と証跡に残す。
 # 値は設定を読み終えた時点のもの（ランチャが CLI に渡す値と同じ変数）。改行は 1 行の記録を壊すので空白にする
 lanes_lane_model_effort() {
@@ -984,6 +1054,7 @@ lanes_lane_model_effort() {
     claude|claude-review|qa) m="${CLAUDE_MODEL:-}"; e="${CLAUDE_EFFORT:-}" ;;
     codex|codex-review)      m="${CODEX_MODEL:-}";  e="${CODEX_EFFORT:-}" ;;
     gemini)                  m="${GEMINI_MODEL:-}"; e="${GEMINI_EFFORT:-}" ;;
+    gemini-review)           m="${GEMINI_REVIEW_MODEL:-}"; e="${GEMINI_REVIEW_EFFORT:-}" ;;
     *) return 1 ;;
   esac
   typeset -g LANES_REC_MODEL="${${m//$'\n'/ }//$'\r'/ }" LANES_REC_EFFORT="${${e//$'\n'/ }//$'\r'/ }"

@@ -1,4 +1,4 @@
-# review-dedup.zsh — run-codex-review.sh と run-claude-review.sh から source する。同じレビューの繰り返しを省く
+# review-dedup.zsh — run-codex-review.sh・run-claude-review.sh・run-gemini-review.sh から source する。同じレビューの繰り返しを省く
 #  - 系列（series）: label の末尾 -r<N> を外したもの（rev-wap83-r5 → rev-wap83）。round は -r<N> から取る
 #  - 前回 CLEAN・未保存変更なし・条件一致のときだけ delta または同一結果を再利用する
 #  - 前回 NEEDS_FIX は指摘本文を渡して full。旧記録も full で検証し直す
@@ -181,7 +181,7 @@ PY_GUARD
 # 起点・案件指示・設定・実装・テンプレの内容を条件に含める（値そのものは記録しない）。
 # 検証の設定（LANES_CHECK_CMD の値・対象の .lanes/check.sh の中身・package.json の scripts のうち検証に関わるもの）も含める。
 # 検証が「未導入」で CLEAN になった後に検証を足したら、同じ HEAD でも前回の結果を使わずにレビューし直す。
-# 必須検証の使い回しの有無と使った記録（rvd_checks_key）、レビュー役（codex / claude）も含める。
+# 必須検証の使い回しの有無と使った記録（rvd_checks_key）、レビュー役（codex / claude / gemini）も含める。
 # 記録が変わった（使い回しが無くなった・親が回し直した）ら、同じ HEAD でも前回の結果を使わない。
 # <root> <prompt> <base> <mode> <policy> <model> <effort> [worktree] [使い回しの鍵] [レビュー役]
 rvd_context() {
@@ -197,6 +197,10 @@ for p in [pathlib.Path(prompt), *[pathlib.Path(root) / f for f in
           ['review-dedup.zsh', 'run-codex-review.sh', 'run-claude-review.sh', '_common.sh', 'codex-review-output.py',
            'templates/claude-review-full.md', 'templates/claude-review-delta.md', 'templates/codex-review-focus.md']]]:
     h.update(p.read_bytes() + b'\0')
+# Gemini レビューは、そのランチャと agy の見張りも条件に入れる（Codex・Claude の条件は今までと同じ中身のまま）
+if kind == 'gemini':
+    for f in ['run-gemini-review.sh', 'gemini-agy.zsh']:
+        h.update((pathlib.Path(root) / f).read_bytes() + b'\0')
 # 検証の設定。名前は _common.sh の lanes_checks_present が見るものと同じ
 h.update(b'check-cmd:' + os.environ.get('LANES_CHECK_CMD', '').encode() + b'\0')
 if wt:

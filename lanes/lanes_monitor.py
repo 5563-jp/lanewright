@@ -53,6 +53,13 @@ def lane_status(wt, label):
     m = re.match(r"^(RUNNING|STALLED|DONE|FAILED|DEAD|NONE)\s+\S+\s+(.*)$", line)
     return (m.group(1), m.group(2)) if m else ("?", line[:160])
 
+def lane_label(lane):
+    """一覧の label に付ける印。Gemini の実装は [gemini]、Gemini レビューは [gemini-review]。ほかは付けない（Codex・Claude と同じ扱い）"""
+    if lane == "gemini-review":
+        return " [gemini-review]"
+    return " [gemini]" if lane.startswith("gemini") else ""
+
+
 def short_detail(detail):
     # 「経過 40分  最終出力 3秒前」だけ残す
     el = re.search(r"経過 (\S+)", detail); lo = re.search(r"最終出力 (\S+)", detail)
@@ -226,7 +233,7 @@ def monitor_once():
                     ex = dk.get("EXIT", "?")
                     st = "DONE" if ex == "0" and dk.get("VERDICT") != "VERDICT: NONE" else "FAILED"
                     extra = " ".join(x for x in [dk.get("VERDICT", ""), dk.get("note", "")] if x)
-                    lane_tag = " [gemini]" if kv(pidf).get("lane", "").startswith("gemini") else ""
+                    lane_tag = lane_label(kv(pidf).get("lane", ""))
                     new_done.append((dm, f"{st} {proj} {lb}{lane_tag} {hm(dm)} EXIT:{ex} {extra}".strip()))
                 continue
             if not pm:
@@ -294,8 +301,12 @@ def monitor_once():
     # .pid の lane= で数える
     claude = sum(1 for l, _, _ in running if l in ("claude", "claude-review"))
     codex_review = sum(1 for l, _, _ in running if l == "codex-review")
-    gemini = sum(1 for l, _, _ in running if l.startswith("gemini"))   # Gemini の実装レーン（run-gemini.sh）
-    summary = f"RUNNING {len(running)}（Claude {claude} / Gemini {gemini} / Codex レビュー {codex_review} / 他 {len(running) - claude - gemini - codex_review}）"
+    gemini_review = sum(1 for l, _, _ in running if l == "gemini-review")   # Gemini レビュー（run-gemini-review.sh）
+    gemini = sum(1 for l, _, _ in running if l.startswith("gemini") and l != "gemini-review")   # Gemini の実装レーン（run-gemini.sh）
+    # Gemini レビューが動いていないときは、今までと同じ形で出す（動いているときだけ「Gemini レビュー N」を足す）
+    others = len(running) - claude - gemini - codex_review - gemini_review
+    summary = (f"RUNNING {len(running)}（Claude {claude} / Gemini {gemini} / Codex レビュー {codex_review}"
+               + (f" / Gemini レビュー {gemini_review}" if gemini_review else "") + f" / 他 {others}）")
     out = [("WAKE: " + " / ".join(reasons)) if reasons else "QUIET", f"{jst()} {summary} / open PR {open_count}"]
     if new_done:
         out.append("## 新規終了（次工程を親が即起動）")
@@ -309,7 +320,7 @@ def monitor_once():
         out.append("## Vercel"); out += ["- " + t for t in vercel_lines[:MAX_LIST]]
     if running:
         out.append("## 稼働中")
-        out += [f"- {lb}{' [gemini]' if lane.startswith('gemini') else ''} {d}" for lane, lb, d in sorted(running, key=lambda x: x[1])[:MAX_LIST]]
+        out += [f"- {lb}{lane_label(lane)} {d}" for lane, lb, d in sorted(running, key=lambda x: x[1])[:MAX_LIST]]
         if len(running) > MAX_LIST: out.append(f"- ほか {len(running) - MAX_LIST} 本")
     if pr_lines:
         out.append("## open PR"); out += ["- " + t for t in pr_lines[:MAX_LIST]]

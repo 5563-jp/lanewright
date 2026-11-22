@@ -12,6 +12,8 @@
 #       Codex : codex login status が ChatGPT でのログイン
 #       Gemini: agy にはログイン確認のサブコマンドが無いので、ログイン情報の置き場所（~/.gemini/antigravity-cli）の有無
 #               （確認は弱いので、通っても注意を出す）。あわせて端末サンドボックス（/usr/bin/sandbox-exec）を有効にできるか
+#               Gemini レビューを使う設定（LANES_REVIEW_ENGINE=gemini）のときだけ、構成に gemini があるかと、agy が
+#               --sandbox・--settings・--mode plan に対応しているか（agy --help）も見る（既定の設定では見ない）
 #   - ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY 等が設定されていても、ランチャは起動時に外す（表示だけ。失敗にはしない）
 # 設定値の誤り（lanes.env が見つけたもの）も NG の 1 行として並べる（誤った値は既定に戻して残りを点検する）。
 # 足りないものは全部並べてから exit 2。全部そろえば exit 0。ログイン状態の本文（鍵の断片が混ざりうる）は表示しない。
@@ -136,12 +138,35 @@ if (( roles_ok )); then
         fi ;;
     esac
   done
+  # Gemini レビュー（run-gemini-review.sh）を使う設定のときだけ、agy の有無・サンドボックスに加えて、読み取り専用を強制するのに
+  # 要る agy のオプション（--sandbox / --settings / --mode plan）も見る。既定（LANES_REVIEW_ENGINE が空）では何も足さない
+  if [[ "${LANES_REVIEW_ENGINE:-}" == gemini ]]; then
+    if ! lanes_roles_has_tool gemini; then
+      ng "LANES_REVIEW_ENGINE=gemini だが構成（LANES_TOOLS=\"$LANES_TOOLS_NORMALIZED\"）に gemini が無い。構成に gemini を足すか、LANES_REVIEW_ENGINE を空に戻す"
+    elif [[ -n "${GEMINI_BIN:-}" && -f "$GEMINI_BIN" && -x "$GEMINI_BIN" ]]; then
+      gem_help="$(ANTIGRAVITY_HEADLESS=true "$GEMINI_BIN" --help < /dev/null 2>&1)" || gem_help=""
+      gem_missing=()
+      for option in --sandbox --settings --mode; do [[ "$gem_help" == *"$option"* ]] || gem_missing+=("$option"); done
+      [[ "$gem_help" == *plan* ]] || gem_missing+=("--mode plan")
+      if (( ${#gem_missing} )); then
+        ng "gemini レビュー: agy が ${(j:・:)gem_missing} に対応していない。run-gemini-review.sh は読み取り専用を強制できないので起動しない（agy update で新しくする）"
+      else
+        ok "gemini レビュー: agy が --sandbox・--settings・--mode plan に対応（run-review.sh は run-gemini-review.sh へ振り分ける）"
+      fi
+      unset gem_help gem_missing
+    fi
+  fi
   # 環境変数の effort が、設定ファイル（無ければ既定）と違う値で勝っているときは知らせる（ランチャも起動時に同じ注意を 1 行出す）
   if (( ${+functions[lanes_effort_override_note]} )); then
     for tool in ${(s: :)LANES_TOOLS_NORMALIZED}; do
       effort_note="$(lanes_effort_override_note "${(U)tool}_EFFORT" 2>&1)" || effort_note=""
       [[ -z "$effort_note" ]] || note "${effort_note#注意: }"
     done
+    # Gemini レビューの effort（GEMINI_REVIEW_EFFORT）も同じく（構成に gemini があるときだけ）
+    if lanes_roles_has_tool gemini; then
+      effort_note="$(lanes_effort_override_note GEMINI_REVIEW_EFFORT 2>&1)" || effort_note=""
+      [[ -z "$effort_note" ]] || note "${effort_note#注意: }"
+    fi
   fi
 fi
 
