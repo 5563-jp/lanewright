@@ -11,7 +11,7 @@ rvd_label_round() { if [[ "$1" =~ '-r([0-9]+)$' ]]; then print -- "${match[1]}";
 rvd_state_file() { print -- "$1/.$2.review-state"; }   # <logdir> <series>
 # 本文も同じ JSON 記録に格納する。旧 key=value 形式は読み取りだけ互換にする。
 rvd_state_get() {
-  python3 - "$1" "$2" <<'PY_STATE'
+  python3 -I - "$1" "$2" <<'PY_STATE'
 import json, pathlib, sys
 p, key = pathlib.Path(sys.argv[1]), sys.argv[2]
 if p.is_file():
@@ -69,7 +69,7 @@ rvd_prev_verdict() { rvd_record_get "$(rvd_prev_record "$1" "$2" "$3")" verdict;
 # 無視対象のファイル（.env.local・手元の設定やメモなど）も中身まで比べる（QA の写しと同じ考え方）。
 # 既知の生成物（依存・ビルドとテストの出力・キャッシュ）は、どの深さにあっても比べない。レビューがテストを回すと書き換わるため。
 rvd_snapshot() {
-  python3 - "$1" <<'PY_SNAPSHOT'
+  python3 -I - "$1" <<'PY_SNAPSHOT'
 import hashlib, os, pathlib, stat, subprocess, sys
 GENERATED_DIRS = {"node_modules", ".next", ".turbo", ".cache", "coverage", "test-results", "playwright-report",
                   "dist", "build", "out", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
@@ -146,7 +146,7 @@ PY_SNAPSHOT
 # 枝（refs/heads）と origin の追跡枝は入れない。worktree 同士で共有され、並行する他のレーンの commit や fetch で変わるため（誤検出になる）。
 # ここで見ていない書き換え（他の枝の作成など）が前後の比較に出ないことは docs/roles.md に書いてある。
 rvd_git_guard() {
-  python3 - "$1" <<'PY_GUARD'
+  python3 -I - "$1" <<'PY_GUARD'
 import hashlib, os, pathlib, subprocess, sys
 wt = sys.argv[1]
 def git(*args):
@@ -185,7 +185,7 @@ PY_GUARD
 # 記録が変わった（使い回しが無くなった・親が回し直した）ら、同じ HEAD でも前回の結果を使わない。
 # <root> <prompt> <base> <mode> <policy> <model> <effort> [worktree] [使い回しの鍵] [レビュー役]
 rvd_context() {
-  python3 - "$@" <<'PY_CONTEXT'
+  python3 -I - "$@" <<'PY_CONTEXT'
 import hashlib, json, os, pathlib, sys
 root, prompt, base, mode, policy, model, effort = sys.argv[1:8]
 wt = sys.argv[8] if len(sys.argv) > 8 else ''
@@ -197,9 +197,9 @@ for p in [pathlib.Path(prompt), *[pathlib.Path(root) / f for f in
           ['review-dedup.zsh', 'run-codex-review.sh', 'run-claude-review.sh', '_common.sh', 'codex-review-output.py',
            'templates/claude-review-full.md', 'templates/claude-review-delta.md', 'templates/codex-review-focus.md']]]:
     h.update(p.read_bytes() + b'\0')
-# Gemini レビューは、そのランチャと agy の見張りも条件に入れる（Codex・Claude の条件は今までと同じ中身のまま）
+# Gemini レビューは、そのランチャと agy の見張り・出力の受け取り役も条件に入れる（Codex・Claude の条件は今までと同じ中身のまま）
 if kind == 'gemini':
-    for f in ['run-gemini-review.sh', 'gemini-agy.zsh']:
+    for f in ['run-gemini-review.sh', 'gemini-agy.zsh', 'gemini-stream-tee.py']:
         h.update((pathlib.Path(root) / f).read_bytes() + b'\0')
 # 検証の設定。名前は _common.sh の lanes_checks_present が見るものと同じ
 h.update(b'check-cmd:' + os.environ.get('LANES_CHECK_CMD', '').encode() + b'\0')
@@ -303,7 +303,7 @@ rvd_previous_followups() {
 rvd_save_state() {
   [[ "$5" == 'VERDICT: CLEAN' || "$5" == 'VERDICT: NEEDS_FIX' ]] || return 1
   local f; f="$(rvd_state_file "$1" "$2")"
-  python3 - "$f" "$3" "$4" "$5" "$6" "$7" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" "${13:-0}" <<'PY_SAVE'
+  python3 -I - "$f" "$3" "$4" "$5" "$6" "$7" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" "${13:-0}" <<'PY_SAVE'
 import json, os, pathlib, sys
 f, rnd, head, verdict, gate, label, context, tree, base, report, pending, blocking = sys.argv[1:]
 body = pathlib.Path(report).read_text(encoding='utf-8') if report else ''
@@ -447,6 +447,77 @@ rvd_reuse_blocked() {   # <logdir> → 0 = 前回の記録を使ってはいけ�
   local f
   for f in "${(@f)$(rvd_block_files "$1")}"; do [[ -e "$f" || -L "$f" ]] && return 0; done
   return 1
+}
+# 印の有無を置き場所ごとに出す（"inner=0|1 outer=0|1"。1 行目 logs/ の中、2 行目 外のパスを渡す）。子の前後で比べ、どちらか一方だけの
+# 削除や、実行中の新設も「印が変わった」として見つける（有無をまとめて 1 つにすると、片方だけの削除・新設を見落とす）
+rvd_block_state() {   # <印（logs/ の中）> <印（外）>
+  local i=0 o=0
+  [[ -e "$1" || -L "$1" ]] && i=1
+  [[ -e "$2" || -L "$2" ]] && o=1
+  print -r -- "inner=$i outer=$o"
+}
+# logs/ の外の印だけを置く（logs/ そのものが差し替えられて中へ書けないときなど）。<外の印のパス> は子の前に rvd_block_files で
+# 求めておいたもの（差し替えた後の logs/ の実パスで求め直すと、別の名前になる）。0 = 置けた
+rvd_place_outer_marker() {   # <外の印のパス>
+  [[ -n "$1" ]] || return 1
+  ( umask 077; mkdir -p -- "${1:h}" && : >> "$1" ) 2>/dev/null && [[ -f "$1" && ! -L "$1" ]]
+}
+# 書き込みの試み・改ざん（EXIT:4）で不合格にしたとき、その系列の前回の CLEAN を失効させる。失効させないと、書き込みが拒否されて
+# ツリーが変わらなかった場合に、次の通常の起動が同じ HEAD の省略（skip-same-head）や delta で、その古い合格を返してしまう。
+# 記録の last_exit を今回の終了コードにする（rvd_prev_record は last_exit が 0 の記録しか使わない。round の数え last_round は残す）。
+# 前回が NEEDS_FIX の記録はそのまま残す（次のレビューを full にして、未解決の指摘を引き継がせる。消すと未解決のまま CLEAN になり得る）。
+# 記録は logs/ を symlink を辿らずに開いた中で読み書きする（一時ファイルに書いてから名前を付け替える）。
+# 0 = 失効させた・失効させる記録が無い / 1 = 確かめられない・書けない（ランチャは「使い回し禁止」の印を置く）
+rvd_invalidate_state() {   # <logdir> <series> <終了コード> <label>
+  python3 -I - "$1" ".$2.review-state" "$3" "$4" <<'PY_INVALIDATE'
+import json, os, stat, sys
+d, name, code, label = sys.argv[1:5]
+try:
+    dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError:
+    sys.exit(1)
+try:
+    st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+except FileNotFoundError:
+    sys.exit(0)
+except OSError:
+    sys.exit(1)
+if not (stat.S_ISREG(st.st_mode) and st.st_nlink == 1):
+    sys.exit(1)
+try:
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd)
+    with os.fdopen(fd, "rb") as f:
+        raw = f.read().decode("utf-8")
+except (OSError, UnicodeError):
+    sys.exit(1)
+try:
+    record = json.loads(raw)
+except ValueError:
+    record = None
+if not isinstance(record, dict):
+    # 旧形式（key=value の行）。rvd_state_get と同じく、後ろの行ほど新しい値として読む
+    record = {}
+    for line in raw.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            record[k] = v
+if record.get("last_verdict") != "VERDICT: CLEAN":
+    sys.exit(0)
+record["last_exit"] = int(code)
+record["last_invalidated"] = f"{label}: 書き込みの試み・改ざんで不合格（EXIT:{code}）。この記録は再利用しない"
+tmp = f".{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+try:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666, dir_fd=dfd)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+except OSError:
+    try:
+        os.unlink(tmp, dir_fd=dfd)
+    except OSError:
+        pass
+    sys.exit(1)
+PY_INVALIDATE
 }
 rvd_mark_blocked() {   # <logdir> → 0 = logs/ の外の印は置けた（logs/ の中は置ければ置く）/ 1 = どちらも置けない
   local files inner outer ok=1

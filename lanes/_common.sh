@@ -24,11 +24,31 @@ for _lanes_k in "${LANES_AUTH_ENV_NAMES[@]}"; do
 done
 unset _lanes_k
 unset "${LANES_AUTH_ENV_NAMES[@]}"
-# 外す前の環境に戻す（今のシェルで export する。exec の直前か、$(...) / ( ) の子シェルの中だけで使う。CLI の子には使わない）
+# 呼び出し元の git の場所の指定（GIT_DIR・GIT_WORK_TREE・GIT_INDEX_FILE・GIT_OBJECT_DIRECTORY など）も、最初の git の呼び出しより前に外す。
+# 残っていると `git -C <worktree>` でもそちらが優先され、比較起点・履歴・状態の比較・子へ渡す管理領域が、別のリポジトリのものになり得る
+# （ランチャは引数の worktree の場所だけを信じる）。git がリポジトリを上へ探すのを止める境目（GIT_CEILING_DIRECTORIES）は外さない。
+# 外す前の値（export されていたものだけ）は API キーと同じく控えに持ち、chk-run.sh --query（親が chk-run.sh を回したときと同じ環境で
+# 指紋を照合する。chk-run.sh は自分で GIT_DIR などを外してから git を呼ぶ）と、入口から振り分け先への引き渡しのときだけ戻す
+typeset -ga LANES_GIT_LOCATION_ENV_NAMES=(GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+  GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX GIT_SHALLOW_FILE GIT_GRAFT_FILE GIT_REPLACE_REF_BASE GIT_NO_REPLACE_OBJECTS
+  GIT_QUARANTINE_PATH GIT_INTERNAL_SUPER_PREFIX)
+typeset -gA LANES_SAVED_GIT_ENV=()
+for _lanes_k in "${LANES_GIT_LOCATION_ENV_NAMES[@]}"; do
+  [[ "${parameters[$_lanes_k]-}" == *export* ]] && LANES_SAVED_GIT_ENV[$_lanes_k]="${(P)_lanes_k}"
+done
+unset _lanes_k
+unset "${LANES_GIT_LOCATION_ENV_NAMES[@]}"
+# 外す前の環境（API キーなどと git の場所の指定）に戻す（今のシェルで export する。exec の直前か、$(...) / ( ) の子シェルの中だけで使う。
+# CLI の子には使わない）
 lanes_restore_caller_auth_env() {
   local k
   for k in "${(@k)LANES_SAVED_AUTH_ENV}"; do export "$k=${LANES_SAVED_AUTH_ENV[$k]}"; done
+  for k in "${(@k)LANES_SAVED_GIT_ENV}"; do export "$k=${LANES_SAVED_GIT_ENV[$k]}"; done
 }
+# 作業場所（scratch）の置き場所（LANES_SCRATCH_ROOT）が相対パスなら、起動した場所を起点にここで絶対パスへ直す。
+# ランチャは途中で作業場所を移る（cd）ので、相対のままだと検査した場所・作った場所と、子へ渡す場所（--add-dir・TMPDIR・
+# LANES_SCRATCH・GIT_CONFIG_GLOBAL）がずれる。symlink はたどらない（:a。検査の lanes_scratch_guard は実体で比べる）
+[[ -z "${LANES_SCRATCH_ROOT:-}" || "$LANES_SCRATCH_ROOT" == /* ]] || LANES_SCRATCH_ROOT="${LANES_SCRATCH_ROOT:a}"
 # 外す前の環境に戻してコマンドを実行する（同じく子シェルの中で使う）
 lanes_with_caller_auth_env() { lanes_restore_caller_auth_env; "$@"; }
 
@@ -220,7 +240,7 @@ lanes_entry_preflight() {
 # 共通の config / config.worktree・hooks の中身（下のフォルダも）。git は呼ばない（呼ぶ前に比べるため）。値は出さず指紋だけ出す。
 # gitdir と共通の管理フォルダは、子を起動する前に git で確かめた値を渡す（子の後で git に聞き直さない）
 lanes_git_ctl_fingerprint() {
-  python3 - "$1/.git" "$2" "$3" <<'PY_GIT_CTL_FP'
+  python3 -I - "$1/.git" "$2" "$3" <<'PY_GIT_CTL_FP'
 import hashlib, os, pathlib, sys
 dotgit, gitdir, common = (pathlib.Path(a) for a in sys.argv[1:4])
 h = hashlib.sha256()
@@ -260,6 +280,45 @@ lanes_require_worktree() {
   git -C "$wt" rev-parse --verify -q HEAD >/dev/null 2>&1 || lanes_die "commit が 1 つも無い（HEAD 無し）: $wt"
 }
 
+# git から見た最上位が <worktree> そのもの（実体のパスで一致）であること。上位の別のリポジトリや、場所を差し替えたリポジトリを
+# 対象にしない（git の場所の環境変数は _common.sh を読んだ時点で外してある。これはその後の確かめ）
+lanes_require_toplevel() {   # <worktree>
+  local wt="${1:A}" top
+  top="$(git -C "$wt" rev-parse --path-format=absolute --show-toplevel 2>/dev/null)" || top=""
+  [[ -n "$top" && "${top:A}" == "$wt" ]] || lanes_die "worktree が git の最上位ではない（git の最上位: ${top:-確かめられない}）→ 起動禁止。worktree の最上位を渡す: $wt"
+}
+
+# 専用の linked worktree（git worktree add で作ったもの）であること。.git が普通のファイルというだけでは、管理領域を外に置いた本体 checkout
+# （git init --separate-git-dir）や通常の submodule も通ってしまうので、次の全部を確かめる:
+#   - worktree の .git が symlink でない普通のファイル
+#   - 管理領域（git-dir）が共通の管理領域（git-common-dir）と別で、その直下の worktrees/ の中にある（本体・submodule は git-dir と共通が同じ）
+#   - その管理領域の gitdir（登録先）が、この worktree の .git を指している
+#   - git worktree list --porcelain に、この worktree が登録されている
+# 確かめた管理領域は LANES_WT_GITDIR / LANES_WT_GITCOMMON に入れる（実体のパス）。どれかが違えば lanes_die（exit 2）
+lanes_require_linked_worktree() {   # <worktree>
+  local wt="${1:A}" gd gc reg list entry found=0
+  [[ -f "$wt/.git" && ! -L "$wt/.git" ]] || lanes_die "本体 checkout（.git がディレクトリ）またはリンクの .git では起動しない。git worktree add で専用 worktree を作ってから渡す: $wt"
+  gd="$(git -C "$wt" rev-parse --path-format=absolute --git-dir 2>/dev/null)" || gd=""
+  gc="$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || gc=""
+  [[ -n "$gd" && -n "$gc" && -d "$gd" && -d "$gc" ]] || lanes_die "git の管理領域を確かめられない: $wt"
+  gd="${gd:A}"; gc="${gc:A}"
+  [[ "$gd" != "$gc" && "${gd:h}" == "$gc/worktrees" ]] \
+    || lanes_die "専用の linked worktree ではない（管理領域を外に置いた本体 checkout・submodule など。管理領域: $gd）→ 起動禁止。git worktree add で専用 worktree を作ってから渡す: $wt"
+  reg=""
+  [[ -f "$gd/gitdir" && ! -L "$gd/gitdir" ]] && reg="$(<"$gd/gitdir")"
+  reg="${reg%%$'\n'*}"
+  # worktree.useRelativePaths の構成では、登録先が管理領域から見た相対パスで書かれる
+  [[ -z "$reg" || "$reg" == /* ]] || reg="$gd/$reg"
+  [[ -n "$reg" && "${reg:A}" == "$wt/.git" ]] \
+    || lanes_die "linked worktree の登録先（$gd/gitdir）がこの worktree を指していない → 起動禁止。git worktree repair で直すか、作り直してから渡す: $wt"
+  list="$(git -C "$wt" worktree list --porcelain -z 2>/dev/null)" || lanes_die "git worktree list を読めない: $wt"
+  for entry in "${(@0)list}"; do
+    [[ "$entry" == "worktree "* && "${${entry#worktree }:A}" == "$wt" ]] && found=1
+  done
+  (( found )) || lanes_die "git worktree list にこの worktree が登録されていない → 起動禁止: $wt"
+  typeset -g LANES_WT_GITDIR="$gd" LANES_WT_GITCOMMON="$gc"
+}
+
 lanes_require_prompt() {
   local p="$1"
   [[ -s "$p" ]] || lanes_die "プロンプトが無いか空: $p"
@@ -294,7 +353,7 @@ lanes_codex_auth_state() {
 lanes_claude_auth_state() {
   local s rc=0; s="$("$CLAUDE_BIN" auth status < /dev/null 2>/dev/null)" || rc=$?
   # JSON 本文をプロセス引数へ渡さず、標準入力だけで検査する。
-  print -r -- "$s" | python3 -c '
+  print -r -- "$s" | python3 -I -c '
 import json, sys
 rc = int(sys.argv[1])
 try:
@@ -340,7 +399,7 @@ lanes_codex_no_mcp_args() {
   (( $# == 1 )) && [[ -d "$1" ]] || lanes_die "MCP の確認対象 worktree を 1 つ指定すること"
   lanes_resolve_bin CODEX_BIN codex
   local overrides item
-  overrides="$(python3 - "$CODEX_BIN" "$1" <<'PY'
+  overrides="$(python3 -I - "$CODEX_BIN" "$1" <<'PY'
 import json, re, subprocess, sys
 def servers(args):
     p = subprocess.run([sys.argv[1], *args, "mcp", "list", "--json"],
@@ -388,6 +447,22 @@ lanes_check_gemini_subscription() {
   [[ "$(lanes_gemini_auth_state)" == subscription ]] || lanes_die "agy のログイン情報が無い（~/.gemini/antigravity-cli）→ 起動禁止。対話モードの agy でサブスクのアカウントにログインする"
 }
 
+# ---- CLI の --help の読み方（オプション名は単語として照合する）----
+# 部分一致（*--mode*）だと --model の行にも当たり、--model の説明の「subscription plan」だけで plan モードがあると取り違える。
+# オプション名の前後が英数字・_・- でない（行頭・空白・カンマ・= など）ときだけ、そのオプションの行として数える。
+# Gemini レビューのランチャ（run-gemini-review.sh）と起動前点検（lanes-doctor.sh）が同じ関数を使う
+lanes_help_has_option() {   # <help の本文> <オプション名（--sandbox など）> → 0 = その名前のオプションがある
+  local line re="(^|[^A-Za-z0-9_-])${2}([^A-Za-z0-9_-]|\$)"
+  for line in "${(@f)1}"; do [[ "$line" =~ $re ]] && return 0; done
+  return 1
+}
+# agy の --mode の行（オプション名として --mode がある行）に、選択肢 plan が単語としてあるか（planning などは数えない）
+lanes_agy_help_mode_has_plan() {   # <help の本文> → 0 = plan モードがある
+  local line opt='(^|[^A-Za-z0-9_-])--mode([^A-Za-z0-9_-]|$)' word='(^|[^A-Za-z0-9_-])plan([^A-Za-z0-9_-]|$)'
+  for line in "${(@f)1}"; do [[ "$line" =~ $opt && "$line" =~ $word ]] && return 0; done
+  return 1
+}
+
 # ---- Gemini レビュー（run-gemini-review.sh）の読み取り専用の担保（外から上書きできない部分）----
 # agy に起動単位で渡す設定（--settings。利用者の設定ファイルは変えない。deny は利用者の許可設定より優先される）を 1 行の JSON で出す。
 # 拒否（permissions.deny）:
@@ -416,13 +491,16 @@ PY_GEM_SETTINGS
 }
 
 # 同じ道具でレビューしないための確かめ。logs/ に、その種別（.pid の lane=）の実装レーンの記録が 1 本でもあれば 0 を返し、
-# 見つけた記録の名前を REPLY に入れる。無ければ 1。<lane> は lanes_mark_start に渡す名前（gemini / codex / claude）。
+# 見つけた記録の名前を REPLY に入れる。無ければ 1。確かめられない（logs/ や候補の .pid・証跡を開けない・読めない、logs/ が
+# symlink など）ときは 2 を返し、理由（読めなかった名前など）を REPLY に入れる（「記録なし」と取り違えて起動しない）。
+# <lane> は lanes_mark_start に渡す名前（gemini / codex / claude）。
 # 見るもの: logs/ の直下の <label>.pid（回転した .prev-* も）の「lane=<lane>」の行と、<label>.evidence.md（回転したものも）の
 # 1 行目の見出し（「## Gemini 実装証跡（」など）。.done には種別が無いので見ない。symlink・普通のファイルでないものは中身を読まない。git は呼ばない
 lanes_impl_lane_recorded() {   # <logdir> <lane>
-  local found
+  local found rc=0
   typeset -g REPLY=""
-  [[ -d "$1" && ! -L "$1" ]] || return 1
+  [[ -e "$1" || -L "$1" ]] || return 1
+  if [[ ! -d "$1" || -L "$1" ]]; then REPLY="logs/ が本物のフォルダではない（symlink など）"; return 2; fi
   found="$(python3 -I - "$1" "$2" <<'PY_IMPL_LANE'
 import os, re, stat, sys
 d, lane = sys.argv[1:3]
@@ -432,30 +510,38 @@ evidence_re = re.compile(r".+\.evidence(?:\.prev-[0-9]{8}-[0-9]{6}(?:-[0-9]+)?)?
 try:
     entries = sorted(os.scandir(d), key=lambda e: e.name)
 except OSError:
-    sys.exit(1)
+    print("logs/ の一覧を読めない"); sys.exit(2)
+unreadable = []
 for e in entries:
+    is_pid, is_evidence = pid_re.fullmatch(e.name), evidence_re.fullmatch(e.name) and lane in heads
+    if not (is_pid or is_evidence):
+        continue
     try:
         s = e.stat(follow_symlinks=False)
     except OSError:
-        continue
+        unreadable.append(e.name); continue
     if not stat.S_ISREG(s.st_mode):
         continue
     try:
-        if pid_re.fullmatch(e.name):
+        if is_pid:
             with open(e.path, encoding="utf-8", errors="replace") as f:
                 if any(line.rstrip("\r\n") == "lane=" + lane for line in f):
                     print(e.name); sys.exit(0)
-        elif evidence_re.fullmatch(e.name) and lane in heads:
+        else:
             with open(e.path, encoding="utf-8", errors="replace") as f:
                 if f.readline().startswith(heads[lane]):
                     print(e.name); sys.exit(0)
     except OSError:
-        continue
+        unreadable.append(e.name)
+if unreadable:
+    print("読めない記録: " + "・".join(unreadable[:5]) + (" ほか" if len(unreadable) > 5 else "")); sys.exit(2)
 sys.exit(1)
 PY_IMPL_LANE
-)" || return 1
+)" || rc=$?
   REPLY="$found"
-  return 0
+  (( rc == 0 || rc == 1 )) && return $rc
+  [[ -n "$REPLY" ]] || REPLY="確かめる処理が失敗（exit $rc）"
+  return 2
 }
 
 # 「枝 @ HEAD (origin/<統合先の枝> @ SHA)」。統合先は LANES_BASE_BRANCH
@@ -500,7 +586,7 @@ PYCHECKS
 
 LANES_FINDING_RE='^[[:space:]]*(([-*+]|[0-9]+[.)])[[:space:]]+)?(\*\*)?\[P'
 lanes_parse_review() {   # <log> <extract|infer|codex|checks|resolved|followups|P0|P1|P2|P3> [完了証明]
-  python3 - "$1" "$2" "${3:-}" "${LANES_REVIEW_CHECKS_REUSED:-0}" <<'PYREVIEW'
+  python3 -I - "$1" "$2" "${3:-}" "${LANES_REVIEW_CHECKS_REUSED:-0}" <<'PYREVIEW'
 import hashlib, json, os, pathlib, re, sys
 mode = sys.argv[2]
 # 必須検証を親の chk-run.sh の記録で済ませたレビュー。未実施・省略の報告は不足に数えず、失敗の報告だけ不足にする
@@ -693,8 +779,8 @@ lanes_codex_verdict() { lanes_parse_review "$1" codex "${2:-}"; }
 # 使い回す」のを防ぐ仕組みで、意図的な細工までは防がない（確認コマンド自体を書き換えられるのと同じ前提。lanes/README.md の 7 章）。
 # 載せられなくても起動は止めない（chk-run.sh がこのランチャの記録を入力として数え、確認済みの記録を使い回せなくなるだけ。安全側）。
 # 知らせて 0 を返す（set -e の下で呼び出し元を止めない）
-lanes_records_claim() {   # <logdir> <label:名前|file:名前>...
-  local logdir="$1"; shift
+# 台帳へ載せる本体。0 = 載せた（既に載っている）/ 1 = 載せられない（何も出さない）
+lanes_records_claim_try() {   # <logdir> <label:名前|file:名前>...
   python3 -I -c 'import os, stat, sys
 d, entries = sys.argv[1], sys.argv[2:]
 lines = []
@@ -719,7 +805,11 @@ try:
             # 1 回の追記で書く（並行して起動した別の label の行と混ざらない）
             f.write((b"" if not data or data.endswith(b"\n") else b"\n") + b"\n".join(add) + b"\n")
 except OSError:
-    sys.exit(1)' "$logdir" "$@" 2>/dev/null && return 0
+    sys.exit(1)' "$@" 2>/dev/null
+}
+lanes_records_claim() {   # <logdir> <label:名前|file:名前>...
+  local logdir="$1"
+  lanes_records_claim_try "$@" && return 0
   # 子シェルの中で出す（閉じた stderr へ print -u2 すると、そのシェルごと止まるため）
   ( print -u2 -- "NOTE: ランチャの記録の台帳（logs/.lanes-records）に載せられない（symlink・ハードリンク・FIFO などになっている、または書けない）。起動は続けるが、chk-run.sh はこのランチャの記録を入力として数える（確認済みの記録を使い回せない）: $logdir" ) || true
   return 0
@@ -741,7 +831,7 @@ lanes_ps_lstart() { LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | sed 's/^
 
 # 同一性不明は終了済みと区別する。削除・再起動は止め、停止信号は送らない。
 lanes_process_state() {
-  python3 - "$1" "$2" <<'PY'
+  python3 -I - "$1" "$2" <<'PY'
 import os, subprocess, sys
 try:
     pid = int(sys.argv[1])
@@ -1038,7 +1128,17 @@ except Exception:
 
 # 呼び出し元の標準入出力を保って背景起動する。LANES_CHILD を wait すれば孫の回収まで完了する。
 lanes_start_child() {
-  python3 -c "$LANES_PROCESS_GUARD" supervise "$@" <&0 &
+  python3 -I -c "$LANES_PROCESS_GUARD" supervise "$@" <&0 &
+  typeset -g LANES_CHILD=$!
+  typeset -g LANES_MANAGED_CHILD_PID="$LANES_CHILD"
+  lanes_record_child "$LANES_CHILD"
+}
+# lanes_start_child と同じ。ただし作業場所（cwd）を <dir> にするのは監督役とその子だけ（呼び出し元のシェルは移らない）。
+# 親（ランチャ）が対象の作業ツリーへ cd せずに済むので、親が回す python3・git が作業ツリーの中の同名のモジュールや設定に引きずられない。
+# 子シェルで cd してから exec で監督役に置き換わるので、LANES_CHILD は監督役の pid（lanes_start_child と同じ扱い）
+lanes_start_child_in() {   # <dir> <コマンド...>
+  local dir="$1"; shift
+  ( builtin cd -q -- "$dir" && exec python3 -I -c "$LANES_PROCESS_GUARD" supervise "$@" ) <&0 &
   typeset -g LANES_CHILD=$!
   typeset -g LANES_MANAGED_CHILD_PID="$LANES_CHILD"
   lanes_record_child "$LANES_CHILD"
@@ -1121,6 +1221,52 @@ lanes_fresh_file() {
   [[ ! -e "$1" && ! -L "$1" ]] || lanes_die "書き込み先を空けられない（フォルダなど）: $1"
 }
 
+# dry-run が書く結合済みの指示書（<label>.dry-run.prompt.md）の置き場所を、書く前に確かめる。dry-run は lanes_mark_start（logs/ の検査）を
+# 通らないので、ここで同じ考え方の確かめをする。前の実行の子が logs/ の中に置いたリンクを辿って、外のファイルを上書きしないため:
+#   - logs/ が symlink でない本物のフォルダで、worktree の直下にある（無ければ作る）
+#   - ランチャの記録の台帳に載せられる（載せられない＝台帳がリンクなど。dry-run でも書かずに止める）
+#   - 書き込み先が symlink でもフォルダでもない。前からある物（ハードリンクを含む）は消し、後の書き込みが新しい普通のファイルを作るようにする
+# 子は動いていない（dry-run は子を起動しない）ので、消してから書くまでの間に置き直されることはない
+lanes_dry_run_target() {   # <worktree> <logdir> <label> <書き込み先>
+  local wt="${1:A}" logdir="$2" label="$3" file="$4"
+  [[ ! -L "$logdir" ]] || lanes_die "logs/ が symlink → dry-run でも書かない: $logdir"
+  mkdir -p -- "$logdir" || lanes_die "logs/ を作れない: $logdir"
+  [[ -d "$logdir" && ! -L "$logdir" && "${logdir:A}" == "$wt/logs" ]] || lanes_die "logs/ が worktree の直下の本物のフォルダではない → dry-run でも書かない: $logdir"
+  [[ "${file:h}" == "$logdir" ]] || lanes_die "dry-run の書き込み先が logs/ の直下ではない: $file"
+  lanes_records_claim_try "$logdir" "label:$label" \
+    || lanes_die "ランチャの記録の台帳（logs/.lanes-records）に載せられない（symlink・ハードリンク・FIFO など）→ dry-run でも書かない: $logdir"
+  [[ ! -d "$file" || -L "$file" ]] || lanes_die "dry-run の書き込み先がフォルダ: $file"
+  lanes_fresh_file "$file"
+}
+
+# 開いておいたフォルダの中で、新しい一時ファイルに書いてから名前を置き換える（標準入力の中身を書く）。置き換えは名前の付け替えなので、
+# 元の名前が symlink やハードリンクでも、その先のファイルは書き換えない。フォルダ自体も symlink なら開かない（codex-review-output.py と同じ書き方）
+lanes_write_new_at() {   # <フォルダ> <名前> [rewind（標準入力を頭から読み直す。開いたままの一時ファイルの写しを渡すとき）]
+  python3 -I -c 'import os, sys
+d, name = sys.argv[1], sys.argv[2]
+if not name or "/" in name or name in (".", ".."):
+    sys.exit(2)
+if sys.argv[3:4] == ["rewind"]:
+    os.lseek(0, 0, os.SEEK_SET)
+dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+tmp = f".{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666, dir_fd=dfd)
+try:
+    with os.fdopen(fd, "wb") as f:
+        while True:
+            chunk = sys.stdin.buffer.read(1 << 20)
+            if not chunk:
+                break
+            f.write(chunk)
+    os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+except BaseException:
+    try:
+        os.unlink(tmp, dir_fd=dfd)
+    except OSError:
+        pass
+    raise' "$@"
+}
+
 # logs/ の識別子（dev:inode）。symlink は辿らない
 lanes_logdir_id() {
   python3 -I -c 'import os,sys
@@ -1151,9 +1297,11 @@ lanes_logdir_intact() {
 }
 
 # 子が終わった直後に呼ぶ。差し替えられていたら、そこへは何も書かずに止める（.done も書かない → lanes-status は DEAD）
+# ランチャが関数 lanes_logdir_tamper_hook を定義していれば、止める前に 1 回呼ぶ（logs/ の外に印を置くなど。失敗しても止めるのは同じ）
 lanes_logdir_check() {
   lanes_logdir_intact && return 0
   print -u2 -- "error: 実行中に logs/ が差し替えられた（logs/ 自体の symlink・別フォルダ、または中の symlink・ハードリンク・特殊ファイル）。記録を書かずに止める: $LANES_LOGDIR"
+  if (( ${+functions[lanes_logdir_tamper_hook]} )); then lanes_logdir_tamper_hook || true; fi
   LANES_DONE_WRITTEN=1
   exit 5
 }
@@ -1197,7 +1345,7 @@ lanes_kill_child() {
   [[ -n "$started" ]] || { [[ "$(lanes_process_state "$LANES_CHILD" "")" == dead ]]; return $?; }
   local mode=stop
   [[ "${LANES_MANAGED_CHILD_PID:-}" == "$LANES_CHILD" ]] && mode=stop-supervisor
-  python3 -c "$LANES_PROCESS_GUARD" "$mode" "$LANES_CHILD" "$started" || return $?
+  python3 -I -c "$LANES_PROCESS_GUARD" "$mode" "$LANES_CHILD" "$started" || return $?
 }
 
 lanes_finish_after_stop() {
@@ -1254,6 +1402,8 @@ lanes_scratch_path() {
 lanes_scratch_prepare() {
   local wt="$1" label="$2" lane="$3" d top br
   d="$(lanes_scratch_path "$wt" "$label")"
+  # 検査・作成・子への引き渡しを同じ絶対パスで行う（LANES_SCRATCH_ROOT の相対指定は _common.sh を読んだ時点で絶対パスに直してある）
+  [[ "$d" == /* ]] || lanes_die "scratch の置き場所が絶対パスにならない: $d（LANES_SCRATCH_ROOT=$LANES_SCRATCH_ROOT）"
   lanes_scratch_guard "$d" || lanes_die "scratch の置き場所が不正: $d（LANES_SCRATCH_ROOT=$LANES_SCRATCH_ROOT）"
   mkdir -p "$d" || lanes_die "scratch を作れない: $d"
   top="$(lanes_scratch_toplevel "$wt")"

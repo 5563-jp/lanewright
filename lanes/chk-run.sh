@@ -111,7 +111,7 @@ fi
 # 出力先がソースと同じ場所でも、自身の出力ファイルだけを扱う。
 output_names=(fetch.log merge.log check.log check-state.json)
 check_outputs() {
-python3 - "$wt" "$o" "$cache" "${output_names[@]}" <<'PY_OUTPUT'
+python3 -I - "$wt" "$o" "$cache" "${output_names[@]}" <<'PY_OUTPUT'
 import os, subprocess, sys
 wt, outdir, cache = sys.argv[1:4]
 def collect_tracked(root_dir, visited=None):
@@ -162,7 +162,7 @@ fi
 
 # 未追跡ファイルを含む作業ツリー状態と、実行環境・導入済み依存の同一性フィンガープリントを計算する
 read_state() {
-python3 - "$wt" "$o" "$cache" "$lanes_dir" "$port" "$generated_def" "${output_names[@]}" <<'PY'
+python3 -I - "$wt" "$o" "$cache" "$lanes_dir" "$port" "$generated_def" "${output_names[@]}" <<'PY'
 import hashlib, os, shutil, stat, subprocess, sys
 
 wt, outdir, cache_path = [os.path.realpath(x) for x in sys.argv[1:4]]
@@ -917,7 +917,7 @@ stop_check() {
     echo "確認コマンドの監督役の開始時刻を確認できない。停止・回収未確認" >&2
     return 1
   fi
-  python3 -c "$guard" stop-supervisor "$pp" "$pp_start" || return 1
+  python3 -I -c "$guard" stop-supervisor "$pp" "$pp_start" || return 1
   local stopped_rc=0
   wait "$pp" 2>/dev/null || stopped_rc=$?
   pp=""
@@ -930,7 +930,7 @@ trap 'exit 129' HUP
 
 : > "$o/check-state.json" || exit 1
 LANES_CHECK_PORT=$port LANES_CHECK_OUTDIR=$o \
-  python3 -c "$guard" supervise-state "$o/check-state.json" bash -c "$check_cmd" > "$o/check.log" 2>&1 < /dev/null & pp=$!
+  python3 -I -c "$guard" supervise-state "$o/check-state.json" bash -c "$check_cmd" > "$o/check.log" 2>&1 < /dev/null & pp=$!
 read_pp_start || true
 r=0
 wait "$pp" || r=$?
