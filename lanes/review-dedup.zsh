@@ -586,13 +586,15 @@ rvd_inflight_present() {   # <logdir> → 0 = 印がある（確かめられな�
   local f; f="$(rvd_inflight_file "$1")" || return 0
   [[ -e "$f" || -L "$f" ]]
 }
-# <logdir> <series> <label>（覚えた中身は標準入力で渡す）→ 0 = 置いた / 1 = 置けない（ランチャは子を起動しない）
+# <logdir> <series> <label> <logs/ の識別子（dev:inode）>（覚えた中身は標準入力で渡す）→ 0 = 置いた / 1 = 置けない（ランチャは子を起動しない）。
+# 識別子も残す（後始末は同じ logs/ のときだけ記録を戻す。消して作り直した worktree の logs/ に古い記録を戻さない）
 rvd_inflight_begin() {
   local f; f="$(rvd_inflight_file "$1")" || return 1
+  [[ -n "${4:-}" ]] || return 1
   ( umask 077; mkdir -p -- "${f:h}" ) 2>/dev/null || return 1
   python3 -I -c '
 import json, os, sys
-path, series, label = sys.argv[1:4]
+path, series, label, logdir_id = sys.argv[1:5]
 states = json.loads(sys.stdin.read())
 if not isinstance(states, dict):
     sys.exit(1)
@@ -602,14 +604,14 @@ tmp = f".{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
 fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
 try:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(json.dumps({"series": series, "label": label, "states": states}, ensure_ascii=False) + "\n")
+        f.write(json.dumps({"series": series, "label": label, "logdir_id": logdir_id, "states": states}, ensure_ascii=False) + "\n")
     os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
 except BaseException:
     try:
         os.unlink(tmp, dir_fd=dfd)
     except OSError:
         pass
-    raise' "$f" "$2" "$3" 2>/dev/null
+    raise' "$f" "$2" "$3" "$4" 2>/dev/null
 }
 rvd_inflight_end() {   # <logdir> → 0 = 消した（無かった）/ 1 = 消せない
   local f; f="$(rvd_inflight_file "$1")" || return 1
@@ -619,7 +621,7 @@ rvd_inflight_end() {   # <logdir> → 0 = 消した（無かった）/ 1 = 消�
 # 印があれば後始末する。排他（rvd_review_lock）を取った後、前回の記録を読む前に呼ぶ。
 # 0 = 印なし / 1 = 後始末した / 2 = 後始末しきれない（「使い回し禁止」の印を置いた。置けなければその旨も出す）
 rvd_inflight_recover() {   # <logdir>
-  local logdir="$1" f data series="" label="" states="" s_rc=0 i_rc=0
+  local logdir="$1" f data series="" label="" states="" rec_id="" now_id="" s_rc=0 i_rc=0
   local -a data_lines
   f="$(rvd_inflight_file "$logdir")" || { rvd_mark_blocked "$logdir" 2>/dev/null || true; return 2; }
   [[ -e "$f" || -L "$f" ]] || return 0
@@ -634,13 +636,27 @@ if not (isinstance(d, dict) and isinstance(d.get("series"), str) and isinstance(
     sys.exit(1)
 if any(not s or "\n" in s or "/" in s for s in (d["series"], d["label"])):
     sys.exit(1)
-print(d["series"]); print(d["label"]); print(json.dumps(d["states"], sort_keys=True))' "$f" 2>/dev/null)" || data=""
+rid = d.get("logdir_id", "")
+if not isinstance(rid, str) or "\n" in rid:
+    sys.exit(1)
+print(d["series"]); print(d["label"]); print(rid or "-"); print(json.dumps(d["states"], sort_keys=True))' "$f" 2>/dev/null)" || data=""
   if [[ -n "$data" ]]; then
     data_lines=("${(@f)data}")
-    series="${data_lines[1]:-}"; label="${data_lines[2]:-}"; states="${data_lines[3]:-}"
+    series="${data_lines[1]:-}"; label="${data_lines[2]:-}"; rec_id="${data_lines[3]:-}"; states="${data_lines[4]:-}"
   fi
   if [[ -z "$series" || -z "$states" ]]; then
     ( print -u2 -- "注意: 途中で終わったレビューの「確認中」の印（$f）を読めない。「使い回し禁止」の印を置いて、印を消す" ) || true
+    rvd_mark_blocked "$logdir" 2>/dev/null || ( print -u2 -- "→ 「使い回し禁止」の印も置けない。次のレビューは --mode full --force で回す" ) || true
+    rm -f -- "$f" 2>/dev/null || true
+    return 2
+  fi
+  # 印を置いたときと別の logs/ なら、古い記録は戻さない（消して作り直した worktree の logs/ に古い記録を入れない）。
+  # ただし、途中で終わったレビューの子が logs/ を差し替えて偽の記録を置いた（差し替えを見つける前にランチャが止まった）ことも
+  # あり得るので、「使い回し禁止」の印を置く（今の logs/ の記録を信じない。人が中身を確かめてから印を消す）
+  now_id="$(python3 -I -c 'import os, sys
+s = os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$logdir" 2>/dev/null)" || now_id=""
+  if [[ -z "$now_id" || "$rec_id" != "$now_id" ]]; then
+    ( print -u2 -- "注意: 前のレビュー（$label）の「確認中」の印は、今の logs/ とは別の logs/ のもの（作り直した worktree か、子が差し替えた logs/）。記録は戻さず、「使い回し禁止」の印を置く" ) || true
     rvd_mark_blocked "$logdir" 2>/dev/null || ( print -u2 -- "→ 「使い回し禁止」の印も置けない。次のレビューは --mode full --force で回す" ) || true
     rm -f -- "$f" 2>/dev/null || true
     return 2
@@ -724,6 +740,9 @@ rvd_checks_recheck() {   # <lanes_dir> <wt>
   [[ "${RVD_CHECKS_REUSE:-}" == yes ]] || return 0
   [[ "$RVD_CHECKS_PORT" == <-> && "$RVD_CHECKS_OUTDIR" == /* && -n "$RVD_CHECKS_INPUT" && -f "$lanes_dir/chk-run.sh" ]] || return 2
   out="$(
+    # 作業ツリーの外から呼ぶ（chk-run.sh は自分の python3 を起動した場所で探すので、作業ツリーへ移ったランチャから呼んでも、
+    # PATH の . などで作業ツリーの中の物を選ばない。chk-run.sh は引数の worktree へ自分で移る。指紋は作業場所に左右されない）
+    builtin cd -q / || exit 2
     # 問い合わせたときの環境に戻す（子シェルの中だけ）。後から export された変数は外し、外された・値の変わった変数だけを戻す
     # （同じ値の変数には触らない。Mac の zsh は XPC_SERVICE_NAME などへの代入で子シェルごと止まることがある）
     for k in ${(k)parameters[(R)*export*]}; do (( ${+RVD_CHECKS_QUERY_ENV[$k]} )) || unset -- "$k" 2>/dev/null || true; done

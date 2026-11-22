@@ -836,6 +836,15 @@ r, cap, done = gem(wt, 'it-r1')
 check('次のレビューは印を見つけて記録を子の前に戻し（偽造を消す）、中断した系列の前回の CLEAN を再利用しない（agy を起動する）',
       not forged.exists() and not inflight_file(wt).exists() and cap is not None and 'skip-same-head' not in evidence(wt, 'it-r1')
       and '子の後の確認の前に終わっていた' in r.stderr and r.returncode == 0, out(r))
+wt, first = repo('interrupt-otherdir')
+gem(wt, 'io-r1')
+inflight_file(wt).parent.mkdir(parents=True, exist_ok=True)
+inflight_file(wt).write_text(json.dumps({'series': 'io', 'label': 'io-r1', 'logdir_id': '1:1',
+                                         'states': {'.forged.review-state': 'e30K'}}) + '\n')
+r, cap, done = gem(wt, 'io-r1')
+check('印が別の logs/ のもの（作り直した worktree・差し替えた logs/）なら記録は戻さず、「使い回し禁止」の印を置いて full でレビューする',
+      not (wt / 'logs' / '.forged.review-state').exists() and not inflight_file(wt).exists() and (wt / 'logs' / '.review-reuse-blocked').exists()
+      and cap is not None and r.returncode == 0, out(r))
 wt, first = repo('interrupt-dry')
 gem(wt, 'id-r1')
 inflight_file(wt).parent.mkdir(parents=True, exist_ok=True); inflight_file(wt).write_text('{}')

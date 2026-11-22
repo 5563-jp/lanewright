@@ -180,7 +180,8 @@ command -v python3 >/dev/null 2>&1 || lanes_die "python3 が PATH に無い"
 # python3 は作業ツリーの中の同名のファイルを選び得る（-I が隔離するのは起動後のモジュール検索だけで、どの python3 を選ぶかには効かない）。
 # 以後このシェルの `python3 ...` は下の関数を通って、ここで確定した実行ファイルを使う。背景起動・exec・別プロセスへ渡すコマンドの
 # 先頭（監督役の起動・受け取り役・codex-review-output.py）は関数を通らないので、"$LANES_PYTHON3" をそのまま書く
-typeset -g LANES_PYTHON3="$(command -v python3)"
+# whence -p: 関数・別名を見ずに PATH から探す（_common.sh を同じシェルで 2 回読んでも、下の関数の名前を拾わない）
+typeset -g LANES_PYTHON3="$(whence -p python3 2>/dev/null || true)"
 LANES_PYTHON3="${LANES_PYTHON3:a}"
 [[ "$LANES_PYTHON3" == /* && -f "$LANES_PYTHON3" && -x "$LANES_PYTHON3" ]] || lanes_die "python3 の場所を確かめられない: $LANES_PYTHON3"
 python3() { "$LANES_PYTHON3" "$@"; }

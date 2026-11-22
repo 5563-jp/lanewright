@@ -229,7 +229,7 @@ states_before="$(rvd_states_snapshot "$logdir")" || lanes_die "レビュー前�
 blocked_before=0; rvd_reuse_blocked "$logdir" && blocked_before=1
 # 子の起動前に「確認中」の印（覚えた再利用の記録）を logs/ の外へ置く。子の後の確認（記録の復元・印の確認・変更の判定）が全部済んだら
 # 消す（inflight_done）。途中で終わったら、次のレビューが印を見つけて後始末する（review-dedup.zsh の rvd_inflight_recover）
-print -r -- "$states_before" | rvd_inflight_begin "$logdir" "$series" "$label" \
+print -r -- "$states_before" | rvd_inflight_begin "$logdir" "$series" "$label" "$LANES_LOGDIR_ID" \
   || lanes_die "途中で終わったときの後始末の印（$(rvd_inflight_file "$logdir")）を置けない → 起動しない。${XDG_STATE_HOME:-~/.local/state}/lanewright/ の権限を確かめる"
 inflight_done() {
   rvd_inflight_end "$logdir" && return 0
