@@ -129,7 +129,7 @@ STUB_AGY_RESPONSE="$CLEAN" grv 2 self-r2 --impl-engine other
 has "$T/out" '--impl-engine は claude|gemini|codex'
 pass "Gemini で実装したもの（logs/ の lane=gemini・--impl-engine gemini）は直接呼んでも exit 2（再利用・起動より前。記録は変えない）"
 # 実装の記録（.pid）を読めない・普通のファイルでないときは、実装元が分からないので Gemini 実装と同じに扱う（迷ったら Gemini に回さない）
-print -r -- $'pid=999999\nlane=gemini' > "$wt/logs/unread.pid"; chmod 000 "$wt/logs/unread.pid"
+print -r -- $'pid=999999\nlane=claude' > "$wt/logs/unread.pid"; chmod 000 "$wt/logs/unread.pid"   # 読めれば Gemini 実装ではない中身
 STUB_AGY_RESPONSE="$CLEAN" grv 2 self-r3
 has "$T/out" '実装元が分からない'
 [[ "$(calls)" == 0 ]] || fail "読めない実装の記録があるのに agy を起動した"
@@ -336,7 +336,8 @@ pass "LANES_REVIEW_REQUIRE_CHECKS=1 は記録が無ければ止め、chk-run.sh 
 
 # ---- 7. 見張り・再試行・dry-run ----
 newrepo watch; L="$wt/logs"
-STUB_AGY_FIRST_ERROR="$T/first-error.flag" STUB_AGY_RESPONSE="$CLEAN" grv 0 retry
+# 1 回目は 1.2 秒かけて失敗させる（残り時間が秒の境目しだいで全体の上限と同じ 20 にならないように。1 割以上は残る）
+STUB_AGY_FIRST_ERROR="$T/first-error.flag" STUB_AGY_FIRST_SLEEP=1.2 STUB_AGY_RESPONSE="$CLEAN" grv 0 retry
 [[ "$(calls)" == 2 ]] || fail "一時エラーの後にやり直していない（呼び出し $(calls) 回）"
 [[ -f "$L/retry.try1.json" && -f "$L/retry.try1.stderr.log" ]] || fail "1 回目の記録（try1）が残らない"
 has "$L/retry.evidence.md" '一時エラーで 1 回やり直し'

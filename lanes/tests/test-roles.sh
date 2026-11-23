@@ -413,7 +413,7 @@ gem_dry || fail "レビュー・QA の .pid（lane=gemini-review / qa）を Gemi
 rm -f -- "$wtr/logs/grev.pid" "$wtr/logs/gqa.pid"
 pass "logs/ の .pid に Gemini の実装レーン（lane=gemini）があれば Gemini 実装とみなす（--impl-engine claude でも打ち消さない。レビュー・QA は数えない）"
 # 実装の記録を読めないときは実装元が分からないので、Gemini 実装と同じに扱う（割合 100 でも Gemini に回さない。--engine gemini は exit 2）
-print -r -- $'pid=999999\nlane=gemini' > "$wtr/logs/gunread.pid"; chmod 000 "$wtr/logs/gunread.pid"
+print -r -- $'pid=999999\nlane=claude' > "$wtr/logs/gunread.pid"; chmod 000 "$wtr/logs/gunread.pid"   # 読めれば Gemini 実装ではない中身
 LANES_REVIEW_GEMINI_PCT=100 rentry 0 "claude codex gemini" r-q --dry-run
 codex_dry || fail "読めない実装の記録があるのに、割合 100 で Gemini に回した"
 rentry 2 "claude codex gemini" r-r --engine gemini
