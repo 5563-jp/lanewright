@@ -64,10 +64,11 @@ newrepo() {   # <名前> → base（本体 checkout）と wt（linked worktree�
 change() { print -r -- "$1" >> "$wt/a.txt"; git -C "$wt" add -A; git -C "$wt" commit -qm "test: $1"; }
 print -r -- '担当の変更を確かめる（案件固有の目印）。' > "$T/prompt.md"
 # <期待の終了コード> <label> [引数...]: run-gemini-review.sh を本物の起動で回す（偽の agy）。偽の CLI の記録は起動のたびに空にする
+# （指示書は GRV_PROMPT があればそれ、無ければ $T/prompt.md）
 grv() {
   local want="$1" label="$2" rc=0; shift 2
   : > "$STUB_LOG"
-  zsh -f "$LANES_DIR/run-gemini-review.sh" "$wt" "$T/prompt.md" "$label" "$@" > "$T/out" 2>&1 || rc=$?
+  zsh -f "$LANES_DIR/run-gemini-review.sh" "$wt" "${GRV_PROMPT:-$T/prompt.md}" "$label" "$@" > "$T/out" 2>&1 || rc=$?
   (( rc == want )) || { cat "$T/out" >&2; fail "$label: 終了コード expected=$want got=$rc"; }
 }
 has() { grep -qF -- "$2" "$1" || { cat "$1" >&2; fail "${1:t} に「$2」が無い"; }; }
@@ -497,5 +498,46 @@ GIT_CONFIG_GLOBAL="$T/global.gitconfig" STUB_AGY_RESPONSE="$CLEAN" grv 0 au2 --m
 [[ "$(calls)" == 1 ]] || fail "作者の設定を変えたのに、同じ HEAD の前回の結果を使った"
 argcheck "設定を変えた後の照合で不一致を数えない" '"commit 2 件のうち 2 件の作者が" in a[-1] and "changed@example.com" not in a[-1]'
 pass "作者の設定（user.name / user.email）を変えたら、同じ HEAD でも前回の結果を使わずに照合し直す"
+# 子に渡す指示書の全体（テンプレの全項目・案件固有の指示・前回の指摘本文）から、作者を表示し得る git の呼び出しを除く。
+# 書式の無い git log / show・作者を出す書式は作者を含まない書式（--format='%h %s'）に置き換え、full と delta の両方で残らない。
+# 残っているかは、ランチャとは別の簡単な見方で確かめる
+noauthor() {   # <指示書のファイル>
+  python3 -I - "$1" <<'PY' || fail "指示書に作者を表示し得る git の呼び出しが残る: $1"
+import re, sys
+t = open(sys.argv[1], encoding="utf-8").read()
+bad = []
+for m in re.finditer(r"git(?:[ \t]+-C[ \t]+\S+)?[ \t]+(log|show|whatchanged)(?![A-Za-z0-9_-])([^`\n]*)", t):
+    if "--format='%h %s'" not in m.group(2) and "--oneline" not in m.group(2):
+        bad.append(m.group(0))
+bad += [m.group(0) for m in re.finditer(r"--(?:pretty|format)=\S*", t) if re.search(r"%[ac][nNeElL]|%\(author|fuller|medium|email|raw", m.group(0))]
+bad += [m.group(0) for m in re.finditer(r"git[ \t]+(?:blame|shortlog|annotate|cat-file)", t)]
+assert not bad, bad
+assert "git show --format='%h %s' --stat" in t, "テンプレの変更量の確認が作者を含まない書式になっていない"
+assert "commit author" not in t, "テンプレの作者の確認の項目が残る"
+PY
+}
+newrepo nm; L="$wt/logs"
+print -r -- '担当の変更を確かめる。`git log --stat`・`git show HEAD`・`git log --format='"'"'%an <%ae>'"'"'`・`git log --pretty=fuller`・git logで確認する' > "$T/prompt-author.md"
+GRV_PROMPT="$T/prompt-author.md" STUB_AGY_RESPONSE=$'- [P1] `git show --stat` の作者欄が残る（起きる条件: 普通の起動）\\nVERDICT: NEEDS_FIX' grv 0 nm-r1
+has "$L/nm-r1.evidence.md" 'モード: full'
+noauthor "$L/nm-r1.prompt.md"
+argcheck "full の指示書（実際に渡した引数）に作者を表示し得る git の呼び出しが残る" '"git log --stat" not in a[-1] and "%an" not in a[-1] and "--pretty=fuller" not in a[-1]'
+change '直した'
+GRV_PROMPT="$T/prompt-author.md" STUB_AGY_RESPONSE="$CLEAN" grv 0 nm-r2
+has "$L/nm-r2.evidence.md" 'モード: delta'
+argcheck "delta の指示書に前回の指摘本文が引き継がれない" '"# 前回の未解決指摘" in a[-1] and "の作者欄が残る" in a[-1]'
+noauthor "$L/nm-r2.prompt.md"
+pass "子に渡す指示書の全体（テンプレ・案件固有の指示・前回の指摘本文）の作者を表示し得る git の呼び出しは、full と delta の両方で作者を含まない書式に置き換える"
+# 置き換えられない呼び出し（blame・shortlog など）が残る指示書では起動しない（dry-run も同じ。.done に EXIT:2）
+print -r -- '担当の変更を確かめる。経緯は `git blame a.txt` で見る' > "$T/prompt-blame.md"
+GRV_PROMPT="$T/prompt-blame.md" STUB_AGY_RESPONSE="$CLEAN" grv 2 nm-blame
+has "$T/out" '作者を表示し得る git の呼び出し: git blame'
+has "$L/nm-blame.done" 'EXIT:2'
+[[ "$(calls)" == 0 ]] || fail "作者を表示し得る呼び出しが残る指示書で agy を起動した"
+[[ ! -e "$L/nm-blame.prompt.md" ]] || fail "起動しない指示書を logs/ に写した"
+GRV_PROMPT="$T/prompt-blame.md" STUB_AGY_RESPONSE="$CLEAN" grv 2 nm-blame2 --dry-run
+has "$T/out" '作者を表示し得る git の呼び出し: git blame'
+[[ ! -e "$L/nm-blame2.dry-run.prompt.md" ]] || fail "dry-run が、作者を表示し得る呼び出しの残る指示書を書いた"
+pass "置き換えられない作者を表示し得る呼び出し（git blame など）が指示書に残れば、起動しない（dry-run も書かずに exit 2）"
 
 print -r -- "PASS: $count 件 / EXIT:0"
