@@ -35,6 +35,10 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 - 読み取り専用の制限の設定（`CODEX_REVIEW_SANDBOX`・`CLAUDE_REVIEW_TOOLS`・`CLAUDE_REVIEW_DENY`・`GEMINI_REVIEW_DENY`）を再利用の条件に入れた。
 - commit の作者の照合に使う有効な作者の設定（`user.name` / `user.email`）の指紋を再利用の条件に入れた（値は入れない）。設定を変えたら同じ HEAD でもレビューし直す。
   Gemini のレビューでは、作者の照合を親で行い、件数と一致しない commit の番号だけを指示書に入れる（名前・メールは渡さず、子に作者を表示させる指示もしない）。
+  渡す指示書の全体（テンプレ・案件固有の指示・前回の指摘本文）の作者を表示し得る git の呼び出しは、作者を含まない書式（`--format='%h %s'`）に置き換え、
+  置き換えられないもの（`git blame`・`git shortlog` など）が残る指示書では起動しない（exit 2）。
+- Claude・Gemini のレビューは、本文末尾の独立した `VERDICT` 行を最終判断とし、無ければ指摘があっても重大度から推定せず `VERDICT: NONE`（`EXIT:3`）にする
+  （round 3 以降の後回し・合格への昇格・前回の指摘の後回し・再利用の記録の保存をしない）。Codex のレビューは完了証明が最終判断の代わりなので今までどおり。
 - レビューのランチャ・`review-dedup.zsh`・`_common.sh`・`chk-run.sh` が呼ぶ Python は、起動時に作業ツリーの外から選んで固定した `python3` を `-I` で動かすようにした
   （作業ツリーの中の仮想環境を有効にしたシェルから起動しても、その環境の起動時の処理や対象リポにある同じ名前のモジュールを読み込まない。
   作業ツリーの外に `python3` が無ければ exit 2）。入口（`run-review.sh`・`run-impl.sh`）で 1 回だけ決めた `python3` を、振り分け先・起動前点検（`lanes-doctor.sh`）・
