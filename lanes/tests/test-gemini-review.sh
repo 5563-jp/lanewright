@@ -124,6 +124,17 @@ has "$T/out" 'Gemini で実装したもの'
 STUB_AGY_RESPONSE="$CLEAN" grv 2 self-r2 --impl-engine other
 has "$T/out" '--impl-engine は claude|gemini|codex'
 pass "Gemini で実装したもの（logs/ の lane=gemini・--impl-engine gemini）は直接呼んでも exit 2（再利用・起動より前。記録は変えない）"
+# 実装の記録（.pid）を読めない・普通のファイルでないときは、実装元が分からないので Gemini 実装と同じに扱う（迷ったら Gemini に回さない）
+print -r -- $'pid=999999\nlane=gemini' > "$wt/logs/unread.pid"; chmod 000 "$wt/logs/unread.pid"
+STUB_AGY_RESPONSE="$CLEAN" grv 2 self-r3
+has "$T/out" '実装元が分からない'
+[[ "$(calls)" == 0 ]] || fail "読めない実装の記録があるのに agy を起動した"
+chmod 644 "$wt/logs/unread.pid"; rm -f -- "$wt/logs/unread.pid"
+ln -s /dev/null "$wt/logs/link.pid"
+STUB_AGY_RESPONSE="$CLEAN" grv 2 self-r3
+[[ "$(calls)" == 0 ]] || fail "リンクの実装の記録があるのに agy を起動した"
+rm -f -- "$wt/logs/link.pid"
+pass "実装の記録（logs/ の .pid）を読めない・リンクのときは、実装元が分からないので Gemini でレビューしない（exit 2）"
 
 # ---- 2. 正常な起動: 引数・設定・環境・記録 ----
 newrepo ok

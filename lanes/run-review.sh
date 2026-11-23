@@ -18,7 +18,8 @@
 #   4. 構成の既定のレビュー役（LANES_ROLE_REVIEW: codex（① full / ② claude-codex）か claude（③ claude-gemini / ④ claude-only））
 # 同じ道具でのレビューの禁止: Gemini で実装したものは Gemini でレビューしない。--engine gemini なら exit 2、2・3 では Gemini を選ばない
 #   （系列の前回が Gemini でも、構成の既定の役へ逃がす）。Gemini で実装したかは、--impl-engine gemini か、logs/ の .pid に
-#   Gemini の実装レーン（lane=gemini）が 1 つでもあるかで見る（どちらかに当たれば Gemini で実装したとみなす。迷ったら Gemini に回さない側）。
+#   Gemini の実装レーン（lane=gemini）が 1 つでもあるかで見る（どちらかに当たれば Gemini で実装したとみなす。実装の記録を読めないときも
+#   実装元が分からないので同じ。迷ったら Gemini に回さない側）。
 #   それ以外の組み合わせ（Claude の実装を Claude でレビューする ③④ など）は今までどおり
 # --dry-run は割合の記録（review-split.state）を進めない（次に選ぶ役を見せるだけ）。選んだ役と理由は標準エラーに 1 行出す
 # 起動前に lanes-doctor.sh --quiet を通す（足りないものがあれば一覧を出して exit 2）。点検は振り分け先が label の排他を取った後に
@@ -120,7 +121,7 @@ review_split() {
 pick=""; why=""; note=""
 if [[ -n "$engine" ]]; then
   if [[ "$engine" == gemini ]] && (( impl_gemini )); then
-    die "Gemini で実装したもの（--impl-engine gemini か logs/ の .pid の lane=gemini）は Gemini でレビューしない（同じ道具のレビューは独立性が無い）。--engine を外すか codex / claude を指定する"
+    die "Gemini で実装したもの（--impl-engine gemini か logs/ の .pid の lane=gemini）と、実装の記録（logs/ の .pid）を読めず実装元が分からないものは Gemini でレビューしない（同じ道具のレビューは独立性が無い）。--engine を外すか codex / claude を指定する"
   fi
   pick="$engine"; why="--engine の指定"
 fi

@@ -6,7 +6,8 @@
 # 同じ確認を繰り返さない仕組み（--mode auto の full / delta / 同じ head の結果の再利用、--round と round 3 以降の P2/P3 の後回し、
 #   --force、--base）と、親の chk-run.sh の記録による必須検証の使い回し（LANES_REVIEW_REUSE_CHECKS / LANES_REVIEW_REQUIRE_CHECKS と
 #   --allow-missing-checks）は run-claude-review.sh / run-codex-review.sh と同じ（review-dedup.zsh）。
-# 同じ道具でのレビューの禁止: Gemini で実装したもの（--impl-engine gemini か、logs/ の .pid に lane=gemini）は、直接呼ばれても
+# 同じ道具でのレビューの禁止: Gemini で実装したもの（--impl-engine gemini か、logs/ の .pid に lane=gemini。記録を読めず実装元が分からない
+#   ときも同じ）は、直接呼ばれても
 #   前回の結果の再利用・子の起動より前に止める（exit 2。判定は入口の run-review.sh と同じ review-dedup.zsh の rvd_impl_gemini）
 # 読み取り専用の担保:
 #   - agy に --sandbox（端末サンドボックス）・--settings（起動ごとの設定）・--mode plan を必ず付け、ANTIGRAVITY_HEADLESS=true で起動する
@@ -121,7 +122,7 @@ lanes_require_tool gemini run-gemini-review.sh
 # 同じ道具でのレビューの禁止（入口の run-review.sh と同じ判定 rvd_impl_gemini）。直接呼ばれても、前回の結果の再利用・子の起動より前に止める
 # （再利用の記録・後回し票には触らない。今回の .done に EXIT:2 を残す）
 if rvd_impl_gemini "$wt/logs" "$impl_engine"; then
-  lanes_die "Gemini で実装したもの（--impl-engine gemini か logs/ の .pid の lane=gemini）は Gemini でレビューしない（同じ道具のレビューは独立性が無い）。run-review.sh で codex / claude に回す"
+  lanes_die "Gemini で実装したもの（--impl-engine gemini か logs/ の .pid の lane=gemini）と、実装の記録（logs/ の .pid）を読めず実装元が分からないものは Gemini でレビューしない（同じ道具のレビューは独立性が無い）。run-review.sh で codex / claude に回す"
 fi
 lanes_entry_preflight
 lanes_require_prompt "$prompt"

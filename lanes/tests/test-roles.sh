@@ -412,6 +412,14 @@ LANES_REVIEW_GEMINI_PCT=100 rentry 0 "claude codex gemini" r-p --dry-run
 gem_dry || fail "レビュー・QA の .pid（lane=gemini-review / qa）を Gemini 実装とみなした"
 rm -f -- "$wtr/logs/grev.pid" "$wtr/logs/gqa.pid"
 pass "logs/ の .pid に Gemini の実装レーン（lane=gemini）があれば Gemini 実装とみなす（--impl-engine claude でも打ち消さない。レビュー・QA は数えない）"
+# 実装の記録を読めないときは実装元が分からないので、Gemini 実装と同じに扱う（割合 100 でも Gemini に回さない。--engine gemini は exit 2）
+print -r -- $'pid=999999\nlane=gemini' > "$wtr/logs/gunread.pid"; chmod 000 "$wtr/logs/gunread.pid"
+LANES_REVIEW_GEMINI_PCT=100 rentry 0 "claude codex gemini" r-q --dry-run
+codex_dry || fail "読めない実装の記録があるのに、割合 100 で Gemini に回した"
+rentry 2 "claude codex gemini" r-r --engine gemini
+[[ "$OUT" == *"実装元が分からない"* ]] || fail "読めない実装の記録があるのに --engine gemini を通した"
+chmod 644 "$wtr/logs/gunread.pid"; rm -f -- "$wtr/logs/gunread.pid"
+pass "logs/ の .pid を読めないときは実装元が分からないので Gemini に回さない（--engine gemini は exit 2）"
 # 割合 50: 誤差の積み上げで「既定・Gemini・既定・Gemini」。dry-run は記録を進めない
 split="$T/split-state"; split_file="$split/lanewright/review-split.state"
 XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" s1

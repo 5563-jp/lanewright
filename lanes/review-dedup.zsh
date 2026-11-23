@@ -377,15 +377,19 @@ rvd_prev_reviewer() {
   return 0
 }
 # ---- 実装した道具（同じ道具でのレビューの禁止。入口の run-review.sh と run-gemini-review.sh が同じ判定を使う）----
-# <logdir> [--impl-engine の値] → 0 = Gemini で実装した。--impl-engine gemini か、logs/ の .pid に Gemini の実装レーン（lane=gemini）が
-# 1 つでもあれば当たり（どちらかに当たれば Gemini で実装したとみなす。--impl-engine claude でも logs/ の記録は打ち消さない。
-# 迷ったら Gemini に回さない側）。レビュー・QA の .pid（lane=gemini-review など）は数えない。logs/ が symlink なら中を読まない
+# <logdir> [--impl-engine の値] → 0 = Gemini で実装した（か、実装元が分からない）。--impl-engine gemini か、logs/ の .pid に
+# Gemini の実装レーン（lane=gemini）が 1 つでもあれば当たり（どちらかに当たれば Gemini で実装したとみなす。--impl-engine claude でも
+# logs/ の記録は打ち消さない）。レビュー・QA の .pid（lane=gemini-review など）は数えない。
+# 実装の記録を確かめられないとき（logs/ が symlink・フォルダでない・中を読めない、.pid が普通のファイルでない・読めない）は
+# 実装元が分からないので当たりとみなす（迷ったら Gemini に回さない側）。logs/ が無いときだけは記録が無いので外れ
 rvd_impl_gemini() {
   local logdir="$1" impl="${2:-}" f v
   [[ "$impl" != gemini ]] || return 0
-  [[ -d "$logdir" && ! -L "$logdir" ]] || return 1
-  for f in "$logdir"/*.pid(N.); do
-    v="$(sed -n 's/^lane=//p' "$f" 2>/dev/null)" || v=""
+  [[ -e "$logdir" || -L "$logdir" ]] || return 1
+  [[ -d "$logdir" && ! -L "$logdir" && -r "$logdir" && -x "$logdir" ]] || return 0
+  for f in "$logdir"/*.pid(N); do
+    [[ -f "$f" && ! -L "$f" ]] || return 0
+    v="$(sed -n 's/^lane=//p' "$f" 2>/dev/null)" || return 0
     [[ "${v%%$'\n'*}" != gemini ]] || return 0
   done
   return 1

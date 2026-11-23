@@ -79,6 +79,7 @@ zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> [label] [--mode auto|full|d
 
 **同じ道具でのレビューの禁止**: Gemini で実装したものは Gemini でレビューしません。`--impl-engine gemini` か、`logs/` の `.pid` に Gemini の実装レーン（`lane=gemini`）が 1 つでもあれば Gemini で実装したとみなします
 （どちらかに当たれば。`--impl-engine claude` でも `logs/` の記録は打ち消しません。迷ったら Gemini に回さない側に倒します）。
+実装の記録を確かめられないとき（`logs/` が symlink・中を読めない、`.pid` が普通のファイルでない・読めない）も、実装元が分からないので Gemini で実装したものと同じに扱います。
 そのとき `--engine gemini` は exit 2、2 と 3 では Gemini を選ばず構成の既定の役へ逃がします。`run-gemini-review.sh` を直接呼んでも同じ判定（`--impl-engine` も受け付けます）で、前回の結果の再利用・起動より前に止まります（exit 2）。ほかの組み合わせ（③④ で Claude の実装を Claude がレビューする、など）は今までどおりです。
 
 Gemini のレビュー（`run-gemini-review.sh`）は、Codex・Claude のレビューと同じ入口・同じ判定・同じ終了コードの決まりで動き、読み取り専用を次のように担保します:

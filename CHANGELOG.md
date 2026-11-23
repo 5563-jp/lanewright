@@ -22,6 +22,7 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 - 設定 `LANES_REVIEW_GEMINI_PCT`（既定 `0`）: 新しい系列のレビューをこの割合で Gemini に回す（`50` なら既定の役と交互）。
   同じ worktree の同じ系列に前に割り当てた役は引き継ぐ（起動前の点検で止まった系列を呼び直しても、数え方を二重に進めない）。
   同じ系列の r2 以降は前回と同じレビュー役で続ける。**Gemini で実装したもの（`--impl-engine gemini` か `logs/` の `.pid` に `lane=gemini`）は Gemini でレビューしない。**
+  実装の記録（`logs/` の `.pid`）を読めないときも、実装元が分からないので同じに扱う。
 - 設定 `GEMINI_REVIEW_DENY`: Gemini レビューで拒否する道具を足す（固定の一覧は外せない）。
 
 ### 変えたこと / Changed
