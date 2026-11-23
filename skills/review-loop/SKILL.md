@@ -19,7 +19,7 @@ description: >-
 - **レビュー（`<kit>/lanes/run-review.sh`）**:
   - `LANES_TOOLS` に Codex が含まれる構成（`full` / `claude-codex`）では Codex レビュー（`run-codex-review.sh`）、含まれない構成（`claude-gemini` / `claude-only`）では Claude レビュー（`run-claude-review.sh`・別セッション・読み取り専用）が走る。Gemini はレビューに使わない。
   - label は全構成で `rev-<票>-r<N>` の形で round 番号を入れる。比較の起点は統合先ブランチ（`LANES_BASE_BRANCH`、既定 `develop`）か `--base`。
-  - **どの構成でも（Codex レビュー・Claude レビューとも）**: 既定は `--mode auto`。round 1 は `full`（全体差分レビュー）、前回 `CLEAN`（合格）の後は前回レビューした HEAD（現在のブランチ先端のコミット）からの `delta`（増分レビュー）、同一 HEAD は省略（`skip-same-head`）を自動で選ぶ。前回 `NEEDS_FIX` なら `full` に戻して未解決指摘を引き継ぐ。`--round N`・`--force` も使える。仕組みは `<kit>/lanes/review-dedup.zsh` の 1 つ。
+  - **どの構成でも（Codex レビュー・Claude レビューとも）**: 既定は `--mode auto`。round 1 は `full`（全体差分レビュー）、前回 `CLEAN`（合格）の後は前回レビューした HEAD（現在のブランチ先端のコミット）からの `delta`（増分レビュー）、同一 HEAD は省略（`skip-same-head`）を自動で選ぶ。前回 `NEEDS_FIX` の後も前回レビューした HEAD からの `delta` で、未解決指摘を引き継ぐ（1 回目は全体・2 回目からは差分。前回の HEAD が祖先でない・未保存変更・旧記録・`--mode full` のときだけ `full`）。`--round N`・`--force` も使える。仕組みは `<kit>/lanes/review-dedup.zsh` の 1 つ。
   - **必須検証の使い回し**: 最終 HEAD で `<kit>/lanes/chk-run.sh` を通した後にレビューを回すと、ランチャが記録を問い合わせ（`chk-run.sh <worktree> --query`）、同じ中身で通っていればレビュアーに typecheck / lint / unit を回させない（`LANES_REVIEW_REUSE_CHECKS`。既定 1）。`chk-run.sh` とレビューは同じシェルから呼び、間に作業ツリーを変えない。確かめたことになるのは確認コマンドに入れた項目だけ。
   - **記録が残ったことを確かめてからレビューを起動する**: `chk-run.sh` の出力に `recorded=` が出ていること（`record=no` なら理由を先に解決する）。記録が無いレビューは、読み取り専用の中で検証を回せず「必須検証が未完了」の指摘で終わり、直しのレーンでは直せない。`LANES_REVIEW_REQUIRE_CHECKS=1` の構成では、記録を使えないレビューは起動の前に止まる（`EXIT:2`。理由を解決して `chk-run.sh` からやり直す。回せない事情がある起動だけ `--allow-missing-checks`）
 - **共通ルール**:
@@ -41,8 +41,10 @@ description: >-
    - Claude で修正し（Gemini には回さない）、**必ず**再レビューを回す。
    - P0/P1 が 0 件になるまで繰り返し、残っている間は PR やマージへ進まない。
    - 修正プロンプトには「指摘箇所だけでなく、同じ種類の問題を差分全体から探して横展開でまとめて直す」を必ず入れる。
+   - 修正プロンプトには「指摘ごとに守りを足すのではなく、根の原因を減らす（範囲を絞る・既存の仕組みに乗せる・安全な側に倒す 1 か所の判定にまとめる）」も入れる。
+   - **P0/P1 が減らないときは止める**: 今回の P0+P1 が 1 件以上あり、その件数が 2 回続けて前の回より減らない（例: 5 → 5 → 8）なら、次の修正レーンを起動しない。指摘の多くが前回の直しで足したコードに出ているか・起きにくい場面に偏っていないかを本文で確かめ、作りを単純にする案（範囲を絞る・既存の仕組みに乗せる・迷ったら安全な側に倒す）を付けて人に返す。系列（label）を変えて数え直さない。
 2. **P2 / P3（中 / 軽微）**:
-   - **round 1・2**: 指摘を横展開してまとめて修正し（Claude、または基準を満たせば Gemini の修正レーン `<label>-fix1`）、レビューを 1 回回す。前回が `NEEDS_FIX` のためランチャが自動で `full` に戻し、前回の未解決指摘を引き継ぐ（全件解消を示す独立行 `RESOLVED_PREVIOUS_FINDINGS: YES` が出るまで `CLEAN` にならない。Codex・Claude のレビューとも）。
+   - **round 1・2**: 指摘を横展開してまとめて修正し（Claude、または基準を満たせば Gemini の修正レーン `<label>-fix1`）、レビューを 1 回回す。ランチャは前回レビューした HEAD からの `delta` で、前回の未解決指摘を引き継ぐ（全件解消を示す独立行 `RESOLVED_PREVIOUS_FINDINGS: YES` が出るまで `CLEAN` にならない。Codex・Claude のレビューとも）。
    - **round 3 以降（どの構成でも）**: P2/P3 では止めない。ランチャが全指摘を `logs/<series>.followups.md` に保存した上で `VERDICT: CLEAN`（証跡に `GATE: MERGE_WITH_FOLLOWUP`）にする。残件は課題管理ツールの後回し票として起票し、PR・マージへ進む。round 3 以降でも P0/P1 が残る場合（`STOP_P0P1`）だけ止めて報告する。
 3. **周回の上限（どの構成でも）**: round が `LANES_REVIEW_MAX_ROUNDS`（既定 5）を超えて `CLEAN` にならなければ `GATE: ESCALATE`。修正レーンを起動せず、指摘の一覧を付けて人に「直して続けるか・締めるか」を聞く。締めるなら残りを `.lanes/accepted-limitations.md`（受け入れ済みの限界。次のレビューの指示書に必ず入り、当てはまる指摘は P0〜P2 にならない）か後回し票へ。周回の途中で新しい機能を足さない。
 4. **仕様確認（S-*）**:
@@ -50,7 +52,7 @@ description: >-
 
 ## 同じ確認を繰り返さない（full / delta とビルドの分担）
 
-- **どの構成でも（Codex・Claude のレビューとも）**: `--mode full` を毎回指定しない（`--mode auto` が既定）。round 番号は label 末尾 `-r<N>` で必ず渡す（`--round N` でもよい。渡し忘れると round 3 以降のゲートが効かない）。`full` は初回・P0/P1 修正後・前回 `NEEDS_FIX` 後だけ。前回 `CLEAN` の後は前回 HEAD からの `delta` になる。同一 HEAD は再レビューしない（`skip-same-head`。必要なときだけ `--force` を付け、理由を 1 行残す）。
+- **どの構成でも（Codex・Claude のレビューとも）**: `--mode full` を毎回指定しない（`--mode auto` が既定）。round 番号は label 末尾 `-r<N>` で必ず渡す（`--round N` でもよい。渡し忘れると round 3 以降のゲートが効かない）。`full` は初回だけ。2 回目からは前回 `CLEAN` の後も `NEEDS_FIX` の後も、前回 HEAD からの `delta` になる（新しい指摘は差分の行に限る。前回の指摘の解消確認には差分の外も読む）。前回 `CLEAN` で同一 HEAD のときだけ再レビューしない（`skip-same-head`。やり直すときだけ `--force` を付け、理由を 1 行残す）。前回 `NEEDS_FIX` の後に同じ HEAD のまま再実行したときは `full` で見直す（条件表は `docs/roles.md`）。
 - **親の確認の使い回し**: 親が同じ中身で `chk-run.sh` を通していれば、レビュアーは typecheck / lint / unit を回さない（ランチャが判断する。証跡に `必須検証: 親の chk-run の記録を使用` が出る）。記録が無ければ今までどおりレビューの中で回す。
 - **ビルドと検証の分担**:
   - build（配布・実行用ファイルの生成）は、レビュー・修正レーン・マージ後 QA（品質確認）では回さない。レビューで省略してよいのは build だけ。

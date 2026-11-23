@@ -5,7 +5,7 @@
 #   label は指示書の直後に置く（不明なオプションは止めて記録する。その後ろの - で始まらない語は、そのオプションの値として読み捨てる）
 # 同じ確認を繰り返さないため、既定は --mode auto（run-codex-review.sh と同じ review-dedup.zsh の仕組み）。
 #   初回は full。前回 CLEAN・条件一致・未保存変更なしなら前回の HEAD からの delta、同じ HEAD なら前回の結果を使う（--force で回す）。
-#   前回 NEEDS_FIX なら full に戻して未解決指摘を引き継ぐ。明示の --mode delta も前回の記録が使えなければ full にする。
+#   前回 NEEDS_FIX なら前回の HEAD からの delta で未解決指摘を引き継ぐ（旧記録・同じ HEAD・未保存変更・--mode full は full）。明示の --mode delta も前回の記録が使えなければ full にする。
 #   round は --round か label 末尾 -r<N>。round 3 以降の P2/P3 は必須検証の成功確認がある場合だけ、後回し票を保存して CLEAN へ進める。
 #   比較起点（full の起点・再利用条件）は --base を commit に直したもの、無ければ origin/<LANES_BASE_BRANCH>（その枝の無い repo は --base 必須）
 # 必須検証の使い回し（LANES_REVIEW_REUSE_CHECKS=1 が既定）: 起動直後に chk-run.sh --query で問い合わせ、親が同じ中身で確認コマンドを
@@ -98,13 +98,20 @@ skip_same=0
 case "$mode:$decided" in
   auto:delta|delta:delta) mode=delta; base="$prev_head" ;;
   *:same) mode=full; (( force )) || skip_same=1 ;;
-  *) mode=full ;;   # 明示の delta も、前回の記録が使えなければ（初回・前回 NEEDS_FIX・条件変更・未保存変更）全体を見る
+  *) mode=full ;;   # 明示の delta も、前回の記録が使えなければ（初回・条件変更・未保存変更）全体を見る。前回 NEEDS_FIX は下で決め直す
 esac
 unresolved_note=""
 if [[ "$prev_v" == 'VERDICT: NEEDS_FIX' ]]; then
-  # 未解決のある系列では明示 delta も全体へ戻す。
-  mode=full; base="$review_base"; skip_same=0
+  # 未解決のある系列も、2 回目からは前回レビューした HEAD からの差分だけを見る（前回の指摘は全件引き継ぐ）。
+  # 明示の --mode full・再利用の記録を戻しきれなかった印・旧記録・同じ HEAD・未保存変更のときは全体を見る。
+  skip_same=0
   [[ -n "$(rvd_record_get "$record" report)" ]] || lanes_die "前回の未解決指摘本文が無い。復元してから再レビューする"
+  if [[ "$requested_mode" != full ]] && ! rvd_reuse_blocked "$logdir" \
+     && [[ "$(rvd_fix_mode "$wt" "$prev_head" "$tree" "$(rvd_record_get "$record" tree)" "$review_base" "$(rvd_record_get "$record" base)")" == delta ]]; then
+    mode=delta; base="$prev_head"
+  else
+    mode=full; base="$review_base"
+  fi
   unresolved_note="$(rvd_unresolved_note "$record" "$round")"
 fi
 
@@ -145,7 +152,7 @@ head="$(git -C "$wt" rev-parse --short=12 HEAD)"
 template="$LANES_DIR/templates/claude-review-$mode.md"
 [[ -s "$template" ]] || lanes_die "テンプレが無い: $template"
 delta_note=""
-[[ "$mode" == "delta" ]] && delta_note="$(rvd_delta_note "$wt" "$base" "$round")"
+[[ "$mode" == "delta" ]] && delta_note="$(rvd_delta_note "$wt" "$base" "$round" "$review_base")"
 
 # テンプレ + 案件固有プロンプト + ランチャの追記（delta の説明・前回の未解決指摘・必須検証のきまり）を結合して、実際に渡した全文を残す
 LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" python3 - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" "$(rvd_checks_rule)" "$delta_note" "$unresolved_note" <<'PY'

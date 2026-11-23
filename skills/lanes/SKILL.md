@@ -89,8 +89,9 @@ zsh <kit>/lanes/detach-run.sh <launch.log> zsh <kit>/lanes/run-review.sh <worktr
 - **VERDICT（合否判定・全構成共通）**: 独立行の `VERDICT: CLEAN` / `VERDICT: NEEDS_FIX` で判定する。出力の未完了・途切れは指摘数より優先して `VERDICT: NONE`（`EXIT:3`）、P0/P1 があれば明示 `CLEAN` より `NEEDS_FIX` を優先する。レビュアーや QA が作業ツリーを書き換えた場合は `VERDICT: NEEDS_FIX`（`EXIT:4`）。label には round 番号を末尾 `-r<N>` で入れる（`rev-<票>-r<N>`）。
 - **どの構成でも使える機能（Codex レビュー・Claude レビューとも。仕組みは `<kit>/lanes/review-dedup.zsh` の 1 つ）**:
   - `--mode auto`（既定）で full / delta / 省略を自動で選ぶ。`--round N` も使える。
-  - `full` になる条件: 初回、P0/P1 修正後、前回 `NEEDS_FIX` 後（未解決指摘を自動引き継ぎし、独立行 `RESOLVED_PREVIOUS_FINDINGS: YES` が出るまで `CLEAN` にしない）。
-  - `delta`（前回合格した HEAD（ブランチ先端のコミット）からの差分レビュー）・省略になる条件: 前回 `CLEAN` かつ未保存変更なしで条件が一致するとき。同一 HEAD は再レビューせず前回判定を返す（`skip-same-head`。やり直すときだけ `--force`）。
+  - `full` になる条件: 初回、起点を確かめられないとき（比較起点が変わった・前回の HEAD が祖先でない・未保存変更がある・旧形式の記録・再利用記録の不整合）、前回 `NEEDS_FIX` の後に同じ HEAD のまま再実行したとき、または `--mode full` のとき。
+  - `delta`（前回レビューした HEAD からの差分レビュー）になる条件: 2 回目以降で、前回 `CLEAN` の後（条件一致・未保存変更なし）または前回 `NEEDS_FIX` の後（比較起点が同じ・未保存変更なし・HEAD が進んだ。前回の未解決指摘を全件引き継ぎ、独立行 `RESOLVED_PREVIOUS_FINDINGS: YES` が出るまで `CLEAN` にしない）。
+  - 省略（`skip-same-head`）になる条件: 前回 `CLEAN` かつ同一 HEAD・条件一致・未保存変更なしのとき（やり直すときだけ `--force`）。条件表は `docs/roles.md` を参照。
   - round 2 までは P2 も `NEEDS_FIX` にする。round 3 以降は P0/P1 のみ停止とし、P2/P3 は `logs/<series>.followups.md` に保存して `VERDICT: CLEAN`（`GATE: MERGE_WITH_FOLLOWUP`）で通す。残件は後回し票に起票して別レーンで直す。
   - 統合先の枝が無い repo では `--base <sha|branch>` を渡す（commit に解決できるもの）。
 - **必須検証の使い回し（どの構成でも）**: 最終 HEAD で `<kit>/lanes/chk-run.sh` を通した後のレビューは、ランチャが `chk-run.sh <worktree> --query` で記録を問い合わせ、同じ中身（tree・入力の指紋・確認コマンドの指紋）で通っていれば、レビュアーに typecheck / lint / unit を回させず済んだものとして判定する（`LANES_REVIEW_REUSE_CHECKS`。既定 1、0 で問い合わせない）。`chk-run.sh` とレビューは同じシェルから呼び、その間に作業ツリーを変えない。確かめたことになるのは確認コマンドに入れた項目だけ。

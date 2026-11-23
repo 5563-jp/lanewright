@@ -220,8 +220,8 @@ zsh lanes/lanes-watch.sh --check
 ### full と delta
 | モード | 使う場面 | 比較起点 |
 |---|---|---|
-| `full` | 初回、重大（P0 / P1）の修正後、前回 `NEEDS_FIX` の後 | `--base`。無ければ `origin/$LANES_BASE_BRANCH` |
-| `delta` | 前回 `CLEAN` の後の軽い修正 | 前回の記録の HEAD（前回の記録が使えなければ `delta` を指定しても `full` に戻す） |
+| `full` | 初回（と、delta にできないとき） | `--base`。無ければ `origin/$LANES_BASE_BRANCH` |
+| `delta` | 2 回目以降（前回 `CLEAN` の後も `NEEDS_FIX` の後も） | 前回の記録の HEAD（前回の記録が使えなければ `delta` を指定しても `full` に戻す） |
 | `auto`（既定。Codex・Claude とも） | いつでも | 下の条件で `full` / `delta` / 省略を自動で選ぶ |
 
 - 差分が認証・DB・決済・メールなどに触れると、テンプレの指示で delta でも full 相当へ格上げします。
@@ -230,7 +230,7 @@ zsh lanes/lanes-watch.sh --check
 ### 同じレビューを繰り返さない（`--mode auto`・`review-dedup.zsh`）
 - 状態は `logs/.<series>.review-state`（series = label の末尾 `-r<N>` を外したもの）に、HEAD・判定・条件の指紋・作業ツリーの写し・比較起点・本文をまとめて保存します（`NONE` は保存しない）。
 - 前回が `CLEAN`（`EXIT:0`）で、前後とも未保存の変更が無く、比較起点・案件指示・モード・モデル・effort・スクリプト・テンプレ・検証の設定（`LANES_CHECK_CMD` の値・対象の `.lanes/check.sh` の中身・`package.json` の scripts のうち typecheck / lint / test 系のもの）が同じときだけ、同じ HEAD なら省略（`--force` で強制実行）、進んでいれば前回 HEAD からの delta にします。どれかが変われば full。検証が未導入で `CLEAN` になった後に検証を足した（例: `LANES_CHECK_CMD` を設定した）ときも、同じ HEAD のまま前回の結果を使わずにレビューし直します。
-- 前回が `NEEDS_FIX` なら delta 指定でも full に戻し、前回の未解決の指摘を自動で引き継ぎます。全件の解消を確かめて独立した行 `RESOLVED_PREVIOUS_FINDINGS: YES` を出さない限り `NEEDS_FIX` のままです（コード例・引用・表の中や、`NO` との併記では解除しない）。
+- 前回が `NEEDS_FIX` でも、2 回目からは前回レビューした HEAD からの delta で見て、前回の未解決の指摘を自動で引き継ぎます（1 回目は全体・2 回目からは差分）。前回の HEAD が今の HEAD の祖先でない・同じ HEAD・前後どちらかに未保存の変更がある・旧形式の記録・`--mode full` 指定のときは full に戻します。全件の解消を確かめて独立した行 `RESOLVED_PREVIOUS_FINDINGS: YES` を出さない限り `NEEDS_FIX` のままです（コード例・引用・表の中や、`NO` との併記では解除しない）。
 - Codex レビュー（`run-codex-review.sh`）と Claude レビュー（`run-claude-review.sh`）は同じ仕組みです。レビュー役（codex / claude）も条件に入るので、構成を変えたら前回の結果は使いません。どちらのランチャも、子の実行中に再利用の記録が書き換えられたら元の中身に戻して不合格（`NEEDS_FIX`・`EXIT:4`）にします。
 
 ### 必須検証の使い回し（親の `chk-run.sh` の記録）

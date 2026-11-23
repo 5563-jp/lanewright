@@ -3,7 +3,7 @@
 #   run-codex-review.sh <worktree> <prompt.md> [label] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--allow-missing-checks] [--dry-run]
 #   label は指示書の直後に置く（不明なオプションは止めて記録する。その後ろの - で始まらない語は、そのオプションの値として読み捨てる）
 # 同じ確認を繰り返さないため、既定は --mode auto。
-#   前回 CLEAN・条件一致・未保存変更なしの場合だけ delta / 同一結果を再利用。未解決指摘は full で引き継ぐ。
+#   前回 CLEAN・条件一致・未保存変更なしの場合は delta / 同一結果を再利用。前回 NEEDS_FIX の後も前回の HEAD からの delta で、未解決指摘を引き継ぐ。
 #   round は --round か label 末尾 -r<N>。round 3 以降の P2/P3 は必須検証の成功確認がある場合だけ、後回し票を保存して CLEAN へ進める。
 #   仕組みは review-dedup.zsh。
 # 必須検証の使い回し（LANES_REVIEW_REUSE_CHECKS=1 が既定）: 起動直後に chk-run.sh --query で問い合わせ、親が同じ中身で確認コマンドを
@@ -102,9 +102,16 @@ elif [[ "$decided" == same ]] && (( ! force )); then
 fi
 unresolved_note=""
 if [[ "$prev_v" == 'VERDICT: NEEDS_FIX' ]]; then
-  # 未解決のある系列では明示 delta も全体へ戻す。
-  mode=full; base="$review_base"; skip_same=0
+  # 未解決のある系列も、2 回目からは前回レビューした HEAD からの差分だけを見る（前回の指摘は全件引き継ぐ）。
+  # 明示の --mode full・再利用の記録を戻しきれなかった印・旧記録・同じ HEAD・未保存変更のときは全体を見る。
+  skip_same=0
   [[ -n "$(rvd_record_get "$record" report)" ]] || lanes_die "前回の未解決指摘本文が無い。復元してから再レビューする"
+  if [[ "$requested_mode" != full ]] && ! rvd_reuse_blocked "$logdir" \
+     && [[ "$(rvd_fix_mode "$wt" "$prev_head" "$tree" "$(rvd_record_get "$record" tree)" "$review_base" "$(rvd_record_get "$record" base)")" == delta ]]; then
+    mode=delta; base="$prev_head"
+  else
+    mode=full; base="$review_base"
+  fi
   unresolved_note="$(rvd_unresolved_note "$record" "$round")"
 fi
 
@@ -177,7 +184,7 @@ PY
 # --base と自由形式 PROMPT は併用せず、保存した全文を developer_instructions に渡す。
 focus="$LANES_DIR/templates/codex-review-focus.md"
 delta_note=""
-[[ "$mode" == "delta" ]] && delta_note="$(rvd_delta_note "$wt" "$base" "$round")"
+[[ "$mode" == "delta" ]] && delta_note="$(rvd_delta_note "$wt" "$base" "$round" "$review_base")"
 devinst="$(python3 - "$focus" "$final" "$delta_note" "$unresolved_note" <<'PY2'
 import sys, json, pathlib
 parts = [pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").rstrip(),

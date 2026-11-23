@@ -45,8 +45,8 @@ zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> [label] [--mode auto|full|d
 
 | 引数 | ①②（Codex）・③④（Claude） |
 |---|---|
-| `--mode auto`（省略時） | 前回の結果から full / delta / 省略を自動で選ぶ（初回は full、前回 CLEAN・条件一致・未保存変更なしなら前回の HEAD からの delta、同じ HEAD なら前回の結果を使う。前回 NEEDS_FIX なら full に戻して未解決指摘を引き継ぐ） |
-| `--mode delta` | 前回 CLEAN からの差分（前回の記録が使えなければ full に戻す） |
+| `--mode auto`（省略時） | 前回の結果から full / delta / 省略を自動で選ぶ（初回は full、前回 CLEAN・条件一致・未保存変更なしなら前回の HEAD からの delta、同じ HEAD なら前回の結果を使う。前回 NEEDS_FIX の後も前回の HEAD からの delta で未解決指摘を引き継ぐ。delta にできなければ full） |
+| `--mode delta` | 前回レビューした HEAD からの差分（前回の記録が使えなければ full に戻す） |
 | `--base <sha\|branch>` | commit に解決できるもの。full の比較起点と再利用の条件に使う |
 | `--force` | 同じ head でもレビューし直す |
 | `--round N` | round 3 以降の P2/P3 後回しの判定に使う（label 末尾の `-r<N>` でも可） |
