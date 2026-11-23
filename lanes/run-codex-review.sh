@@ -107,7 +107,7 @@ if [[ "$prev_v" == 'VERDICT: NEEDS_FIX' ]]; then
   skip_same=0
   [[ -n "$(rvd_record_get "$record" report)" ]] || lanes_die "前回の未解決指摘本文が無い。復元してから再レビューする"
   if [[ "$requested_mode" != full ]] && ! rvd_reuse_blocked "$logdir" \
-     && [[ "$(rvd_fix_mode "$wt" "$prev_head" "$tree" "$(rvd_record_get "$record" tree)")" == delta ]]; then
+     && [[ "$(rvd_fix_mode "$wt" "$prev_head" "$tree" "$(rvd_record_get "$record" tree)" "$review_base" "$(rvd_record_get "$record" base)")" == delta ]]; then
     mode=delta; base="$prev_head"
   else
     mode=full; base="$review_base"
@@ -184,7 +184,7 @@ PY
 # --base と自由形式 PROMPT は併用せず、保存した全文を developer_instructions に渡す。
 focus="$LANES_DIR/templates/codex-review-focus.md"
 delta_note=""
-[[ "$mode" == "delta" ]] && delta_note="$(rvd_delta_note "$wt" "$base" "$round")"
+[[ "$mode" == "delta" ]] && delta_note="$(rvd_delta_note "$wt" "$base" "$round" "$review_base")"
 devinst="$(python3 - "$focus" "$final" "$delta_note" "$unresolved_note" <<'PY2'
 import sys, json, pathlib
 parts = [pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").rstrip(),

@@ -29,7 +29,7 @@ A toolkit for running multiple AI coding CLIs installed on macOS—Claude Code, 
   `lanes-status.sh` returns a single-line status: `RUNNING` / `STALLED` / `DONE` / `FAILED` / `DEAD`.
 - **Reviews cannot be skipped**: A separate lane reviews the changes in read-only mode and decides using the final line `VERDICT: CLEAN` (no issues) or `VERDICT: NEEDS_FIX` (changes required).
   Truncated output or vague prose is never treated as `CLEAN`.
-- **No repeated checks**: From the second round on, reviews look only at what changed since the last clean review (`--mode auto` for both Codex and Claude reviews). If the parent already passed the check command (`chk-run.sh`) on the same content, the review reuses that record instead of rerunning typecheck, lint, and unit tests (`LANES_REVIEW_REUSE_CHECKS`).
+- **No repeated checks**: From the second round on, reviews look only at what changed since the last review (`--mode auto` for both Codex and Claude reviews). If the parent already passed the check command (`chk-run.sh`) on the same content, the review reuses that record instead of rerunning typecheck, lint, and unit tests (`LANES_REVIEW_REUSE_CHECKS`).
 - **Fewer accidents by design**: Launchers only start with subscription logins—never API keys. MCP (external service connections for AI) is disabled across all lanes.
   Duplicate runs with the same `label` are rejected. Post-merge cleanup stops if uncommitted changes remain.
 - **Flexible tool combinations**: Works with Claude alone. Adding Codex or Gemini automatically assigns implementation and review roles ([docs/roles.md](docs/roles.md), in Japanese).

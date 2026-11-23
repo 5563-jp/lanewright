@@ -24,7 +24,7 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 - 前回 `NEEDS_FIX` の後の再レビューも、前回レビューした HEAD からの `delta`（差分だけ）にした（`review-dedup.zsh` の `rvd_fix_mode`。Codex・Claude のレビューとも）。
   今までは前回 `CLEAN` の後だけ delta で、`NEEDS_FIX` の後は毎回 full に戻っていたため、2 回目以降も全体を読み直して差分の外の指摘が足されていた。
   前回の未解決指摘は今までどおり全件引き継ぎ、解消の確認には差分の外も読む。新しい指摘は今回の差分の行と、その直しが直接影響する箇所に限る。
-  前回の HEAD が今の HEAD の祖先でない・同じ HEAD・未保存変更・旧形式の記録・再利用の記録を戻しきれなかった印・`--mode full` のときは full。
+  比較起点が変わった・前回の HEAD が今の HEAD の祖先でない・同じ HEAD・未保存変更・旧形式の記録・再利用の記録を戻しきれなかった印・`--mode full` のときは full。
 - 判定の仕組み（`VERDICT`・round 3 以降の後回し・周回の上限・必須検証の扱い）は変えていない。検証未実施は今までどおり P1。
 - 上げた後の最初のレビューは、指示書が変わったので前回 `CLEAN` の系列では 1 回 full になる（前回 CLEAN からの delta や同じ HEAD の省略は効かない）。前回 `NEEDS_FIX` の系列は、上の条件が揃えば delta のまま。
 

@@ -65,12 +65,16 @@ eq mode-legacy "$(rvd_decide_mode . "$h1")" full
 eq mode-unresolved "$(rvd_decide_mode . "$h1" 'VERDICT: NEEDS_FIX' ctx ctx clean:a clean:a)" full
 eq mode-conditions "$(rvd_decide_mode . "$h1" 'VERDICT: CLEAN' ctx changed clean:a clean:a)" full
 eq mode-dirty "$(rvd_decide_mode . "$h1" 'VERDICT: CLEAN' ctx ctx dirty:a clean:a)" full
-# 前回 NEEDS_FIX の後: 前回の HEAD が祖先で、前後とも未保存変更が無ければ delta。同じ HEAD・旧記録・未保存変更・壊れた SHA は full
-eq fixmode-delta  "$(rvd_fix_mode . "$h1" clean:a clean:b)" delta
-eq fixmode-same   "$(rvd_fix_mode . "$(git rev-parse HEAD)" clean:a clean:a)" full
-eq fixmode-dirty  "$(rvd_fix_mode . "$h1" dirty:a clean:b)" full
-eq fixmode-legacy "$(rvd_fix_mode . "$h1" clean:a '')" full
-eq fixmode-badsha "$(rvd_fix_mode . deadbeef clean:a clean:a)" full
+# 前回 NEEDS_FIX の後: 前回の HEAD が祖先で、比較起点が一致し、前後とも未保存変更が無ければ delta。起点違い・起点空・同じ HEAD・旧記録・未保存変更・壊れた SHA は full
+eq fixmode-delta    "$(rvd_fix_mode . "$h1" clean:a clean:b "$h1" "$h1")" delta
+eq fixmode-basechg  "$(rvd_fix_mode . "$h1" clean:a clean:b "$(git rev-parse HEAD)" "$h1")" full
+eq fixmode-nobase   "$(rvd_fix_mode . "$h1" clean:a clean:b "$h1" '')" full
+eq fixmode-same     "$(rvd_fix_mode . "$(git rev-parse HEAD)" clean:a clean:a "$h1" "$h1")" full
+eq fixmode-dirty    "$(rvd_fix_mode . "$h1" dirty:a clean:b "$h1" "$h1")" full
+eq fixmode-legacy   "$(rvd_fix_mode . "$h1" clean:a '' "$h1" "$h1")" full
+eq fixmode-badsha   "$(rvd_fix_mode . deadbeef clean:a clean:a "$h1" "$h1")" full
+eq delta-note-base  "$(rvd_delta_note . "${h1:0:12}" 2 "$h1" | grep -c 'c2')" 1
+eq delta-note-fail  "$(rvd_delta_note . "${h1:0:12}" 2 refs/heads/no-such-branch | grep -c 'commit 一覧を取得できない')" 1
 eq delta-note-scope "$(rvd_delta_note . "${h1:0:12}" 2 | grep -c '差分の外の既存のコードは掘り返さない')" 1
 eq unresolved-noscope "$(rvd_unresolved_note "$(rvd_prev_record logs rev-foo 3)" 2 | grep -c '差分の外の既存のコードは掘り返さない')" 0
 if rvd_save_state logs invalid 1 "$h1" 'VERDICT: NONE' FIX invalid; then eq state-none accepted rejected; else eq state-none rejected rejected; fi
@@ -246,14 +250,25 @@ r, argv, done = launch(wt, 'review-r2')
 check('既定の起点更新-省略禁止', argv is not None)
 
 wt, base = repo('unresolved')
+(wt / 'first.txt').write_text('初回変更'); git(wt, 'add', 'first.txt'); git(wt, 'commit', '-qm', 'test: 初回変更')
 r, argv, done = launch(wt, 'review-r1', body='- [P1] a.txt:1 未解決の認証不具合\nVERDICT: CLEAN')
 check('P1-CLEAN矛盾-不合格', 'VERDICT: NEEDS_FIX' in done)
 reviewed = git(wt, 'rev-parse', 'HEAD')
+check('初回レビュー位置が統合先と別', reviewed != base)
 (wt / 'b.txt').write_text('別の変更'); git(wt, 'add', 'b.txt'); git(wt, 'commit', '-qm', 'test: 別の変更')
 r, argv, done = launch(wt, 'review-r2', args=('--mode', 'delta'))
 dev = json.loads(next(a.split('=', 1)[1] for a in argv if a.startswith('developer_instructions=')))
 # 2 回目からは差分だけ: 前回 NEEDS_FIX の後も、前回レビューした HEAD からの delta で未解決指摘を引き継ぐ
-check('未解決本文引継ぎ-delta', '未解決の認証不具合' in dev and '箇条書き・引用・表・コードブロック・行内コード・太字にしない' in dev and argv[argv.index('--base') + 1] == reviewed and '差分の外の既存のコードは掘り返さない' in dev and 'モード: delta' in (wt / 'logs' / 'review-r2.evidence.md').read_text())
+check('未解決本文引継ぎ-delta', '未解決の認証不具合' in dev and '箇条書き・引用・表・コードブロック・行内コード・太字にしない' in dev and argv[argv.index('--base') + 1] == reviewed and 'test: 別の変更' in dev and '差分の外の既存のコードは掘り返さない' in dev and 'モード: delta' in (wt / 'logs' / 'review-r2.evidence.md').read_text())
+# 比較起点がより古いコミットへ変わったら、HEAD が進んでいても未確認の範囲を落とさないよう full に戻す
+wt2, older_base = repo('unresolved-base-change')
+(wt2 / 'pre.txt').write_text('前の変更'); git(wt2, 'add', 'pre.txt'); git(wt2, 'commit', '-qm', 'test: 前の変更')
+middle_base = git(wt2, 'rev-parse', 'HEAD')
+(wt2 / 'first.txt').write_text('初回変更'); git(wt2, 'add', 'first.txt'); git(wt2, 'commit', '-qm', 'test: 初回変更')
+launch(wt2, 'review-r1', args=('--base', middle_base), body='- [P1] a.txt:1 未解決の認証不具合\nVERDICT: CLEAN')
+(wt2 / 'b.txt').write_text('修正'); git(wt2, 'add', 'b.txt'); git(wt2, 'commit', '-qm', 'test: 修正')
+r, argv, done = launch(wt2, 'review-r2', args=('--base', older_base), body='- [P1] 未解決の認証不具合\nVERDICT: NEEDS_FIX')
+check('起点変更時はNEEDS_FIX後もfull', argv[argv.index('--base') + 1] == older_base and 'モード: full' in (wt2 / 'logs' / 'review-r2.evidence.md').read_text())
 check('解消確認なし-CLEAN禁止', 'VERDICT: NEEDS_FIX' in done)
 (wt / 'c.txt').write_text('さらに直す'); git(wt, 'add', 'c.txt'); git(wt, 'commit', '-qm', 'test: さらに直す')
 r, argv, done = launch(wt, 'review-r3', args=('--mode', 'full'))

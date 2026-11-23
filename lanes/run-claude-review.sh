@@ -107,7 +107,7 @@ if [[ "$prev_v" == 'VERDICT: NEEDS_FIX' ]]; then
   skip_same=0
   [[ -n "$(rvd_record_get "$record" report)" ]] || lanes_die "前回の未解決指摘本文が無い。復元してから再レビューする"
   if [[ "$requested_mode" != full ]] && ! rvd_reuse_blocked "$logdir" \
-     && [[ "$(rvd_fix_mode "$wt" "$prev_head" "$tree" "$(rvd_record_get "$record" tree)")" == delta ]]; then
+     && [[ "$(rvd_fix_mode "$wt" "$prev_head" "$tree" "$(rvd_record_get "$record" tree)" "$review_base" "$(rvd_record_get "$record" base)")" == delta ]]; then
     mode=delta; base="$prev_head"
   else
     mode=full; base="$review_base"
@@ -152,7 +152,7 @@ head="$(git -C "$wt" rev-parse --short=12 HEAD)"
 template="$LANES_DIR/templates/claude-review-$mode.md"
 [[ -s "$template" ]] || lanes_die "テンプレが無い: $template"
 delta_note=""
-[[ "$mode" == "delta" ]] && delta_note="$(rvd_delta_note "$wt" "$base" "$round")"
+[[ "$mode" == "delta" ]] && delta_note="$(rvd_delta_note "$wt" "$base" "$round" "$review_base")"
 
 # テンプレ + 案件固有プロンプト + ランチャの追記（delta の説明・前回の未解決指摘・必須検証のきまり）を結合して、実際に渡した全文を残す
 LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" python3 - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" "$(rvd_checks_rule)" "$delta_note" "$unresolved_note" <<'PY'

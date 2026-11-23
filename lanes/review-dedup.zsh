@@ -314,11 +314,12 @@ PY_SAVE
 }
 
 # 前回 NEEDS_FIX の後の周回（round 2 以降）は差分だけを見る（1 回目は全体・2 回目からは差分）。
-# 前回レビューした HEAD が今の HEAD の祖先で、前後とも未保存変更が無いときだけ delta。それ以外（旧記録・同じ HEAD・枝の作り直し）は full。
+# 前回レビューした HEAD が今の HEAD の祖先で、前後とも未保存変更が無く、比較起点（今の base == 前回の base）が同じで確かめられるときだけ delta。
+# それ以外（起点変更・旧記録・同じ HEAD・枝の作り直し・未保存変更）は full。
 # 指示の変更（round 3 からの後回しの方針を含む）は前回の指摘の引き継ぎで足りるので、ここでは見ない。
-rvd_fix_mode() {   # <worktree> <前回の head> <今の tree> <前回の tree> → delta / full
-  local wt="$1" prev="$2" tree="${3:-}" old_tree="${4:-}"
-  [[ -n "$prev" && "$tree" == clean:* && "$old_tree" == clean:* ]] || { print -- full; return; }
+rvd_fix_mode() {   # <worktree> <前回の head> <今の tree> <前回の tree> <今の base> <前回の base> → delta / full
+  local wt="$1" prev="$2" tree="${3:-}" old_tree="${4:-}" cur_base="${5:-}" prev_base="${6:-}"
+  [[ -n "$prev" && -n "$cur_base" && "$cur_base" == "$prev_base" && "$tree" == clean:* && "$old_tree" == clean:* ]] || { print -- full; return; }
   git -C "$wt" rev-parse -q --verify "$prev^{commit}" >/dev/null 2>&1 || { print -- full; return; }
   [[ "$(git -C "$wt" rev-parse "$prev^{commit}")" != "$(git -C "$wt" rev-parse HEAD)" ]] || { print -- full; return; }
   git -C "$wt" merge-base --is-ancestor "$prev" HEAD 2>/dev/null && { print -- delta; return; }
@@ -336,15 +337,21 @@ rvd_unresolved_note() {
   rvd_record_get "$record" report
 }
 
-# <wt> <prev> <round> → developer_instructions に足す delta の説明
+# <wt> <prev> <round> [base] → developer_instructions に足す delta の説明
 rvd_delta_note() {
-  local wt="$1" prev="$2" round="$3" own
-  own="$(git -C "$wt" log --no-merges --format='- %h %s' "$prev..HEAD" --not "origin/${LANES_BASE_BRANCH:-develop}" 2>/dev/null | head -40 || true)"
+  local wt="$1" prev="$2" round="$3" base_ref="${4:-origin/${LANES_BASE_BRANCH:-develop}}" base_label own=""
+  if [[ "$base_ref" =~ '^[0-9a-f]{40}$' ]]; then base_label="${base_ref:0:12}"; else base_label="$base_ref"; fi
+  if own="$(git -C "$wt" log --no-merges --format='- %h %s' "$prev..HEAD" --not "$base_ref" 2>/dev/null)"; then
+    own="$(print -r -- "$own" | head -40)"
+    [[ -n "$own" ]] || own="- （merge だけ）"
+  else
+    own="- （commit 一覧を取得できない。上の範囲の差分をそのまま読む）"
+  fi
   cat <<EOT
 # 再レビュー（round $round・delta。2 回目以降の既定）
 - 前回レビューした head \`${prev:0:12}\` からの差分だけを見る（CLI の --base にこの head を渡している）。差分の外は掘り返さない。
-- origin/${LANES_BASE_BRANCH:-develop} の取り込みで入った変更は対象外。この枝で前回から足された commit は次のとおり:
-${own:-- （merge だけ）}
+- 比較起点（\`${base_label}\`）の取り込みで入った変更は対象外。この枝で前回から足された commit は次のとおり:
+$own
 - 見るのは「前回の指摘が直っているか」「直しで新しい退行が出ていないか」だけ。前回の指摘の解消の確認には差分の外のファイルを読んでよいが、新しい指摘は今回の差分の行と、その直しが直接影響する箇所だけにする（差分の外の既存のコードは掘り返さない）。
 - 検証は delta テンプレートの条件に従う。typecheck / lint は全体、テストは該当条件に応じて実施し、未実施を隠さない。build はレビューでは回さない（最終 head の chk-run と CI で担保）。
 - 差分が認証・決済・DB・秘密の扱い・CI 設定に触れたときだけ、範囲を広げてよい（その旨を最初に書く）。
