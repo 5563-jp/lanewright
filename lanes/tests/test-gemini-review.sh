@@ -144,6 +144,15 @@ pass "GEMINI_REVIEW_DENY は固定の一覧に足され（外せない）、足�
 STUB_AGY_TOOL='view_file,grep_search,run_command,list_dir' STUB_AGY_RESPONSE="$CLEAN" grv 0 readtools
 has "$L/readtools.done" 'VERDICT: CLEAN'
 pass "読む道具（view_file・grep_search・run_command・list_dir）だけなら合格"
+# 対象リポの直下に、親の補助処理（Python）が使うモジュールと同じ名前のファイルがあっても、親はそれを読み込まない（python3 -I）
+newrepo plant
+for m in json hashlib subprocess uuid pathlib; do
+  print -r -- "import os; open(os.environ.get('GRV_PLANT_MARK', '/dev/null'), 'a').write('$m\n')" > "$wt/$m.py"
+done
+git -C "$wt" add -A; git -C "$wt" commit -qm 'test: 同じ名前のモジュールを置く'
+GRV_PLANT_MARK="$T/plant.mark" STUB_AGY_RESPONSE="$CLEAN" grv 0 plant
+[[ ! -e "$T/plant.mark" ]] || { cat "$T/plant.mark" >&2; fail "親の Python が対象リポの同じ名前のモジュールを読み込んだ"; }
+pass "対象リポに json.py・hashlib.py などがあっても、親の Python はそれを読み込まない"
 
 # ---- 3. 正常に終わっていない結果は VERDICT: NONE（EXIT:3）----
 newrepo bad

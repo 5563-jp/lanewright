@@ -162,7 +162,7 @@ branch="$(git -C "$wt" branch --show-current 2>/dev/null)"; [[ -n "$branch" ]] |
 head="$(git -C "$wt" rev-parse --short=12 HEAD)"
 template="$LANES_DIR/templates/claude-review-$mode.md"
 [[ -s "$template" ]] || template="$LANES_DIR/templates/claude-review-full.md"
-LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" python3 - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" "$scratch" "$scratch_rule" "$(rvd_checks_rule)" <<'PY'
+LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" python3 -I - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" "$scratch" "$scratch_rule" "$(rvd_checks_rule)" <<'PY'
 import os, sys, pathlib
 tpl, case, out, wt, branch, head, base, mode, date, scratch, rule, checks_rule = sys.argv[1:13]
 t = pathlib.Path(tpl).read_text(encoding="utf-8")
@@ -185,7 +185,7 @@ PY
 focus="$LANES_DIR/templates/codex-review-focus.md"
 delta_note=""
 [[ "$mode" == "delta" ]] && delta_note="$(rvd_delta_note "$wt" "$base" "$round" "$review_base")"
-devinst="$(python3 - "$focus" "$final" "$delta_note" "$unresolved_note" <<'PY2'
+devinst="$(python3 -I - "$focus" "$final" "$delta_note" "$unresolved_note" <<'PY2'
 import sys, json, pathlib
 parts = [pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").rstrip(),
          pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").rstrip()]

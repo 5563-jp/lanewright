@@ -162,7 +162,7 @@ fi
 
 # 未追跡ファイルを含む作業ツリー状態と、実行環境・導入済み依存の同一性フィンガープリントを計算する
 read_state() {
-python3 - "$wt" "$o" "$cache" "$lanes_dir" "$port" "$generated_def" "${output_names[@]}" <<'PY'
+python3 -I - "$wt" "$o" "$cache" "$lanes_dir" "$port" "$generated_def" "${output_names[@]}" <<'PY'
 import hashlib, os, shutil, stat, subprocess, sys
 
 wt, outdir, cache_path = [os.path.realpath(x) for x in sys.argv[1:4]]

@@ -195,7 +195,7 @@ scratch_rule="$(lanes_scratch_rule "$scratch")"
 
 # テンプレ（役名だけ Gemini に読み替え）+ 置き場所 + 読み取り専用の約束 + 案件固有の指示 + レビューの出し方（Codex と同じ観点）
 # + ランチャの追記（delta の説明・前回の未解決指摘・受け入れ済みの限界・必須検証のきまり）を結合して、実際に渡した全文を残す
-LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" python3 - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" \
+LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" python3 -I - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" \
     "$scratch" "$scratch_rule" "$(rvd_checks_rule)" "$focus" "$delta_note" "$unresolved_note" <<'PY'
 import os, sys, pathlib
 (tpl, case, out, wt, branch, head, base, mode, date, scratch, rule, checks_rule, focus, delta_note, unresolved) = sys.argv[1:16]

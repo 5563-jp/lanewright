@@ -12,7 +12,7 @@ rvd_label_round() { if [[ "$1" =~ '-r([0-9]+)$' ]]; then print -- "${match[1]}";
 rvd_state_file() { print -- "$1/.$2.review-state"; }   # <logdir> <series>
 # 本文も同じ JSON 記録に格納する。旧 key=value 形式は読み取りだけ互換にする。
 rvd_state_get() {
-  python3 - "$1" "$2" <<'PY_STATE'
+  python3 -I - "$1" "$2" <<'PY_STATE'
 import json, pathlib, sys
 p, key = pathlib.Path(sys.argv[1]), sys.argv[2]
 if p.is_file():
@@ -70,7 +70,7 @@ rvd_prev_verdict() { rvd_record_get "$(rvd_prev_record "$1" "$2" "$3")" verdict;
 # 無視対象のファイル（.env.local・手元の設定やメモなど）も中身まで比べる（QA の写しと同じ考え方）。
 # 既知の生成物（依存・ビルドとテストの出力・キャッシュ）は、どの深さにあっても比べない。レビューがテストを回すと書き換わるため。
 rvd_snapshot() {
-  python3 - "$1" <<'PY_SNAPSHOT'
+  python3 -I - "$1" <<'PY_SNAPSHOT'
 import hashlib, os, pathlib, stat, subprocess, sys
 GENERATED_DIRS = {"node_modules", ".next", ".turbo", ".cache", "coverage", "test-results", "playwright-report",
                   "dist", "build", "out", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
@@ -147,7 +147,7 @@ PY_SNAPSHOT
 # 枝（refs/heads）と origin の追跡枝は入れない。worktree 同士で共有され、並行する他のレーンの commit や fetch で変わるため（誤検出になる）。
 # ここで見ていない書き換え（他の枝の作成など）が前後の比較に出ないことは docs/roles.md に書いてある。
 rvd_git_guard() {
-  python3 - "$1" <<'PY_GUARD'
+  python3 -I - "$1" <<'PY_GUARD'
 import hashlib, os, pathlib, subprocess, sys
 wt = sys.argv[1]
 def git(*args):
@@ -187,7 +187,7 @@ PY_GUARD
 # キットのファイルが無い（一部だけを写したテストの置き場など）ときは「無い」ことを条件に入れる（後で置かれたら条件が変わる）。
 # <root> <prompt> <base> <mode> <policy> <model> <effort> [worktree] [使い回しの鍵] [レビュー役]
 rvd_context() {
-  python3 - "$@" <<'PY_CONTEXT'
+  python3 -I - "$@" <<'PY_CONTEXT'
 import hashlib, json, os, pathlib, sys
 root, prompt, base, mode, policy, model, effort = sys.argv[1:8]
 wt = sys.argv[8] if len(sys.argv) > 8 else ''
@@ -306,7 +306,7 @@ rvd_previous_followups() {
 rvd_save_state() {
   [[ "$5" == 'VERDICT: CLEAN' || "$5" == 'VERDICT: NEEDS_FIX' ]] || return 1
   local f; f="$(rvd_state_file "$1" "$2")"
-  python3 - "$f" "$3" "$4" "$5" "$6" "$7" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" "${13:-0}" "${14:-}" <<'PY_SAVE'
+  python3 -I - "$f" "$3" "$4" "$5" "$6" "$7" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" "${13:-0}" "${14:-}" <<'PY_SAVE'
 import json, os, pathlib, sys
 f, rnd, head, verdict, gate, label, context, tree, base, report, pending, blocking, reviewer = sys.argv[1:]
 body = pathlib.Path(report).read_text(encoding='utf-8') if report else ''
