@@ -106,7 +106,7 @@ lanes_dir, root = sys.argv[1:3]
 chk = os.path.join(lanes_dir, "chk-run.sh")
 with open(chk, "r", encoding="utf-8") as f:
     src = f.read()
-py_code = src.split("python3 - \"$wt\" \"$o\" \"$cache\" \"$lanes_dir\" \"$port\" \"$generated_def\" \"${output_names[@]}\" <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+py_code = src.split("python3 -I - \"$wt\" \"$o\" \"$cache\" \"$lanes_dir\" \"$port\" \"$generated_def\" \"${output_names[@]}\" <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
 # 生成物の定義は chk-run.sh と同じ取り方（_common.sh の lanes_generated_def）で受け取る（ここに写しを書かない）
 generated_def = subprocess.check_output(
     ["zsh", "-fc", 'source "$LANES_DIR/_common.sh"; lanes_generated_def'],
