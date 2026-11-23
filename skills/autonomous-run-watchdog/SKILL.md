@@ -75,7 +75,7 @@ description: >-
 - **見張り（5 分）・見直し（10 分）**: heartbeat が新しければ最小限の読み取りで終え、前回からの変化だけを見る。
 - **コーディネーターへの指示にも入れる**:
   - レビューは `<kit>/lanes/run-review.sh` で呼び、round は label 末尾 `-r<N>` で必ず渡す。使える機能は Codex レビュー・Claude レビューのどちらの構成でも同じ（`zsh <kit>/lanes/lanes-roles.sh --print` でどちらが走るかを確かめる）:
-    - **どの構成でも**: `--mode auto`（既定）で、初回は `full`（全体差分レビュー）、前回 `CLEAN` の後は前回 HEAD（ブランチ先端のコミット）からの `delta`（増分レビュー）、同一 HEAD は `skip-same-head`（レビューせず前回判定を返す）、前回 `NEEDS_FIX` の後は自動で `full` に戻して未解決指摘を引き継ぐ。round 3 以降は P0/P1（重大・高優先度の指摘）だけが止め、P2/P3（中・軽微な指摘）は `logs/<series>.followups.md` に出て `CLEAN` で通る。`--round N` も使える。
+    - **どの構成でも**: `--mode auto`（既定）で、初回は `full`（全体差分レビュー）、前回 `CLEAN` の後は前回 HEAD（ブランチ先端のコミット）からの `delta`（増分レビュー）、同一 HEAD は `skip-same-head`（レビューせず前回判定を返す）、前回 `NEEDS_FIX` の後も前回 HEAD からの `delta` で未解決指摘を引き継ぐ（delta にできないときだけ `full`）。round 3 以降は P0/P1（重大・高優先度の指摘）だけが止め、P2/P3（中・軽微な指摘）は `logs/<series>.followups.md` に出て `CLEAN` で通る。`--round N` も使える。
     - **必須検証の使い回し**: 最終 HEAD で `<kit>/lanes/chk-run.sh` を通してからレビューを呼ぶと、同じ中身ならレビュアーは typecheck / lint / unit を回さない（ランチャが `chk-run.sh --query` で判断する。`chk-run.sh` とレビューは同じシェルから呼ぶ）。
   - build（配布・実行用ファイルの生成）はレビュー・修正レーン・bot QA（品質確認）では回さない（レビューで省略してよいのは build だけ）。E2E（画面を通した通しのテスト）は、レビュー用テンプレート `<kit>/lanes/templates/claude-review-{full,delta}.md` のとおり full ではプロジェクトにあれば完走、delta では差分が画面・API に触れたときだけ該当の spec を回す。統合先ブランチ（`LANES_BASE_BRANCH`）に入れる直前の最終 HEAD で `<kit>/lanes/chk-run.sh` を 1 回（同一 git tree（ファイル構成と中身の識別子）・同一 `input_fp`（環境や依存の指紋データ）なら自動省略）と CI で担保する。
   - 同じ確認を 2 回以上回している場合（同一 git tree の chk 再実行、`--force` で同じ HEAD を 2 回以上レビューしている場合など）は止まりとみなし、`COORDINATOR_STALLED: 同じ確認の繰り返し <内容>` を返す。同一 HEAD を呼び直して `skip-same-head` が返るのは、ランチャが省略した正常な動作なので止まりではない（どの構成でも。`--force` で何度もやり直しているときだけ止まり）。

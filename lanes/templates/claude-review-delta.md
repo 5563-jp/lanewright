@@ -1,9 +1,9 @@
 # レビュー本線（Claude）— delta 再レビュー — 完走必須
 
-前回 `VERDICT: CLEAN` を出した SHA `{{BASE}}` 以降の差分だけを見る再レビュー。軽微（minor）修正の確認用。critical / high の修正後は full で回すので、ここでは差分外を掘り返さない。
+前回レビューした SHA `{{BASE}}` 以降の差分だけを見る再レビュー（2 回目以降の既定。前回 `NEEDS_FIX` の後も同じ）。前回の指摘が直っているかと、直しで新しい退行が出ていないかだけを見て、差分外を掘り返さない。
 
 ## 前提
-- cwd: `{{WORKTREE}}`（枝 `{{BRANCH}}` / HEAD `{{HEAD}}` / 前回 CLEAN `{{BASE}}`）
+- cwd: `{{WORKTREE}}`（枝 `{{BRANCH}}` / HEAD `{{HEAD}}` / 前回レビュー `{{BASE}}`）
 - 対象差分: `git diff {{BASE}}...HEAD` を自分で読む。統合先の枝（`LANES_BASE_BRANCH`）全体の再レビューはしない
 - 起動: {{DATE}}
 
@@ -27,7 +27,7 @@ auth / authz / RLS / JWT / migration / DB スキーマ / 決済 / ポイント /
 4. E2E は差分が画面・API に触れたときだけ該当 spec を回す
 5. 差分の全ファイルを読み、前回指摘（案件固有の指示に書いてある）が意図どおり直っているか、新しい退行が無いかを見る
 6. secret / `run-*.sh` / `logs/` / 生成物の混入なし
-7. `git log --format='%an <%ae> %s' {{BASE}}..HEAD` で、前回 CLEAN 以降の commit author が対象リポの `git config user.name` / `user.email` と同じ（偽のアドレスで commit していない）こと、commit 件名が日本語（prefix は英語）であること
+7. `git log --format='%an <%ae> %s' {{BASE}}..HEAD` で、前回レビュー以降の commit author が対象リポの `git config user.name` / `user.email` と同じ（偽のアドレスで commit していない）こと、commit 件名が日本語（prefix は英語）であること
 
 ## 出力（絶対）
 - 最初に「delta のまま」か「full にエスカレーション」かを 1 行
