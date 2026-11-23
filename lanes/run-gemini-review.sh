@@ -36,7 +36,8 @@
 # 判定: agy は時間切れ（--print-timeout）や失敗でも終了コード 0 で {"event":"result","result":{"status":"ERROR",...}} を出すことがある。
 #   result がちょうど 1 つで最後のイベント・status が SUCCESS・response が空でない文字列のときだけ、本文の最終行の VERDICT を読む。
 #   それ以外（ERROR・空の応答・result が無い・JSON の破損）は VERDICT: NONE（EXIT:3）。エラーの本文からは VERDICT を拾わない。
-#   本文の最終行が独立した VERDICT 行でなければ、指摘があっても重大度から推定せず VERDICT: NONE（EXIT:3。後回し・昇格・記録の保存をしない）。
+#   整形前の本文の最後の空でない行が VERDICT: CLEAN / VERDICT: NEEDS_FIX そのものでなければ、指摘があっても重大度から推定せず
+#   VERDICT: NONE（EXIT:3。後回し・昇格・記録の保存をしない。判定は _common.sh の lanes_parse_review の review の 1 か所）。
 #   CLEAN を保存するのは、必須検証の成功行（CHECKS:）か親の chk-run の記録の使い回しで成功を確かめたときだけ（無ければ NEEDS_FIX）
 # 見張り（run-gemini.sh と同じ）: json / stderr が GEMINI_NOOUTPUT_SEC（既定 600）秒止まれば EXIT:8。idle のまま子が無ければ EXIT:3。
 #   全体の上限は agy の --print-timeout（GEMINI_REVIEW_PRINT_TIMEOUT、無ければ GEMINI_PRINT_TIMEOUT、既定 75m。単位なしは秒）。
