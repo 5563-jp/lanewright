@@ -563,16 +563,17 @@ rvd_mark_blocked() {   # <logdir> → 0 = logs/ の外の印は置けた（logs/
 # ランチャの記録（logs/ の直下の .pid・ログ・証跡・起動ログなどのうち、ランチャが台帳 logs/.lanes-records に載せた持ち主のもの）は
 # 指紋に入らない（chk-run.sh の is_lane_record）ので、detach-run.sh が先に logs/launch.log を書いていても、前のレーンの記録が
 # 残っていても、記録と合う。台帳に無い名前のファイル（確認コマンドが読む logs/input.json など）は入力のまま。
-# _common.sh が外した API キーなどは、親が chk-run.sh を回したときの環境に戻して渡す（chk-run.sh は何も実行しない）
+# _common.sh が外した API キーなどは、親が chk-run.sh を回したときの環境に戻して渡す（chk-run.sh は何も実行しない）。
+# ランチャが固定した python3 も LANES_PY_FIXED で渡す（chk-run.sh は補助処理の Python を選び直さず、環境の指紋からは外す）
 rvd_checks_query() {
   local lanes_dir="$1" wt="$2" out="" rc=0 line
   typeset -g RVD_CHECKS_REUSE=no RVD_CHECKS_HEAD="" RVD_CHECKS_AT="" RVD_CHECKS_SRC="" RVD_CHECKS_FP="" RVD_CHECKS_REASON=""
   if [[ "${LANES_REVIEW_REUSE_CHECKS:-1}" != 1 ]]; then RVD_CHECKS_REUSE=off; RVD_CHECKS_REASON="LANES_REVIEW_REUSE_CHECKS=0"; return 0; fi
   [[ -f "$lanes_dir/chk-run.sh" ]] || { RVD_CHECKS_REASON="chk-run.sh が無い"; return 0; }
   if (( ${+functions[lanes_with_caller_auth_env]} )); then
-    out="$(lanes_with_caller_auth_env bash "$lanes_dir/chk-run.sh" "$wt" --query 2>/dev/null)" || rc=$?
+    out="$(export LANES_PY_FIXED="${LANES_PY:-}"; lanes_with_caller_auth_env bash "$lanes_dir/chk-run.sh" "$wt" --query 2>/dev/null)" || rc=$?
   else
-    out="$(bash "$lanes_dir/chk-run.sh" "$wt" --query 2>/dev/null)" || rc=$?
+    out="$(export LANES_PY_FIXED="${LANES_PY:-}"; bash "$lanes_dir/chk-run.sh" "$wt" --query 2>/dev/null)" || rc=$?
   fi
   if (( rc == 0 )) && [[ "${${(f)out}[1]:-}" == reuse=yes ]]; then
     for line in "${(@f)out}"; do

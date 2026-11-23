@@ -184,6 +184,9 @@ args=("$wt" "$prompt")
 (( dry )) && args+=(--dry-run)
 # 起動前点検は振り分け先が排他・終了記録（.pid / .done）を取った後に行う（失敗を今回の FAILED として残すため）
 export LANES_ENTRY_PREFLIGHT=1
+# 親の補助処理の python3 は、ここ（作業ツリーを知った lanes_early_target）で決めたものを振り分け先へ渡す（振り分け先の _common.sh が
+# 受け取ってすぐ環境から外し、選び直さずに作業ツリーの外の実行ファイルであることだけ確かめる。起動前点検・chk-run.sh --query にも渡す）
+export LANES_PY_FIXED="$LANES_PY"
 # _common.sh が外した API キーなどは、振り分け先が親の環境のまま chk-run.sh --query を呼べるよう元に戻して渡す
 # （振り分け先も _common.sh で外すので、CLI の子には届かない）
 lanes_restore_caller_auth_env

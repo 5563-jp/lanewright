@@ -166,12 +166,25 @@ lanes_now() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 #   （ランチャは lanes_early_target と lanes_require_worktree で呼ぶ。chk-run.sh も同じ関数で決める）。
 #   作業ツリーの外に無ければ止める（中の python3 には倒さない）。
 # zsh -f は .zshrc を読まないので PATH は起動元の継承だけ。値は export しない（子にも、chk-run.sh の環境の指紋にも入れない）
+# 入口で 1 回だけ決める: 入口（run-review.sh・run-impl.sh）が作業ツリーを知った時点で決めた python3 の絶対パスを、振り分け先・
+# 起動前点検（lanes-doctor.sh）・必須検証の問い合わせ（chk-run.sh --query）へ LANES_PY_FIXED で渡す（設定キーではない）。
+# 渡されたら PATH から選び直さず、作業ツリーの外の実在する実行ファイルであることだけ確かめる（作業ツリーの中・実行できないなら
+# 使わずに止める）。受け取ったらすぐ環境から外す（CLI の子にも、chk-run.sh の環境の指紋にも入れない）
 unset LANES_PY
 typeset -g +x LANES_PY=""
+typeset -g +x LANES_PY_GIVEN="${LANES_PY_FIXED:-}"
+unset LANES_PY_FIXED
 lanes_python_pin() {   # [worktree] → 0 = LANES_PY を固定した / 1 = 使える python3 が無い（LANES_PY は空）
   local root="" dir py
   [[ -z "${1:-}" ]] || root="${1:A}"
   LANES_PY=""
+  if [[ -n "$LANES_PY_GIVEN" ]]; then
+    py="$LANES_PY_GIVEN"
+    [[ "$py" == /* && -f "$py" && -x "$py" ]] || return 1
+    if [[ -n "$root" ]] && [[ "${py:h:A}/" == "$root/"* || "${py:A}/" == "$root/"* ]]; then return 1; fi
+    LANES_PY="$py"
+    return 0
+  fi
   for dir in "${path[@]}"; do
     [[ "$dir" == /* ]] || continue
     py="$dir/python3"
@@ -182,10 +195,12 @@ lanes_python_pin() {   # [worktree] → 0 = LANES_PY を固定した / 1 = 使�
   done
   return 1
 }
-lanes_python_require() {   # <worktree>: 作業ツリーの外の python3 に固定し直す。無ければ止める
-  lanes_python_pin "$1" || lanes_die "作業ツリーの外に python3 が無い（作業ツリーの中の python3 は親の補助処理に使わない。PATH の、作業ツリーの外の絶対パスのフォルダに python3 を置く）: $1"
+lanes_python_require() {   # <worktree>: 作業ツリーの外の python3 に固定し直す（入口から渡されていれば確かめるだけ）。無ければ止める
+  lanes_python_pin "$1" && return 0
+  [[ -z "$LANES_PY_GIVEN" ]] || lanes_die "入口から渡された python3 が、作業ツリーの外の実行ファイルではない（選び直さずに止める）: $LANES_PY_GIVEN（作業ツリー: $1）"
+  lanes_die "作業ツリーの外に python3 が無い（作業ツリーの中の python3 は親の補助処理に使わない。PATH の、作業ツリーの外の絶対パスのフォルダに python3 を置く）: $1"
 }
-lanes_python_pin || lanes_die "python3 が PATH に無い（PATH の絶対パスのフォルダに置く）"
+lanes_python_pin || lanes_die "使える python3 が無い（PATH の絶対パスのフォルダに置く。入口から渡された python3 が実行できないときも止める）"
 
 # バイナリが無ければ PATH から探す
 lanes_resolve_bin() {
@@ -237,10 +252,13 @@ lanes_require_tool() {
 # 入口は LANES_ENTRY_PREFLIGHT=1 を付けて振り分け先へ exec し、振り分け先が lanes_mark_start の後にこれを呼ぶ。
 # こうすると点検の失敗も今回の .done（EXIT:2）として残り、同じ label の前回の成功（DONE）と取り違えない。
 # 直接ランチャを呼んだときは何もしない（そのランチャ自身の道具の点検だけが走る）。子の CLI へ引き継がないよう外す。
-lanes_entry_preflight() {
+# 点検には、このランチャが固定した python3（LANES_PY_FIXED）と対象の作業ツリーを渡す（点検は選び直さず、作業ツリーの外の
+# 実行ファイルであることだけ確かめる。ログイン状態の解析もこの python3 で行う）
+lanes_entry_preflight() {   # <worktree>
   [[ "${LANES_ENTRY_PREFLIGHT:-0}" == 1 ]] || return 0
   unset LANES_ENTRY_PREFLIGHT
-  zsh -f "$LANES_DIR/lanes-doctor.sh" --quiet || lanes_die "起動前点検（lanes-doctor.sh）で足りないものがある → 起動しない"
+  [[ -n "${1:-}" && -n "$LANES_PY" ]] || lanes_die "起動前点検に作業ツリーと固定した python3 を渡せない → 起動しない"
+  LANES_PY_FIXED="$LANES_PY" zsh -f "$LANES_DIR/lanes-doctor.sh" --quiet "$1" || lanes_die "起動前点検（lanes-doctor.sh）で足りないものがある → 起動しない"
 }
 
 # <worktree> <gitdir> <共通の管理フォルダ> → git の制御ファイルの指紋（子の実行の前後で比べる）。

@@ -68,6 +68,10 @@ done
 # レビューの入口・ランチャだけが持つ制御の値は、確認コマンドに渡さない（渡すと結果を変えられるのに、指紋の比較から外しているため）。
 # 回すときも問い合わせ（--query）のときも同じに消すので、指紋の比較から外しても確認の結果とずれない
 unset LANES_ENTRY_PREFLIGHT LANES_REVIEW_REUSE_CHECKS LANES_REVIEW_REQUIRE_CHECKS
+# 呼び出し元（レビューのランチャの問い合わせ）が固定した python3（LANES_PY_FIXED）は、補助処理の Python を決めるときにだけ渡し、
+# 環境からは外す（確認コマンドに渡さず、環境の指紋にも入れない。親が chk-run.sh を回したときと同じ指紋になる）
+py_fixed=${LANES_PY_FIXED:-}
+unset LANES_PY_FIXED
 cache=${CHK_CACHE:-${LANES_RUNS_ROOT:-$HOME/dev/_runs}/_chk-cache/passed.tsv}
 lanes_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 2
 if [ "$query" = 1 ]; then
@@ -88,8 +92,9 @@ fi
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "git 作業ツリーではない: $wt" >&2; exit 2; }
 # 補助処理（出力先の確かめ・状態の指紋・確認コマンドの監督役）に使う Python は、作業ツリーの外のものに固定する
 # （_common.sh の lanes_python_pin。作業ツリーの中の仮想環境の python3 を選んで、その起動時の処理を読まない。ランチャと同じ決め方）。
+# 呼び出し元が固定した python3 を渡したときは選び直さず、作業ツリーの外の実行ファイルであることだけ確かめる。
 # 決められなければ止める（問い合わせは state-error）
-py=$(LANES_DIR="$lanes_dir" zsh -fc 'source "$LANES_DIR/_common.sh" && lanes_python_pin "$1" && print -r -- "$LANES_PY"' chk-run "$wt" 2>/dev/null) || py=""
+py=$(LANES_PY_FIXED="$py_fixed" LANES_DIR="$lanes_dir" zsh -fc 'source "$LANES_DIR/_common.sh" && lanes_python_pin "$1" && print -r -- "$LANES_PY"' chk-run "$wt" 2>/dev/null) || py=""
 if [ -z "$py" ]; then
   if [ "$query" = 1 ]; then echo "reuse=no reason=state-error"; exit 1; fi
   echo "作業ツリーの外に python3 が無い（PATH の、作業ツリーの外の絶対パスのフォルダに python3 を置く）: $wt" >&2; exit 2

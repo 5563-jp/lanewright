@@ -130,7 +130,7 @@ lanes_require_tool gemini run-gemini-review.sh
 if rvd_impl_gemini "$wt/logs" "$impl_engine"; then
   lanes_die "Gemini で実装したもの（--impl-engine gemini か logs/ の .pid の lane=gemini）と、実装の記録（logs/ の .pid）を読めず実装元が分からないものは Gemini でレビューしない（同じ道具のレビューは独立性が無い）。run-review.sh で codex / claude に回す"
 fi
-lanes_entry_preflight
+lanes_entry_preflight "$wt"
 lanes_require_prompt "$prompt"
 round="$(rvd_round "$logdir" "$series" "$label" "$round")"
 [[ "$round" == <-> && ${#round} -le 6 ]] || lanes_die "round が不正"

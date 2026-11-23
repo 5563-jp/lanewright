@@ -75,7 +75,7 @@ series="$(rvd_series "$label")"
 if rvd_checks_block "$allow_missing"; then lanes_die "$RVD_CHECKS_BLOCK"; fi
 (( dry )) || lanes_mark_start "$logdir" "$label" claude-review "$wt" "file:.$series.review-state" "file:$series.followups.md" "file:.review-reuse-blocked"
 lanes_require_tool claude run-claude-review.sh
-lanes_entry_preflight
+lanes_entry_preflight "$wt"
 lanes_require_prompt "$prompt"
 round="$(rvd_round "$logdir" "$series" "$label" "$round")"
 [[ "$round" == <-> && ${#round} -le 6 ]] || lanes_die "round が不正"

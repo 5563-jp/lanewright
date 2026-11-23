@@ -37,7 +37,8 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   Gemini のレビューでは、作者の照合を親で行い、件数と一致しない commit の番号だけを指示書に入れる（名前・メールは渡さず、子に作者を表示させる指示もしない）。
 - レビューのランチャ・`review-dedup.zsh`・`_common.sh`・`chk-run.sh` が呼ぶ Python は、起動時に作業ツリーの外から選んで固定した `python3` を `-I` で動かすようにした
   （作業ツリーの中の仮想環境を有効にしたシェルから起動しても、その環境の起動時の処理や対象リポにある同じ名前のモジュールを読み込まない。
-  作業ツリーの外に `python3` が無ければ exit 2）。
+  作業ツリーの外に `python3` が無ければ exit 2）。入口（`run-review.sh`・`run-impl.sh`）で 1 回だけ決めた `python3` を、振り分け先・起動前点検（`lanes-doctor.sh`）・
+  `chk-run.sh --query` へ渡し、渡された側は選び直さない（作業ツリーの外の実行ファイルであることだけ確かめ、作業ツリーの中なら止める）。
 - 数値の設定キーは、`lanes.env` が先頭の 0 を外して整数に揃える（`LANES_REVIEW_GEMINI_PCT=0050` は `50`）。
 - 既定（`LANES_REVIEW_GEMINI_PCT=0`）のまま `--engine` を使わなければ、新しい系列のレビュー役は今までと同じ（構成の既定の役）。
   同じ系列の途中で構成（`LANES_TOOLS`）を変えたときは、前回の役が今の構成にあればその役で続ける（変えるなら `--engine` か新しい系列の label で）。
