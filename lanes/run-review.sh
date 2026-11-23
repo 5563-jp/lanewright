@@ -13,8 +13,9 @@
 #   3. LANES_REVIEW_GEMINI_PCT（0〜100。既定 0）の割合で Gemini（構成に gemini があるときだけ）。100 なら毎回 Gemini。
 #      1〜99 は ${XDG_STATE_HOME:-~/.local/state}/lanewright/review-split.state に誤差を積み上げて決める
 #      （acc に割合を足し、100 以上になったら 100 を引いて Gemini。50 なら既定の役・Gemini・既定の役・Gemini … の順）。
-#      同じ worktree の同じ系列に前に割り当てた役があれば、それを引き継いで数え方を進めない（振り分け先の起動前の点検で
-#      止まった系列を直して呼び直しても、一度もレビューしていないのに別の役にならない）
+#      割合で決めた役は作業ツリーの logs/.<系列>.review-pick に残し、同じ作業ツリーの同じ系列を呼び直したときはそれを引き継いで
+#      数え方を進めない（振り分け先の起動前の点検で止まった系列を直して呼び直しても、一度もレビューしていないのに別の役にならない）。
+#      logs/ にあるので作業ツリーの記録と同じ寿命（後片付けで消え、同じパスに作り直した別の作業ツリーには持ち越さない）
 #   4. 構成の既定のレビュー役（LANES_ROLE_REVIEW: codex（① full / ② claude-codex）か claude（③ claude-gemini / ④ claude-only））
 # 同じ道具でのレビューの禁止: Gemini で実装したものは Gemini でレビューしない。--engine gemini なら exit 2、2・3 では Gemini を選ばない
 #   （系列の前回が Gemini でも、構成の既定の役へ逃がす）。Gemini で実装したかは、--impl-engine gemini か、logs/ の .pid に
@@ -71,44 +72,26 @@ source "$LANES_DIR/review-dedup.zsh"
 impl_gemini=0
 rvd_impl_gemini "${wt:A}/logs" "$impl_engine" && impl_gemini=1
 
-# 割合の振り分け。<割合 1〜99> <dry-run なら 1> <worktree> <系列> → 標準出力に gemini か default。
-# 同じ worktree の同じ系列に前に割り当てた役があれば、それを返して数え方（acc）を進めない（起動前の点検で止まった系列を
-# 直して呼び直しても、一度もレビューしていないのに別の役にならない）。割り当ては記録の 2 行目以降に「<鍵> <役>」で残す
-# （鍵は worktree の実パスと系列の指紋。新しい 200 件まで）。系列の記録ができた後は、入口の 2（前回の役）が先に当たる。
-# 記録を読めない・書けない・排他を取れないときは default（構成の既定の役。今までどおりのレビュー）に倒し、理由を標準エラーに出す
+# 割合の振り分け。<割合 1〜99> <dry-run なら 1> → 標準出力に gemini か default。
+# 記録（acc= の 1 行）を読めない・書けない・排他を取れないときは default（構成の既定の役。今までどおりのレビュー）に倒し、理由を標準エラーに出す
 review_split() {
-  local pct="$1" dry="$2" key line prev="" dir="${XDG_STATE_HOME:-$HOME/.local/state}/lanewright" acc=0 v="" next pick fd=""
+  local pct="$1" dry="$2" line dir="${XDG_STATE_HOME:-$HOME/.local/state}/lanewright" acc=0 v="" next pick fd=""
   local state="$dir/review-split.state" lock="$dir/review-split.lock" tmp
-  local -a kept
-  key="$(print -rn -- "${3:A}/$4" | shasum -a 256 | cut -c1-32)" || key=""
   if (( ! dry )); then
     zmodload zsh/system 2>/dev/null \
       && ( umask 077; mkdir -p -- "$dir" && : >> "$lock" ) 2>/dev/null \
       && zsystem flock -t 10 -f fd "$lock" 2>/dev/null \
       || { print -u2 -- "注意: 割合の振り分けの記録（$state）の排他を取れない。今回は構成の既定のレビュー役で回す"; print -r -- default; return 0; }
   fi
-  kept=()
   if [[ -f "$state" && ! -L "$state" ]]; then
-    for line in "${(@f)$(<"$state")}"; do
-      if [[ "$line" == acc=* ]]; then v="${line#acc=}"
-      elif [[ "$line" =~ '^[0-9a-f]{32} (gemini|default)$' ]]; then
-        if [[ -n "$key" && "${line%% *}" == "$key" ]]; then prev="${line#* }"; else kept+=("$line"); fi
-      fi
-    done 2>/dev/null
-  fi
-  if [[ -n "$prev" ]]; then
-    (( dry )) || zsystem flock -u "$fd" 2>/dev/null || true
-    ( print -u2 -- "注意: 同じ系列（$4）に前に割り当てた役（$prev。default は構成の既定の役）を引き継ぐ。割合の数え方は進めない" ) || true
-    print -r -- "$prev"; return 0
+    for line in "${(@f)$(<"$state")}"; do [[ "$line" != acc=* ]] || v="${line#acc=}"; done 2>/dev/null
   fi
   if [[ "$v" == <-> && ${#v} -le 3 ]] && (( v < 100 )); then acc=$v; fi
   next=$(( acc + pct ))
   if (( next >= 100 )); then pick=gemini; next=$(( next - 100 )); else pick=default; fi
   if (( ! dry )); then
     tmp="$state.tmp.$$"
-    [[ -z "$key" ]] || kept+=("$key $pick")
-    (( ${#kept} <= 200 )) || kept=("${(@)kept[-200,-1]}")
-    if ! { { print -r -- "acc=$next"; (( ! ${#kept} )) || print -rl -- "${kept[@]}"; } > "$tmp" && mv -f -- "$tmp" "$state"; } 2>/dev/null; then
+    if ! { print -r -- "acc=$next" > "$tmp" && mv -f -- "$tmp" "$state"; } 2>/dev/null; then
       rm -f -- "$tmp" 2>/dev/null || true
       print -u2 -- "注意: 割合の振り分けの記録（$state）を書けない。今回は構成の既定のレビュー役で回す"
       pick=default
@@ -118,7 +101,27 @@ review_split() {
   print -r -- "$pick"
 }
 
-pick=""; why=""; note=""
+# 割合で決めた役の引き継ぎ（logs/.<系列>.review-pick。中身は codex / claude / gemini の 1 行）。置き場所は作業ツリーの logs/ なので、
+# 作業ツリーの記録と同じ寿命（後片付けで作業ツリーと一緒に消え、同じパスに作り直した別の作業ツリーには持ち越さない）。
+# 系列の記録（.review-state）や証跡ができた後は、2（前回の役）が先に当たる。書く前にランチャの記録の台帳へ載せる（chk-run.sh の指紋に入れない）
+pending_pick() {   # <系列> → 残っている役。無い・リンク・読めない・形が違うときは何も出さない
+  local f="${wt:A}/logs/.$1.review-pick" v=""
+  [[ -f "$f" && ! -L "$f" ]] || return 0
+  { IFS= read -r v < "$f"; } 2>/dev/null || true
+  case "$v" in codex|claude|gemini) print -r -- "$v" ;; esac
+  return 0
+}
+save_pick() {   # <系列> <役>。logs/ が無ければ作る（作業ツリーのフォルダがあるときだけ）。残せなくても止めない（呼び直すと数え方が進むだけ）
+  local d="${wt:A}/logs" f
+  f="$d/.$1.review-pick"
+  if { [[ -d "$d" && ! -L "$d" ]] || { [[ -d "${d:h}" && ! -e "$d" && ! -L "$d" ]] && mkdir -- "$d"; }; } 2>/dev/null; then
+    lanes_records_claim "$d" "file:${f:t}"
+    ( rm -f -- "$f" && print -r -- "$2" > "$f" ) 2>/dev/null && return 0
+  fi
+  ( print -u2 -- "注意: 割合で決めた役を $f に残せない（同じ系列を呼び直すと、割合の数え方がもう一度進む）" ) || true
+  return 0
+}
+pick=""; why=""; note=""; series=""; prev_pick=""
 if [[ -n "$engine" ]]; then
   if [[ "$engine" == gemini ]] && (( impl_gemini )); then
     die "Gemini で実装したもの（--impl-engine gemini か logs/ の .pid の lane=gemini）と、実装の記録（logs/ の .pid）を読めず実装元が分からないものは Gemini でレビューしない（同じ道具のレビューは独立性が無い）。--engine を外すか codex / claude を指定する"
@@ -149,10 +152,15 @@ if [[ -z "$pick" ]]; then
       why="Gemini で実装したものなので、割合の振り分け（LANES_REVIEW_GEMINI_PCT=$pct）から外して構成の既定"
     elif (( pct >= 100 )); then
       pick=gemini; why="LANES_REVIEW_GEMINI_PCT=100"
-    elif [[ "$(review_split "$pct" "$dry" "$wt" "$series")" == gemini ]]; then
-      pick=gemini; why="LANES_REVIEW_GEMINI_PCT=$pct の割合で Gemini"
+    elif prev_pick="$(pending_pick "$series")" && [[ -n "$prev_pick" ]] && lanes_roles_has_tool "$prev_pick"; then
+      pick="$prev_pick"; why="同じ系列（$series）に割合で前に割り当てた役を引き継ぐ（割合の数え方は進めない）"
     else
-      why="LANES_REVIEW_GEMINI_PCT=$pct の割合で構成の既定"
+      if [[ "$(review_split "$pct" "$dry")" == gemini ]]; then
+        pick=gemini; why="LANES_REVIEW_GEMINI_PCT=$pct の割合で Gemini"
+      else
+        pick="$LANES_ROLE_REVIEW"; why="LANES_REVIEW_GEMINI_PCT=$pct の割合で構成の既定"
+      fi
+      (( dry )) || save_pick "$series" "$pick"
     fi
   fi
   [[ -n "$pick" ]] || pick="$LANES_ROLE_REVIEW"

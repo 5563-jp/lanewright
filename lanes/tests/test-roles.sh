@@ -468,7 +468,15 @@ for i in 1 2; do
 done
 XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" pg --dry-run
 gem_dry || fail "引き継いだ系列の後の新しい系列が、数え方どおり（Gemini）にならない"
-pass "起動前の点検で止まった系列を呼び直しても、前に割り当てた役を引き継ぎ、割合の記録を二重に進めない"
+[[ "$(<"$wtr/logs/.pf.review-pick")" == codex && "$(<"$split_file")" == acc=50 ]] \
+  || { cat "$split_file" >&2; fail "割合で決めた役が作業ツリーの logs/ に残らない・割合の記録に割り当てが混ざった"; }
+pass "起動前の点検で止まった系列を呼び直しても、前に割り当てた役（logs/ の .<系列>.review-pick）を引き継ぎ、割合の記録を二重に進めない"
+# 片付けて同じパスに作り直した作業ツリー（logs/ が新しい）には、前の作業ツリーで割合で決めた役を持ち越さない（割り当ては logs/ と同じ寿命）
+mv "$wtr/logs" "$T/logs-route.save"; mkdir "$wtr/logs"
+XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" pf --dry-run
+gem_dry && [[ "$OUT" != *"前に割り当てた役を引き継ぐ"* ]] || fail "作り直した作業ツリーに、前の作業ツリーの割り当て（codex）を持ち越した"
+rm -rf -- "$wtr/logs"; mv "$T/logs-route.save" "$wtr/logs"
+pass "同じパスに作り直した作業ツリーには、前の割り当てを持ち越さず、割合の数え方どおりに決める"
 unset STUB_AGY_RESPONSE GEMINI_POLL_SEC
 # lanes-roles.sh --print の補足と、割合の値の確かめ
 out="$(LANES_TOOLS="claude codex gemini" LANES_REVIEW_GEMINI_PCT=50 roles --print)"

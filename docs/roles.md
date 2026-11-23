@@ -74,7 +74,8 @@ zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> [label] [--mode auto|full|d
 3. `LANES_REVIEW_GEMINI_PCT`（`0`〜`100`。既定 `0`）の割合で Gemini（構成に `gemini` があるときだけ）。`100` なら毎回 Gemini。
    `1`〜`99` は `${XDG_STATE_HOME:-~/.local/state}/lanewright/review-split.state` に誤差を積み上げて決めます（毎回 `acc` に割合を足し、100 以上になったら 100 を引いて Gemini）。
    `50` なら「既定の役・Gemini・既定の役・Gemini …」と厳密に交互です。記録は排他を取ってから書き、読めない・書けないときは既定の役に倒します。`--dry-run` は記録を進めません（次に選ぶ役を見せるだけ）。
-   同じ worktree の同じ系列に前に割り当てた役があれば、それを引き継いで数え方を進めません（振り分け先の起動前の点検、たとえば必須検証の記録が無くて止まった系列を、直して呼び直しても別の役にならない）。
+   割合で決めた役は作業ツリーの `logs/.<系列>.review-pick` に残し、同じ作業ツリーの同じ系列を呼び直したときはそれを引き継いで数え方を進めません（振り分け先の起動前の点検、たとえば必須検証の記録が無くて止まった系列を、直して呼び直しても別の役にならない）。
+   `logs/` にあるので作業ツリーの記録と同じ寿命です（後片付けで作業ツリーと一緒に消え、同じパスに作り直した別の作業ツリーには持ち越しません）。
 4. 構成の既定のレビュー役（`LANES_ROLE_REVIEW`。① Codex / ③ Claude）。
 
 **同じ道具でのレビューの禁止**: Gemini で実装したものは Gemini でレビューしません。`--impl-engine gemini` か、`logs/` の `.pid` に Gemini の実装レーン（`lane=gemini`）が 1 つでもあれば Gemini で実装したとみなします

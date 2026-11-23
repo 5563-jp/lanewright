@@ -20,7 +20,8 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   Gemini で実装したものは、`run-gemini-review.sh` を直接呼んでも起動しない（`--impl-engine` も受け付ける）。
 - `run-review.sh` に `--engine codex|gemini|claude`（レビュー役の明示）と `--impl-engine claude|gemini|codex`（実装した道具のヒント）を足した。
 - 設定 `LANES_REVIEW_GEMINI_PCT`（既定 `0`）: 新しい系列のレビューをこの割合で Gemini に回す（`50` なら既定の役と交互）。
-  同じ worktree の同じ系列に前に割り当てた役は引き継ぐ（起動前の点検で止まった系列を呼び直しても、数え方を二重に進めない）。
+  割合で決めた役は作業ツリーの `logs/.<系列>.review-pick` に残して引き継ぐ（起動前の点検で止まった系列を呼び直しても、数え方を二重に進めない。
+  作業ツリーと同じ寿命なので、同じパスに作り直した作業ツリーには持ち越さない）。
   同じ系列の r2 以降は前回と同じレビュー役で続ける。**Gemini で実装したもの（`--impl-engine gemini` か `logs/` の `.pid` に `lane=gemini`）は Gemini でレビューしない。**
   実装の記録（`logs/` の `.pid`）を読めないときも、実装元が分からないので同じに扱う。
 - 設定 `GEMINI_REVIEW_DENY`: Gemini レビューで拒否する道具を足す（固定の一覧は外せない）。
