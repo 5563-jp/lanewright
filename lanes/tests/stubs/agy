@@ -12,6 +12,8 @@
 #   STUB_AGY_OMIT_RESULT 1 なら result を出さない（途中で終わった記録）
 #   STUB_AGY_BROKEN      1 なら result の前に JSON でない行を出す（記録の破損）
 #   STUB_AGY_SLEEP       result を出す前に眠る秒数（無出力の見張りを試す）
+#   STUB_AGY_WAIT_FILE   ファイルのパス。init と道具の記録を出した後、そのファイルができるまで result を出さずに待つ（最大 120 秒。
+#                        実行中の様子を、子が確かに動いている間に確かめるテスト用）
 #   STUB_AGY_RC          終了コード（既定 0）
 #   STUB_AGY_FIRST_ERROR ファイルのパス。そのファイルが無い最初の呼び出しだけ、ファイルを作り、stderr に UNAVAILABLE 503 を出して
 #                        status=ERROR・終了コード 1 で終わる（一時エラーの再試行を試す）。2 回目からは通常どおり
@@ -62,6 +64,11 @@ if "-p" in args or "--print" in args:
         print("{broken", flush=True)
     if os.environ.get("STUB_AGY_SLEEP"):
         time.sleep(float(os.environ["STUB_AGY_SLEEP"]))
+    wait_file = os.environ.get("STUB_AGY_WAIT_FILE")
+    if wait_file:
+        deadline = time.time() + 120
+        while not os.path.exists(wait_file) and time.time() < deadline:
+            time.sleep(0.1)
     if os.environ.get("STUB_AGY_OMIT_RESULT") != "1":
         result = {"status": os.environ.get("STUB_AGY_STATUS") or os.environ.get("STUB_AGY_RESULT", "SUCCESS"),
                   "response": text("STUB_AGY_RESPONSE", "スタブの応答")}

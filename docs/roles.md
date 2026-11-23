@@ -90,7 +90,8 @@ Gemini のレビュー（`run-gemini-review.sh`）は、Codex・Claude のレビ
 - 実行の記録（stream-json）を監査し、禁止の道具か質問の道具（`ask_*`）が 1 回でも呼ばれていれば、本文に関係なく不合格（`EXIT:4`・`VERDICT: NEEDS_FIX`）にします。名前から書き込みと分かる道具（`write`・`edit`・`delete` などを含む名前）も禁止として数えます。
 - agy は時間切れや失敗でも終了コード 0 で `status: "ERROR"` の結果を出すことがあるので、結果がちょうど 1 つで最後にあり、`status` が `SUCCESS`、本文が空でないときだけ判定します。それ以外（`ERROR`・空の応答・結果が無い・JSON の破損）は `VERDICT: NONE`（`EXIT:3`）で、エラーの本文からは `VERDICT` を拾いません。
 - 子の前後で作業ツリー・git の管理フォルダ（設定・hooks・タグ・stash）・再利用の記録を比べ、変わっていれば不合格（`EXIT:4`）。git の制御ファイル（`.git`・`config`・hooks など）が変わったら、git を 1 回も呼ばずに止めます。本体の checkout（`.git` がフォルダ）では起動しません（`run-gemini.sh` と同じく専用の worktree が前提）。
-- 子の git は通信（push・fetch）を止め（`GIT_ALLOW_PROTOCOL`）、任意のロックを取らない設定（`GIT_OPTIONAL_LOCKS=0`）で動かします。管理フォルダは作業場所から見つけます（`GIT_DIR` / `GIT_WORK_TREE` は渡さないので、scratch に写した使い捨てのコピーの中ではそのコピーを見ます）。
+- 子の git は通信（push・fetch）を止め（`GIT_ALLOW_PROTOCOL`）、任意のロックを取らない設定（`GIT_OPTIONAL_LOCKS=0`）で動かします。管理フォルダは作業場所から見つけます（`GIT_DIR` / `GIT_WORK_TREE` は渡しません）。
+  作業ツリーの `.git` は元の管理フォルダを指すファイルなので、そのまま写すと写した先の git も元の管理フォルダと stage を使います。作業ツリーを scratch に写して試すときは `.git` ごと写さず、`git archive HEAD | tar -x` で写して `git init` し直す（写した先の管理フォルダが scratch の下になる）よう指示書に書いています。
 - 書き込みは、防ぐ範囲と後から見つける範囲に分かれます。ファイルを書く道具は拒否の一覧と監査で防ぎます。端末のコマンドはサンドボックスの中で動き、書けるのは**作業ツリー**と scratch の **`work/`**（`--add-dir`・`LANES_SCRATCH`・`TMPDIR`）です。
   作業ツリーへの書き込みは防げず、前後の比較で見つけて不合格にします（元には戻しません。守りたい未保存の変更は commit してからレビューに回します）。`work/` の中は比べません。
   実行の記録の原本（scratch の `record.<実行ごと>/`）・子の git 用の設定・設定の写しは scratch の直下にあり、子からは書けません。監査と判定は原本で行い、子の終了後にだけ `logs/` へ写します（写せなければ合格を保存せず `EXIT:3`・`VERDICT: NONE`）。実行中の `logs/<label>.json` などは状態の確認用の写しです。

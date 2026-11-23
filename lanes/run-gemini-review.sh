@@ -18,7 +18,9 @@
 #     git の制御ファイル（.git・config・hooks など）が変わったら、git を 1 回も呼ばずに止める（EXIT:4）
 #   - 本体 checkout（.git がフォルダ）では起動しない（専用の linked worktree が前提。run-gemini.sh と同じ）
 #   - 子の git は通信（push・fetch）を止め（GIT_ALLOW_PROTOCOL）、任意のロックを取らない（GIT_OPTIONAL_LOCKS=0）。
-#     管理フォルダは作業場所（cwd）から見つける（GIT_DIR / GIT_WORK_TREE は渡さない。scratch に写したコピーの中ではそのコピーを見る）
+#     管理フォルダは作業場所（cwd）から見つける（GIT_DIR / GIT_WORK_TREE は渡さない）。作業ツリーを scratch に写して試すときは
+#     .git ごと写さず（元の管理フォルダを指すファイルなので、写した先の git も元の管理フォルダを使う）、git archive で写して
+#     git init し直すよう指示書に書く（写した先の管理フォルダが scratch の下になる）
 #   - 子（agy と端末のコマンド）が書けるのは、作業ツリー（前後の比較で不合格）と scratch の work/（--add-dir・LANES_SCRATCH・TMPDIR）だけ。
 #     実行の記録の原本（scratch の record.<実行ごと>/。mktemp -d で実行ごとに新しく作り、前の実行の原本は消さない）・子の git 用の
 #     gitconfig・設定の写しは scratch の直下に置き、子から書けない。子に渡す指示書も原本の置き場所に一度だけ書いて固定し、
@@ -331,6 +333,7 @@ readonly = "\n".join([
     "- このレビューは読み取り専用（plan モード・端末サンドボックス）。ファイルを書く・置き換える・消す道具、MCP、サブエージェント、ブラウザ、Web の検索・取得、予約・ワークフローの道具は使わない。1 回でも使うと、本文に関係なく不合格になる。",
     "- 質問・承認の道具（名前が ask_ で始まるもの）は使わない（非対話なので答える人がいない。使うと不合格）。分からない点は前提を書いたうえで指摘に含める。",
     "- 端末のコマンドは読む・確かめるためだけに使う（git diff / git log / git show / 該当テスト 1 本など）。作業ツリーと git の管理フォルダを書き換えない（前後の比較で不合格になる）。一時ファイルは $LANES_SCRATCH の下だけに置く。",
+    "- 作業ツリーを写して試すときは .git ごと写さない（この作業ツリーの .git は元の管理フォルダを指すファイルなので、そのまま写した先の git も元の管理フォルダと stage を使う）。commit 済みの中身を `mkdir -p \"$LANES_SCRATCH/<名前>\" && git archive HEAD | tar -x -C \"$LANES_SCRATCH/<名前>\"` で写し、写した先で `git init -q` してから使う。写した先で `git rev-parse --absolute-git-dir` が $LANES_SCRATCH の下を指すことを確かめてから git を使う。",
 ])
 extra = [p.rstrip() for p in (delta_note, unresolved, os.environ.get("LANES_ACCEPTED_NOTE", ""), author) if p.strip()]
 crule = checks_rule.rstrip()

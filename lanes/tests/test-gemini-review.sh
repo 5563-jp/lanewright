@@ -3,20 +3,24 @@
 # この中で構成（LANES_TOOLS）を自分で固定するので、呼び出し元の構成には左右されない。全データを一時領域に置く。
 # 確かめること:
 #   1. 構成に gemini が無ければ exit 2・.done あり・agy を起動しない。本体 checkout・オプションの足りない agy・誤った GEMINI_REVIEW_DENY でも起動しない
-#      Gemini で実装したもの（logs/ の lane=gemini・--impl-engine gemini）は直接呼んでも起動しない（再利用より前。記録は変えない）
+#      Gemini で実装したもの（logs/ の lane=gemini・--impl-engine gemini）は直接呼んでも起動しない（再利用より前。記録は変えない）。
+#      実装の記録（.pid）を読めない・リンクのときも、実装元が分からないので起動しない
 #   2. agy に --sandbox / --settings（permissions.deny の固定の一覧 + GEMINI_REVIEW_DENY）/ --mode plan / stream-json / --print-timeout /
 #      --add-dir（scratch）を渡し、ANTIGRAVITY_HEADLESS=true・git の通信止め・GIT_OPTIONAL_LOCKS=0 の環境で起動する。
-#      --model / --effort は空なら付けない。.pid（lane=gemini-review）と証跡にモデルと effort が残る
+#      --model / --effort は空なら付けない。.pid（lane=gemini-review）と証跡にモデルと effort が残る。
+#      作業ツリーの中の仮想環境（.venv）を有効にしたシェルから起動しても、親の補助処理は作業ツリーの外の python3 を使う
 #   3. 終了コード 0 でも result.status が ERROR・空の応答・result が無い・JSON の破損なら EXIT:3・VERDICT: NONE（本文・エラーの本文の VERDICT は拾わない）
 #   4. 禁止の道具（ファイルを書く道具・MCP・ブラウザ・Web・ワークフロー）や質問の道具（ask_*）を使ったら EXIT:4・VERDICT: NEEDS_FIX
 #   5. 作業ツリーの変更・git の制御ファイルの変更・再利用の記録の偽造を検出して不合格（EXIT:4）。制御ファイルの変更の後は git を呼ばない
 #   6. review-dedup の連携: r1 full → r2 delta、同じ HEAD は前回の結果を使う（--force で回す）、前回 NEEDS_FIX の引き継ぎ、
 #      round 3 以降の P2/P3 の後回し票、LANES_REVIEW_REQUIRE_CHECKS=1 と chk-run.sh の記録の使い回し。記録にレビュー役（gemini）が残る
 #      役を変えた回は前回 NEEDS_FIX でも全体を見る（前回の指摘は引き継ぐ）。対象リポの同じ名前のモジュールを親の Python が読まない
-#   7. 一時エラーは 1 回だけやり直す（残り時間だけを渡す）。出力が止まれば EXIT:8。--dry-run は記録を作らず agy を起動しない（既存のリンクの先も書かない）
+#   7. 一時エラーは 1 回だけやり直す（残り時間だけを渡す。残りが 1 割未満ならやり直さない。やり直しも親が固定した指示書を渡す）。
+#      記録の原本は実行ごとに新しい置き場所に作り、写せなかった回の原本を起動し直しで消さない。実行中の logs/ の写しは子が動いている間に出る。
+#      出力が止まれば EXIT:8。--dry-run は記録を作らず agy を起動しない（既存のリンクの先も書かない）
 #   8. 必須検証の成功を確かめない CLEAN は NEEDS_FIX。監査・判定は子から書けない原本で行い、子が logs/ の記録を書き換えても効かない。
-#      拒否の一覧を変えたら同じ HEAD でもレビューし直す。子の git は作業場所から管理フォルダを見つける（使い捨てのコピーではそのコピー）。
-#      作者名・メールが利用者の共通設定にあっても、親が照合して一致・不一致だけを渡す
+#      拒否の一覧を変えたら同じ HEAD でもレビューし直す。子の git は作業場所から管理フォルダを見つける（.git ごと写したコピーは元を指すので、git archive + git init で写す）。
+#      作者名・メールが利用者の共通設定にあっても、親が照合して件数と一致しない commit の番号だけを渡す（作者の設定を変えたら照合し直す）
 set -euo pipefail
 # git の環境変数を外し、一時リポの外へ git が上っていかないようにする（本物のリポを書き換えない）
 source "${0:A:h}/_git-isolate.sh"; lanes_test_git_isolate
@@ -368,16 +372,21 @@ STUB_AGY_RESPONSE="$CLEAN" grv 0 pub
 rec2="$(sed -n 's/.*どれも子の終了後に原本（\(.*\)）から写した.*/\1/p' "$L/pub.evidence.md" | head -1)"
 [[ -n "$rec2" && -d "$rec2" && "$rec2" != "$rec1" ]] || fail "起動し直した回が、前の回と同じ原本の置き場所を使った: $rec2"
 pass "記録の原本の置き場所は実行ごとに新しく作り、写せなかった回の原本を同じ label の起動し直しで消さない"
-# 実行中も logs/ に json の写しが出る（lanes-status.sh の最終出力が止まらない）。写しは見るためだけで、判定は原本で行う
+# 実行中も logs/ に json の写しが出る（lanes-status.sh の最終出力が止まらない）。写しは見るためだけで、判定は原本で行う。
+# 偽の子は合図のファイルができるまで終わらない。子が動いている間（ランチャが生きていて .done が無い）に写しを見てから合図する
+# （終わった後の写しで通ったり、起動の準備が遅いだけで落ちたりしない。待つ上限は止まったときの保険）
 : > "$STUB_LOG"
-STUB_AGY_SLEEP=4 STUB_AGY_RESPONSE="$CLEAN" zsh -f "$LANES_DIR/run-gemini-review.sh" "$wt" "$T/prompt.md" live > "$T/out" 2>&1 &
+STUB_AGY_WAIT_FILE="$T/live.go" STUB_AGY_RESPONSE="$CLEAN" zsh -f "$LANES_DIR/run-gemini-review.sh" "$wt" "$T/prompt.md" live > "$T/out" 2>&1 &
 lpid=$!; seen=0
-for i in {1..40}; do
-  if [[ ! -e "$L/live.done" ]] && grep -q '"init"' "$L/live.json" 2>/dev/null; then seen=1; break; fi
-  sleep 0.25
+for i in {1..900}; do
+  kill -0 "$lpid" 2>/dev/null || break
+  if grep -q '"init"' "$L/live.json" 2>/dev/null; then seen=1; break; fi
+  sleep 0.1
 done
+running=0; kill -0 "$lpid" 2>/dev/null && [[ ! -e "$L/live.done" ]] && running=1
+: > "$T/live.go"
 wait "$lpid" || { cat "$T/out" >&2; fail "live: 終了コードが 0 ではない"; }
-(( seen )) || fail "実行中に logs/ に json の写しが出ない（lanes-status.sh が止まったと見る）"
+(( seen && running )) || fail "子が動いている間に logs/ に json の写しが出ない（lanes-status.sh が止まったと見る）"
 has "$L/live.done" 'VERDICT: CLEAN'
 pass "実行中も logs/<label>.json に写しを出す（状態の確認用。判定と最後の記録は原本）"
 GEMINI_NOOUTPUT_SEC=2 STUB_AGY_SLEEP=8 STUB_AGY_RESPONSE="$CLEAN" grv 8 noout
@@ -417,12 +426,22 @@ STUB_AGY_RESPONSE="$CLEAN" grv 0 dz
 GEMINI_REVIEW_DENY=run_command STUB_AGY_RESPONSE="$CLEAN" grv 0 dz
 [[ "$(calls)" == 1 ]] || fail "拒否の一覧を変えたのに前回の CLEAN を使った"
 pass "拒否の一覧（GEMINI_REVIEW_DENY）を変えたら、同じ HEAD でも前回の結果を使わずにレビューし直す"
-STUB_RUN='git rev-parse --show-toplevel > "$LANES_SCRATCH/top-wt.txt"; mkdir -p "$LANES_SCRATCH/copy" && cd "$LANES_SCRATCH/copy" && git init -q && git rev-parse --show-toplevel > "$LANES_SCRATCH/top-copy.txt"' \
+# 子の git は作業場所から管理フォルダを見つける。作業ツリー（.git が元の管理フォルダを指すファイル）を実際に写して確かめる:
+# そのまま写したもの（cp -R）は元の管理フォルダを指したまま。指示書の作り方（git archive で写して git init）なら、
+# 作業ルートも管理フォルダ（git rev-parse --absolute-git-dir）も scratch の中になる
+STUB_RUN='git rev-parse --show-toplevel > "$LANES_SCRATCH/top-wt.txt"
+cp -R . "$LANES_SCRATCH/naive" && git -C "$LANES_SCRATCH/naive" rev-parse --absolute-git-dir > "$LANES_SCRATCH/gitdir-naive.txt"
+mkdir -p "$LANES_SCRATCH/copy" && git archive HEAD | tar -x -C "$LANES_SCRATCH/copy" && cd "$LANES_SCRATCH/copy" && git init -q \
+  && git rev-parse --show-toplevel > "$LANES_SCRATCH/top-copy.txt" && git rev-parse --absolute-git-dir > "$LANES_SCRATCH/gitdir-copy.txt"' \
   STUB_AGY_RESPONSE="$CLEAN" grv 0 gitcopy
-gwork="$(sed -n 's/^scratch=//p' "$L/gitcopy.pid" | head -1)/work"
-[[ "$(<"$gwork/top-wt.txt")" == "${wt:A}" ]] || fail "子の git が作業場所の worktree を見ない: $(<"$gwork/top-wt.txt")"
-[[ "$(<"$gwork/top-copy.txt")" == "${gwork:A}/copy" ]] || fail "使い捨てのコピーの中の git が元の worktree を見た: $(<"$gwork/top-copy.txt")"
-pass "子の git は作業場所から管理フォルダを見つける（scratch の使い捨てのコピーの中ではそのコピーを見る）"
+argcheck "指示書に、.git ごと写さず git archive で写して git init する作り方が無い" \
+  '"git archive HEAD | tar -x -C" in a[-1] and "git init -q" in a[-1] and "git rev-parse --absolute-git-dir" in a[-1]'
+gwork="$(sed -n 's/^scratch=//p' "$L/gitcopy.pid" | head -1)/work"; gwork="${gwork:A}"
+[[ -f "$wt/.git" && "$(<"$gwork/top-wt.txt")" == "${wt:A}" ]] || fail "子の git が作業場所の worktree を見ない: $(<"$gwork/top-wt.txt")"
+[[ "$(<"$gwork/gitdir-naive.txt")" != "$gwork/"* ]] || fail "用意の誤り: .git ごと写したコピーの管理フォルダが scratch の中にある（写し方の注意を確かめられない）"
+[[ -f "$gwork/copy/a.txt" && "$(<"$gwork/top-copy.txt")" == "$gwork/copy" ]] || fail "指示書の作り方で写したコピーの作業ルートが scratch の中にない: $(<"$gwork/top-copy.txt")"
+[[ "$(<"$gwork/gitdir-copy.txt")" == "$gwork/copy/.git" ]] || fail "指示書の作り方で写したコピーの管理フォルダが scratch の中にない: $(<"$gwork/gitdir-copy.txt")"
+pass "子の git は作業場所から管理フォルダを見つける。作業ツリーを .git ごと写すと元の管理フォルダを指すので、指示書の作り方（git archive + git init）で写すと管理フォルダも scratch の中になる"
 newrepo author; L="$wt/logs"
 git -C "$wt" config --unset user.name; git -C "$wt" config --unset user.email
 print -r -- $'[user]\n\tname = Global User\n\temail = global@example.com' > "$T/global.gitconfig"
