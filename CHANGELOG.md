@@ -6,6 +6,8 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+## [0.1.9] - 読み取り専用の Gemini レビューとレビュー役の振り分け / Read-only Gemini review and reviewer routing
+
 ### 足したこと / Added
 - 読み取り専用の Gemini レビューランチャ `lanes/run-gemini-review.sh` を足した（構成に `gemini` がある ① `full` / ③ `claude-gemini` で使える）。
   Codex・Claude のレビューと同じ入口（`run-review.sh`）・同じ判定（`review-dedup.zsh` の full / delta / 同じ head の再利用・round 3 以降の後回し票・
