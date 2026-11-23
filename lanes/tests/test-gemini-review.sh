@@ -9,7 +9,8 @@
 #      --add-dir（scratch）を渡し、ANTIGRAVITY_HEADLESS=true・git の通信止め・GIT_OPTIONAL_LOCKS=0 の環境で起動する。
 #      --model / --effort は空なら付けない。.pid（lane=gemini-review）と証跡にモデルと effort が残る。
 #      作業ツリーの中の仮想環境（.venv）を有効にしたシェルから起動しても、親の補助処理は作業ツリーの外の python3 を使う
-#      （入口の run-review.sh / run-impl.sh から起動したときの起動前点検・chk-run.sh --query も、入口で決めたものを選び直さずに使う）
+#      （入口の run-review.sh / run-impl.sh から起動したときの起動前点検・chk-run.sh --query も、入口で決めたものを選び直さずに使う）。
+#      PATH の python3 が選び直す shim でも、shim ではなく実体（sys.executable の実パス）を固定する
 #   3. 終了コード 0 でも result.status が ERROR・空の応答・result が無い・JSON の破損なら EXIT:3・VERDICT: NONE（本文・エラーの本文の VERDICT は拾わない）
 #   4. 禁止の道具（ファイルを書く道具・MCP・ブラウザ・Web・ワークフロー）や質問の道具（ask_*）を使ったら EXIT:4・VERDICT: NEEDS_FIX
 #   5. 作業ツリーの変更・git の制御ファイルの変更・再利用の記録の偽造を検出して不合格（EXIT:4）。制御ファイルの変更の後は git を呼ばない
@@ -22,9 +23,11 @@
 #      出力が止まれば EXIT:8。--dry-run は記録を作らず agy を起動しない（既存のリンクの先も書かない）
 #   8. 必須検証の成功を確かめない CLEAN は NEEDS_FIX。監査・判定は子から書けない原本で行い、子が logs/ の記録を書き換えても効かない。
 #      拒否の一覧を変えたら同じ HEAD でもレビューし直す。子の git は作業場所から管理フォルダを見つける（.git ごと写したコピーは元を指すので、
-#      今の作業ツリーの中身を git ls-files で写して git init する。未 commit の変更・未追跡・削除が写しに反映される）。
+#      git archive HEAD を mktemp -d の新しいフォルダへ展開して git init する）。logs/ 以外に未 commit の変更・未追跡のファイル、
+#      サブモジュールがあれば起動しない（logs/ だけの変更なら起動する）。
 #      作者名・メールが利用者の共通設定にあっても、親が照合して件数と一致しない commit の番号だけを渡す（作者の設定を変えたら照合し直す）。
-#      渡す指示書の全体（full・delta）に作者を表示し得る git の呼び出しが残らない（置き換えられないものが残れば起動しない）
+#      範囲の commit の一覧と変更統計は親が埋め込み、テンプレの履歴・作者の確認の項目はそれを参照する文に差し替える（full・delta とも。
+#      案件固有の指示は書き換えない）
 set -euo pipefail
 # git の環境変数を外し、一時リポの外へ git が上っていかないようにする（本物のリポを書き換えない）
 source "${0:A:h}/_git-isolate.sh"; lanes_test_git_isolate
@@ -522,34 +525,66 @@ GEMINI_REVIEW_DENY=run_command STUB_AGY_RESPONSE="$CLEAN" grv 0 dz
 [[ "$(calls)" == 1 ]] || fail "拒否の一覧を変えたのに前回の CLEAN を使った"
 pass "拒否の一覧（GEMINI_REVIEW_DENY）を変えたら、同じ HEAD でも前回の結果を使わずにレビューし直す"
 # 子の git は作業場所から管理フォルダを見つける。作業ツリー（.git が元の管理フォルダを指すファイル）を実際に写して確かめる:
-# そのまま写したもの（cp -R）は元の管理フォルダを指したまま。指示書に書いた写し方（dry-run の指示書からそのまま取り出す）なら、
-# 作業ルートも管理フォルダ（git rev-parse --absolute-git-dir）も scratch の中になり、未 commit の変更・未追跡のソース・
-# 作業ツリーで消したものがそのまま写る（git が無視するもの・元の .git は入らない）
+# そのまま写したもの（cp -R）は元の管理フォルダを指したまま。指示書に書いた写し方（dry-run の指示書からそのまま取り出す。
+# git archive HEAD を新しい空のフォルダへ展開して git init）なら、作業ルートも管理フォルダ（git rev-parse --absolute-git-dir）も
+# scratch の中になり、commit 済みの中身が写る（git が無視するもの・logs/・元の .git は入らない）
 newrepo cp; L="$wt/logs"
-print -r -- '*.tmp' >> "$wt/.gitignore"; print -r -- '消す前' > "$wt/del.txt"; mkdir -p "$wt/sub"; print -r -- '下の段' > "$wt/sub/s.txt"
+print -r -- '*.tmp' >> "$wt/.gitignore"; mkdir -p "$wt/sub"; print -r -- '下の段' > "$wt/sub/s.txt"
 git -C "$wt" add -A; git -C "$wt" commit -qm 'test: 写す元'
-print -r -- '未 commit の変更' >> "$wt/a.txt"; print -r -- '新しいテスト' > "$wt/new-test.sh"; rm -f -- "$wt/del.txt"; print -r -- '無視する' > "$wt/x.tmp"
+print -r -- '無視する' > "$wt/x.tmp"
 STUB_AGY_RESPONSE="$CLEAN" grv 0 cp-dry --dry-run
 copy_cmd="$(python3 -I -c 'import re, sys
 t = open(sys.argv[1], encoding="utf-8").read()
-c = re.findall(r"`([^`]*git ls-files[^`]*)`", t)
-assert len(c) == 1 and "git archive" not in t, c
-print(c[0].replace("<名前>", "copy"))' "$L/cp-dry.dry-run.prompt.md")" || fail "指示書から写し方を 1 つだけ取り出せない（または git archive が残る）"
+c = re.findall(r"`([^`]*git archive[^`]*)`", t)
+assert len(c) == 1 and "git archive --format=tar -o" in c[0] and "HEAD" in c[0] and "mktemp -d" in c[0] and "git ls-files" not in t, c
+print(c[0])' "$L/cp-dry.dry-run.prompt.md")" || fail "指示書から写し方（git archive HEAD を mktemp -d へ）を 1 つだけ取り出せない（または git ls-files が残る）"
 STUB_RUN_RC="$T/gitcopy.rc" STUB_RUN="git rev-parse --show-toplevel > \"\$LANES_SCRATCH/top-wt.txt\"
 cp -R . \"\$LANES_SCRATCH/naive\" && git -C \"\$LANES_SCRATCH/naive\" rev-parse --absolute-git-dir > \"\$LANES_SCRATCH/gitdir-naive.txt\"
 $copy_cmd && git rev-parse --show-toplevel > \"\$LANES_SCRATCH/top-copy.txt\" && git rev-parse --absolute-git-dir > \"\$LANES_SCRATCH/gitdir-copy.txt\"" \
   STUB_AGY_RESPONSE="$CLEAN" grv 0 gitcopy
 [[ "$(<"$T/gitcopy.rc")" == 0 ]] || fail "指示書に書いた写し方が失敗した（終了コード $(<"$T/gitcopy.rc")）"
-gwork="$(sed -n 's/^scratch=//p' "$L/gitcopy.pid" | head -1)/work"; gwork="${gwork:A}"; c="$gwork/copy"
+gwork="$(sed -n 's/^scratch=//p' "$L/gitcopy.pid" | head -1)/work"; gwork="${gwork:A}"; c="$(<"$gwork/top-copy.txt")"
 [[ -f "$wt/.git" && "$(<"$gwork/top-wt.txt")" == "${wt:A}" ]] || fail "子の git が作業場所の worktree を見ない: $(<"$gwork/top-wt.txt")"
 [[ "$(<"$gwork/gitdir-naive.txt")" != "$gwork/"* ]] || fail "用意の誤り: .git ごと写したコピーの管理フォルダが scratch の中にある（写し方の注意を確かめられない）"
-[[ "$(<"$gwork/top-copy.txt")" == "$c" && "$(<"$gwork/gitdir-copy.txt")" == "$c/.git" && -d "$c/.git" ]] \
-  || fail "指示書の写し方で写したコピーの作業ルート・管理フォルダが scratch の中にない: $(<"$gwork/top-copy.txt") / $(<"$gwork/gitdir-copy.txt")"
-grep -qx '未 commit の変更' "$c/a.txt" || fail "未 commit の変更が写しに入らない"
-[[ "$(<"$c/new-test.sh")" == '新しいテスト' && "$(<"$c/sub/s.txt")" == '下の段' ]] || fail "未追跡のソース・下の段の追跡ファイルが写しに入らない"
-[[ ! -e "$c/del.txt" ]] || fail "作業ツリーで消したファイルが写しに残る"
+[[ "$c" == "$gwork/copy."* && "$(<"$gwork/gitdir-copy.txt")" == "$c/.git" && -d "$c/.git" ]] \
+  || fail "指示書の写し方で写したコピーの作業ルート・管理フォルダが scratch の新しいフォルダの中にない: $c / $(<"$gwork/gitdir-copy.txt")"
+[[ "$(<"$c/a.txt")" == '元の内容 cp' && "$(<"$c/sub/s.txt")" == '下の段' ]] || fail "commit 済みの中身が写しに入らない"
 [[ ! -e "$c/x.tmp" && ! -e "$c/logs" ]] || fail "git が無視するもの（*.tmp・logs/）が写しに入った"
-pass "子の git は作業場所から管理フォルダを見つける。.git ごと写すと元を指すので、指示書の写し方（git ls-files で今の中身を写して git init）を使い、未 commit の変更・未追跡・削除が写しに反映され、無視するものと元の .git は入らない"
+pass "子の git は作業場所から管理フォルダを見つける。.git ごと写すと元を指すので、指示書の写し方（git archive HEAD を mktemp -d の新しいフォルダへ展開して git init）を使い、commit 済みの中身だけが写る"
+# 作業ツリーがきれいでなければ起動しない（logs/ 以外の未 commit の変更・未追跡のファイル・サブモジュール）。logs/ だけの変更なら起動する
+newrepo clean; L="$wt/logs"
+print -r -- '未 commit の変更' >> "$wt/a.txt"
+STUB_AGY_RESPONSE="$CLEAN" grv 2 cl-mod
+has "$T/out" '未 commit の変更・未追跡のファイルがある'; has "$L/cl-mod.done" 'EXIT:2'
+[[ "$(calls)" == 0 ]] || fail "未 commit の変更があるのに agy を起動した"
+git -C "$wt" checkout -q -- a.txt
+print -r -- '新しいテスト' > "$wt/new-test.sh"
+STUB_AGY_RESPONSE="$CLEAN" grv 2 cl-new
+has "$T/out" '未 commit の変更・未追跡のファイルがある'
+[[ "$(calls)" == 0 ]] || fail "未追跡のファイルがあるのに agy を起動した"
+STUB_AGY_RESPONSE="$CLEAN" grv 2 cl-new-dry --dry-run
+[[ ! -e "$L/cl-new-dry.dry-run.prompt.md" ]] || fail "未追跡のファイルがあるのに dry-run が指示書を書いた"
+rm -f -- "$wt/new-test.sh"
+print -r -- '記録だけ' > "$L/note.txt"
+STUB_AGY_RESPONSE="$CLEAN" grv 0 cl-logs
+has "$L/cl-logs.done" 'VERDICT: CLEAN'
+print -r -- '*.tmp' > "$wt/.gitignore"; git -C "$wt" add .gitignore; git -C "$wt" commit -qm 'test: logs/ を無視しない'
+STUB_AGY_RESPONSE="$CLEAN" grv 0 cl-logs2
+has "$L/cl-logs2.done" 'VERDICT: CLEAN'
+pass "logs/ 以外に未 commit の変更・未追跡のファイルがあれば起動しない（dry-run も同じ。exit 2）。logs/ だけの変更（無視していない logs/ でも）なら起動する"
+newrepo smod; L="$wt/logs"
+git -C "$wt" update-index --add --cacheinfo "160000,$(git -C "$wt" rev-parse HEAD),vendor/lib"
+git -C "$wt" commit -qm 'test: サブモジュールの登録'
+STUB_AGY_RESPONSE="$CLEAN" grv 2 sm-link
+has "$T/out" 'サブモジュールがある'
+[[ "$(calls)" == 0 ]] || fail "サブモジュール（mode 160000）があるのに agy を起動した"
+newrepo smod2; L="$wt/logs"
+print -r -- $'[submodule "vendor/lib"]\n\tpath = vendor/lib\n\turl = ./lib' > "$wt/.gitmodules"
+git -C "$wt" add -A; git -C "$wt" commit -qm 'test: .gitmodules'
+STUB_AGY_RESPONSE="$CLEAN" grv 2 sm-file
+has "$T/out" 'サブモジュールがある'
+[[ "$(calls)" == 0 ]] || fail ".gitmodules があるのに agy を起動した"
+pass "サブモジュールがある（mode 160000 の登録か .gitmodules）なら起動しない（exit 2）"
 newrepo author; L="$wt/logs"
 git -C "$wt" config --unset user.name; git -C "$wt" config --unset user.email
 print -r -- $'[user]\n\tname = Global User\n\temail = global@example.com' > "$T/global.gitconfig"
@@ -572,46 +607,40 @@ GIT_CONFIG_GLOBAL="$T/global.gitconfig" STUB_AGY_RESPONSE="$CLEAN" grv 0 au2 --m
 [[ "$(calls)" == 1 ]] || fail "作者の設定を変えたのに、同じ HEAD の前回の結果を使った"
 argcheck "設定を変えた後の照合で不一致を数えない" '"commit 2 件のうち 2 件の作者が" in a[-1] and "changed@example.com" not in a[-1]'
 pass "作者の設定（user.name / user.email）を変えたら、同じ HEAD でも前回の結果を使わずに照合し直す"
-# 子に渡す指示書の全体（テンプレの全項目・案件固有の指示・前回の指摘本文）から、作者を表示し得る git の呼び出しを除く。
-# 書式の無い git log / show・作者を出す書式は作者を含まない書式（--format='%h %s'）に置き換え、full と delta の両方で残らない。
-# 残っているかは、ランチャとは別の簡単な見方で確かめる
-noauthor() {   # <指示書のファイル>
-  python3 -I - "$1" <<'PY' || fail "指示書に作者を表示し得る git の呼び出しが残る: $1"
-import re, sys
-t = open(sys.argv[1], encoding="utf-8").read()
-bad = []
-for m in re.finditer(r"git(?:[ \t]+-C[ \t]+\S+)?[ \t]+(log|show|whatchanged)(?![A-Za-z0-9_-])([^`\n]*)", t):
-    if "--format='%h %s'" not in m.group(2) and "--oneline" not in m.group(2):
-        bad.append(m.group(0))
-bad += [m.group(0) for m in re.finditer(r"--(?:pretty|format)=\S*", t) if re.search(r"%[ac][nNeElL]|%\(author|fuller|medium|email|raw", m.group(0))]
-bad += [m.group(0) for m in re.finditer(r"git[ \t]+(?:blame|shortlog|annotate|cat-file)", t)]
-assert not bad, bad
-assert "git show --format='%h %s' --stat" in t, "テンプレの変更量の確認が作者を含まない書式になっていない"
-assert "commit author" not in t, "テンプレの作者の確認の項目が残る"
+# 指示書はコマンドの形で書き換えない。親がレビュー範囲の commit の一覧（短い SHA と件名）と変更統計（git diff --stat）を埋め込み、
+# 子には履歴・作者を表示し得るコマンドを使わないよう書く。テンプレの履歴・作者の確認の項目は、固定の文言のまま埋め込みを参照する
+# 文に差し替える（full・delta とも）。案件固有の指示・前回の指摘本文にある git の呼び出し（git blame を含む）はそのまま渡して起動する
+tplcheck() {   # <指示書のファイル> <範囲に入るはずの commit の件名>
+  python3 -I - "$1" "$2" <<'PY' || fail "指示書のテンプレの差し替え・埋め込み・約束が足りない: $1"
+import sys
+t, subject = open(sys.argv[1], encoding="utf-8").read(), sys.argv[2]
+head = t.split("# Gemini レビューの約束")[0]
+for s in ("git log", "git show", "commit author"):
+    assert s not in head, "テンプレの部分に残る: " + s
+assert "「commit の作者の照合」" in head and "「レビュー範囲の commit と変更統計」" in head, "テンプレの項目が埋め込みを参照しない"
+assert "履歴・作者を表示し得る git のコマンド（`git log`・`git show`・`git blame`・`git shortlog`" in t, "履歴を表示するコマンドを使わない約束が無い"
+hist = t.split("# レビュー範囲の commit と変更統計（ランチャが作った。作者は含まない）")[1].split("\n# ")[0]
+assert subject in hist and "a.txt" in hist, "埋め込みに範囲の commit の件名・変更統計が無い"
+assert "Test User" not in t and "you@example.com" not in t, "作者の名前・メールが指示書に入った"
 PY
 }
 newrepo nm; L="$wt/logs"
-print -r -- '担当の変更を確かめる。`git log --stat`・`git show HEAD`・`git log --format='"'"'%an <%ae>'"'"'`・`git log --pretty=fuller`・git logで確認する' > "$T/prompt-author.md"
+change 'r1 の変更'
+print -r -- '担当の変更を確かめる。`git log --stat`・`git show HEAD`・`git log --pretty=fuller` で確認する' > "$T/prompt-author.md"
 GRV_PROMPT="$T/prompt-author.md" STUB_AGY_RESPONSE=$'- [P1] `git show --stat` の作者欄が残る（起きる条件: 普通の起動）\\nVERDICT: NEEDS_FIX' grv 0 nm-r1
 has "$L/nm-r1.evidence.md" 'モード: full'
-noauthor "$L/nm-r1.prompt.md"
-argcheck "full の指示書（実際に渡した引数）に作者を表示し得る git の呼び出しが残る" '"git log --stat" not in a[-1] and "%an" not in a[-1] and "--pretty=fuller" not in a[-1]'
+tplcheck "$L/nm-r1.prompt.md" 'test: r1 の変更'
+has "$L/nm-r1.prompt.md" '`git log --stat`・`git show HEAD`・`git log --pretty=fuller` で確認する'
 change '直した'
 GRV_PROMPT="$T/prompt-author.md" STUB_AGY_RESPONSE="$CLEAN" grv 0 nm-r2
 has "$L/nm-r2.evidence.md" 'モード: delta'
 argcheck "delta の指示書に前回の指摘本文が引き継がれない" '"# 前回の未解決指摘" in a[-1] and "の作者欄が残る" in a[-1]'
-noauthor "$L/nm-r2.prompt.md"
-pass "子に渡す指示書の全体（テンプレ・案件固有の指示・前回の指摘本文）の作者を表示し得る git の呼び出しは、full と delta の両方で作者を含まない書式に置き換える"
-# 置き換えられない呼び出し（blame・shortlog など）が残る指示書では起動しない（dry-run も同じ。.done に EXIT:2）
+tplcheck "$L/nm-r2.prompt.md" 'test: 直した'
+pass "full・delta とも、テンプレの履歴・作者の確認の項目は親の埋め込み（範囲の commit の件名・変更統計・作者の照合）を参照する文に差し替え、子には履歴・作者を表示し得るコマンドを使わないよう書く（案件固有の指示は書き換えない）"
 print -r -- '担当の変更を確かめる。経緯は `git blame a.txt` で見る' > "$T/prompt-blame.md"
-GRV_PROMPT="$T/prompt-blame.md" STUB_AGY_RESPONSE="$CLEAN" grv 2 nm-blame
-has "$T/out" '作者を表示し得る git の呼び出し: git blame'
-has "$L/nm-blame.done" 'EXIT:2'
-[[ "$(calls)" == 0 ]] || fail "作者を表示し得る呼び出しが残る指示書で agy を起動した"
-[[ ! -e "$L/nm-blame.prompt.md" ]] || fail "起動しない指示書を logs/ に写した"
-GRV_PROMPT="$T/prompt-blame.md" STUB_AGY_RESPONSE="$CLEAN" grv 2 nm-blame2 --dry-run
-has "$T/out" '作者を表示し得る git の呼び出し: git blame'
-[[ ! -e "$L/nm-blame2.dry-run.prompt.md" ]] || fail "dry-run が、作者を表示し得る呼び出しの残る指示書を書いた"
-pass "置き換えられない作者を表示し得る呼び出し（git blame など）が指示書に残れば、起動しない（dry-run も書かずに exit 2）"
+GRV_PROMPT="$T/prompt-blame.md" STUB_AGY_RESPONSE="$CLEAN" grv 0 nm-blame --mode full
+has "$L/nm-blame.prompt.md" '経緯は `git blame a.txt` で見る'
+has "$L/nm-blame.done" 'VERDICT: CLEAN'
+pass "案件固有の指示に git blame などがあっても、指示書を書き換えず・起動を拒否せずに渡す（使わない約束は子への指示で伝える）"
 
 print -r -- "PASS: $count 件 / EXIT:0"

@@ -17,20 +17,22 @@
 #   - 子の前後で作業ツリー・git の管理フォルダ・再利用の記録を比べ、変わっていれば不合格（EXIT:4）。
 #     git の制御ファイル（.git・config・hooks など）が変わったら、git を 1 回も呼ばずに止める（EXIT:4）
 #   - 本体 checkout（.git がフォルダ）では起動しない（専用の linked worktree が前提。run-gemini.sh と同じ）
+#   - 作業ツリーがきれいなときだけ起動する: logs/ 以外に未 commit の変更・未追跡のファイルがある、またはサブモジュールがあるときは
+#     起動しない（exit 2。commit してから起動する）。レビューの対象は commit 済みの中身だけになる
 #   - 子の git は通信（push・fetch）を止め（GIT_ALLOW_PROTOCOL）、任意のロックを取らない（GIT_OPTIONAL_LOCKS=0）。
 #     管理フォルダは作業場所（cwd）から見つける（GIT_DIR / GIT_WORK_TREE は渡さない）。作業ツリーを scratch に写して試すときは
-#     .git ごと写さず（元の管理フォルダを指すファイルなので、写した先の git も元の管理フォルダを使う）、今の作業ツリーの中身
-#     （追跡・未 commit の変更・未追跡のソース。無視するもの・消したものは除く）を git ls-files で並べて新しい空のフォルダへ写し、
-#     git init し直すよう指示書に書く（写した先の管理フォルダが scratch の下になる。レビューの対象と同じ中身を試せる）
+#     .git ごと写さず（元の管理フォルダを指すファイルなので、写した先の git も元の管理フォルダを使う）、git archive HEAD を
+#     新しい空のフォルダ（mktemp -d）へ展開して git init し直すよう指示書に書く（写した先の管理フォルダが scratch の下になる）
 #   - 子（agy と端末のコマンド）が書けるのは、作業ツリー（前後の比較で不合格）と scratch の work/（--add-dir・LANES_SCRATCH・TMPDIR）だけ。
 #     実行の記録の原本（scratch の record.<実行ごと>/。mktemp -d で実行ごとに新しく作り、前の実行の原本は消さない）・子の git 用の
 #     gitconfig・設定の写しは scratch の直下に置き、子から書けない。子に渡す指示書も原本の置き場所に一度だけ書いて固定し、
 #     やり直しを含む全部の試行と最後の証跡で同じものを使う。監査と判定は原本で行い、子の終了後にだけ logs/ へ写す
 #     （写せなければ合格を保存しない。EXIT:3・VERDICT: NONE。原本は同じ label で起動し直しても残る）
 #   - 子の git は最小の設定で動くので、commit の作者の照合は親が元の有効な設定で行い、件数と一致しない commit の番号だけを指示書に入れる
-#     （名前・メールは渡さず、テンプレの作者の確認の項目もこの結果を使う指示に置き換える）。作者の設定の指紋は再利用の条件に入る（rvd_context）。
-#     渡す指示書の全体の、作者を表示し得る git の呼び出しは作者を含まない書式（--format='%h %s'）に置き換え、置き換えられないもの
-#     （git blame・git shortlog など）が残れば起動しない（exit 2）
+#     （名前・メールは渡さない）。作者の設定の指紋は再利用の条件に入る（rvd_context）。レビュー範囲の commit の一覧（短い SHA と件名）と
+#     変更統計（git diff --stat）も親が作って指示書に埋め込み、子には git log / git show / git blame / git shortlog などの履歴・作者を
+#     表示し得るコマンドを使わないよう書く（中身は git diff と作業ツリーのファイルの読み取りで確かめる）。テンプレの履歴・作者の確認の
+#     項目は、固定の文言のまま埋め込みを参照する文に差し替える（指示書の全文をコマンドの形で書き換えることはしない）
 # 判定: agy は時間切れ（--print-timeout）や失敗でも終了コード 0 で {"event":"result","result":{"status":"ERROR",...}} を出すことがある。
 #   result がちょうど 1 つで最後のイベント・status が SUCCESS・response が空でない文字列のときだけ、本文の最終行の VERDICT を読む。
 #   それ以外（ERROR・空の応答・result が無い・JSON の破損）は VERDICT: NONE（EXIT:3）。エラーの本文からは VERDICT を拾わない。
@@ -130,6 +132,16 @@ lanes_require_tool gemini run-gemini-review.sh
 if rvd_impl_gemini "$wt/logs" "$impl_engine"; then
   lanes_die "Gemini で実装したもの（--impl-engine gemini か logs/ の .pid の lane=gemini）と、実装の記録（logs/ の .pid）を読めず実装元が分からないものは Gemini でレビューしない（同じ道具のレビューは独立性が無い）。run-review.sh で codex / claude に回す"
 fi
+# 作業ツリーがきれいなときだけ起動する（子は commit 済みの中身を git archive HEAD で写して試すので、写しとレビューの対象を揃える）。
+# サブモジュールがあれば、または logs/ 以外に未 commit の変更・未追跡のファイル（無視するものは除く）があれば止める（再利用の判定より前）
+staged="$(git -C "$wt" ls-files --stage 2>/dev/null)" || lanes_die "作業ツリーの追跡ファイルを確かめられない（git ls-files が失敗）: $wt"
+typeset -a gitlinks; gitlinks=(${(M)${(f)staged}:#160000 *})   # サブモジュールの登録（mode 160000）の行
+[[ ! -e "$wt/.gitmodules" && ! -L "$wt/.gitmodules" ]] && (( ${#gitlinks} == 0 )) \
+  || lanes_die "サブモジュールがある → Gemini レビューは起動しない（写しにサブモジュールの中身が入らない）。run-review.sh --engine codex / claude でレビューする"
+dirty_paths="$(git -C "$wt" --no-optional-locks status --porcelain -z --untracked-files=all --ignore-submodules=none -- ':(top,exclude)logs/' 2>/dev/null)" \
+  || lanes_die "作業ツリーの状態を確かめられない（git status が失敗）: $wt"
+[[ -z "$dirty_paths" ]] || lanes_die "作業ツリーに logs/ 以外の未 commit の変更・未追跡のファイルがある → Gemini レビューは起動しない（commit してから起動する）"
+unset dirty_paths staged gitlinks
 lanes_entry_preflight "$wt"
 lanes_require_prompt "$prompt"
 round="$(rvd_round "$logdir" "$series" "$label" "$round")"
@@ -274,8 +286,7 @@ scratch_rule="$(lanes_scratch_rule "$work")"
 # 子の git は最小の設定（GIT_CONFIG_GLOBAL）で動くので、利用者の共通設定にある作者名・メールは子から見えない。
 # 作者の照合は親で完結させる: 元の有効な設定で、レビューの範囲（比較起点..HEAD）の commit の作者を照合し、件数と、一致しない
 # commit の番号（短い SHA）だけを指示書に入れる。名前・メールの値は渡さず、子に作者を表示させる指示もしない
-# （テンプレの作者の確認の項目は、下の結合でこの結果を使う指示に置き換える。ほかの項目・案件固有の指示・前回の指摘本文にある
-# 作者を表示し得る git の呼び出しも、結合した全文でまとめて作者を含まない書式に置き換え、残っていれば起動しない）
+# （テンプレの作者の確認の項目は、下の結合で固定の文言のままこの結果を使う指示に差し替える）
 gem_author_note() {   # <比較起点> → 指示書に足す文
   local from="$1" name="" email="" out="" row rest n=0 bad=0 max=50
   local -a shas
@@ -283,7 +294,7 @@ gem_author_note() {   # <比較起点> → 指示書に足す文
   email="$(git -C "$wt" config user.email 2>/dev/null)" || email=""
   print -r -- "# commit の作者の照合（ランチャが元の git の設定で確かめた結果）"
   print -r -- "- このレビューの中の git は最小の設定で動くので、git config user.name / user.email は空になる。作者の照合はこの結果だけを使う。"
-  print -r -- "- 作者の名前・メールアドレスは表示しない・書かない。履歴は作者を含まない書式（\`git log --format='%h %s'\`・\`git show --format='%h %s' --stat\` のように番号と件名だけ）で見て、作者を出すコマンド（blame・shortlog など）も使わない。指摘には commit の番号と件数だけを書く。"
+  print -r -- "- 作者の名前・メールアドレスは表示しない・書かない。指摘には commit の番号と件数だけを書く。"
   if [[ -z "$name" || -z "$email" ]]; then
     print -r -- "- 対象リポの有効な git の設定に user.name か user.email が無く、ランチャは照合できなかった。照合できないことを指摘に書く。"
     return 0
@@ -310,46 +321,76 @@ gem_author_note() {   # <比較起点> → 指示書に足す文
   fi
 }
 author_note="$(gem_author_note "$base")"
+# レビュー範囲（比較起点..HEAD）の commit の一覧（短い SHA と件名だけ）と変更統計（git diff --stat。作者を含まない）は親が作って
+# 指示書に埋め込む（子には git log / git show などの履歴・作者を表示し得るコマンドを使わせない）。字下げのコードとして載せ、
+# 長いときは先頭だけ（変更統計の全体は子が git diff --stat で見られる）
+gem_history_note() {   # <比較起点> → 指示書に足す文
+  local from="$1" commits="" stat="" max=200
+  local -a rows srows
+  print -r -- "# レビュー範囲の commit と変更統計（ランチャが作った。作者は含まない）"
+  if ! commits="$(git -C "$wt" log --no-color --no-show-signature --abbrev=12 --format='%h %s' "$from..HEAD" 2>/dev/null)" \
+     || ! stat="$(git -C "$wt" diff --no-color --no-ext-diff --no-textconv --stat=160 "$from..HEAD" 2>/dev/null)"; then
+    print -r -- "- 範囲（${from:0:12}..HEAD）の commit の一覧・変更統計をランチャが読めなかった。読めなかったことを指摘に書き、中身は \`git diff ${from:0:12}..HEAD\` で確かめる。"
+    return 0
+  fi
+  rows=(${(f)commits}); srows=(${(f)stat})
+  print -r -- "- 範囲（${from:0:12}..HEAD）の commit ${#rows} 件（短い SHA と件名。新しい順）:"
+  print -r -- ""
+  if (( ${#rows} )); then print -rl -- "    "${^rows[1,max]}; else print -r -- "    （commit なし）"; fi
+  (( ${#rows} <= max )) || print -r -- "    （ほか $(( ${#rows} - max )) 件）"
+  print -r -- ""
+  print -r -- "- 変更統計（\`git diff --stat ${from:0:12}..HEAD\`）:"
+  print -r -- ""
+  if (( ${#srows} )); then print -rl -- "    "${^srows[1,max]}; else print -r -- "    （変更なし）"; fi
+  (( ${#srows} <= max )) || print -r -- "    （ほか $(( ${#srows} - max )) 行。全体は git diff --stat で見る）"
+}
+history_note="$(gem_history_note "$base")"
 
 # テンプレ（役名だけ Gemini に読み替え）+ 置き場所 + 読み取り専用の約束 + 案件固有の指示 + レビューの出し方（Codex と同じ観点）
-# + ランチャの追記（delta の説明・前回の未解決指摘・受け入れ済みの限界・必須検証のきまり）を結合して、実際に渡す全文を作る。
+# + ランチャの追記（delta の説明・前回の未解決指摘・受け入れ済みの限界・作者の照合・範囲の commit と変更統計・必須検証のきまり）を
+# 結合して、実際に渡す全文を作る。
 # 書く先は記録の原本の置き場所（$pprompt。子から書けない）で、全部の試行がこれを読む。logs/ の <label>.prompt.md はその写し。
 # dry-run は logs/ の <label>.dry-run.prompt.md に書く。書き込みは書く先のフォルダを symlink を辿らずに開き、その中に新しい
 # ファイルを作ってから名前を置き換える（既存の名前がリンクならその先を書き換えない）。
-# 書く前に、全文（テンプレ・案件固有の指示・前回の指摘本文・ランチャの追記のどこにあっても）の作者を表示し得る git の呼び出しを
-# 作者を含まない書式（--format='%h %s'）に置き換え、置き換えられないもの（blame・shortlog など）が残れば書かずに終了コード 3 で止める
-# （full / delta / dry-run の全部がここを通り、一時エラーのやり直しも同じ原本を読む）
+# テンプレの履歴・作者の確認の項目（git show --stat・git log で作者を出す指示）は、固定の文言のまま埋め込みを参照する文に差し替える。
+# 差し替えた後のテンプレに git log / git show / commit author が残る（テンプレの文言が変わった）なら、書かずに終了コード 3 で止める
 combine_rc=0
 LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" "$LANES_PY" -I - "$template" "$prompt" "$pprompt" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" \
-    "$work" "$scratch_rule" "$(rvd_checks_rule)" "$focus" "$delta_note" "$unresolved_note" "$author_note" <<'PY' || combine_rc=$?
-import os, re, sys, pathlib
-(tpl, case, out, wt, branch, head, base, mode, date, scratch, rule, checks_rule, focus, delta_note, unresolved, author) = sys.argv[1:17]
+    "$work" "$scratch_rule" "$(rvd_checks_rule)" "$focus" "$delta_note" "$unresolved_note" "$author_note" "$history_note" <<'PY' || combine_rc=$?
+import os, sys, pathlib
+(tpl, case, out, wt, branch, head, base, mode, date, scratch, rule, checks_rule, focus, delta_note, unresolved, author, history) = sys.argv[1:18]
 t = pathlib.Path(tpl).read_text(encoding="utf-8")
+REPLACE = [
+    ("`git log --format='%an <%ae> %s' {{BASE}}..HEAD` で、", ""),
+    ("commit author が対象リポの `git config user.name` / `user.email` と同じ（偽のアドレスで commit していない）こと、commit 件名が日本語（prefix は英語）であること",
+     "commit の作者は下の「commit の作者の照合」（ランチャが元の git の設定で確かめた結果）だけで確かめ、commit 件名が日本語（prefix は英語）であることは下の「レビュー範囲の commit と変更統計」の一覧で確かめる"),
+    ("`git show --stat {{BASE}}..HEAD`", "下の「レビュー範囲の commit と変更統計」と `git diff --stat {{BASE}}..HEAD`"),
+]
+for old, new in REPLACE:
+    t = t.replace(old, new)
+if any(s in t for s in ("git log", "git show", "commit author")):
+    print("テンプレの履歴・作者の確認の項目を差し替えられない（テンプレの文言が変わった）: " + tpl, file=sys.stderr)
+    sys.exit(3)
 for k, v in {"WORKTREE": wt, "BRANCH": branch, "HEAD": head, "BASE": base, "MODE": mode, "DATE": date, "SCRATCH": scratch}.items():
     t = t.replace("{{" + k + "}}", v)
 # 役名だけ Gemini に読み替え（Claude レビュー用のテンプレを流用。run-codex-review.sh と同じやり方）
 t = t.replace("Claude", "Gemini")
-# テンプレの作者の確認の項目（作者の名前・メールを git log で出して比べる）は、ランチャの照合結果を使う指示に置き換える
-# （子に作者の名前・メールアドレスを表示させない。件名の確認は作者を出さない書式で行う）
-t = re.sub(r"^(\s*\d+\.\s*).*commit author.*$",
-           lambda m: m.group(1) + "commit の作者は、下の「commit の作者の照合」（ランチャが元の git の設定で確かめた結果）だけで確かめる（作者の名前・メールアドレスは表示しない）。"
-           + "commit 件名が日本語（prefix は英語）であることは `git log --format='%h %s' " + base + "..HEAD` で確かめる",
-           t, flags=re.M)
 case_text = pathlib.Path(case).read_text(encoding="utf-8")
 focus_text = pathlib.Path(focus).read_text(encoding="utf-8")
-# 作業ツリーの写し方（子への指示）。元の .git は持ち込まず、今の作業ツリーの中身（commit 済み・未 commit の変更・未追跡のソース。
-# git が無視するもの・作業ツリーで消したものは除く。リンクは辿らずリンクのまま）を新しい空のフォルダへ写して git init する
-COPY = r'''mkdir -p "$LANES_SCRATCH/<名前>" && git ls-files -z --cached --others --exclude-standard | perl -0 -ne 'chomp; print "$_\0" if -e || -l' | tar --null --no-recursion -T - -cf - | tar -xpf - -C "$LANES_SCRATCH/<名前>" && cd "$LANES_SCRATCH/<名前>" && git init -q'''
+# 作業ツリーの写し方（子への指示）。元の .git は持ち込まず、commit 済みの中身（ランチャが作業ツリーのきれいさを確かめた）を
+# git archive HEAD で新しい空のフォルダへ写して git init する（途中の失敗は && で止まる）
+COPY = 'd="$(mktemp -d "$LANES_SCRATCH/copy.XXXXXX")" && git archive --format=tar -o "$d.tar" HEAD && tar -xf "$d.tar" -C "$d" && cd "$d" && git init -q'
 readonly = "\n".join([
     "# Gemini レビューの約束（ランチャが実行の記録で確かめる）",
     "- このレビューは読み取り専用（plan モード・端末サンドボックス）。ファイルを書く・置き換える・消す道具、MCP、サブエージェント、ブラウザ、Web の検索・取得、予約・ワークフローの道具は使わない。1 回でも使うと、本文に関係なく不合格になる。",
     "- 質問・承認の道具（名前が ask_ で始まるもの）は使わない（非対話なので答える人がいない。使うと不合格）。分からない点は前提を書いたうえで指摘に含める。",
-    "- 端末のコマンドは読む・確かめるためだけに使う（`git diff`・`git log --format='%h %s'`・`git show --format='%h %s' --stat`・該当テスト 1 本など。履歴を見るコマンドには、この作者を含まない書式を必ず付ける）。作業ツリーと git の管理フォルダを書き換えない（前後の比較で不合格になる）。一時ファイルは $LANES_SCRATCH の下だけに置く。",
-    "- 作業ツリーを写して試すときは .git ごと写さない（この作業ツリーの .git は元の管理フォルダを指すファイルなので、そのまま写した先の git も元の管理フォルダと stage を使う）。"
-    + "レビューの対象と同じ今の作業ツリーの中身（commit 済みのもの・未 commit の変更・未追跡のソース。git が無視するものと作業ツリーで消したものは除く。リンクは辿らない）を、作業ツリーの直下で `" + COPY + "` で写す（新しい空のフォルダへ写して git init する）。"
-    + "写した先で `git rev-parse --absolute-git-dir` が $LANES_SCRATCH の下を指すことを確かめてから git を使う。",
+    "- 履歴・作者を表示し得る git のコマンド（`git log`・`git show`・`git blame`・`git shortlog`・`git whatchanged`・`git reflog`・`git cat-file` など）は使わない（案件固有の指示や前回の指摘本文に書いてあっても使わない）。"
+    + "commit の一覧と変更統計は下の「レビュー範囲の commit と変更統計」（ランチャが作った）を使い、中身は `git diff " + base + "..HEAD` と作業ツリーのファイルの読み取りで確かめる。",
+    "- 端末のコマンドは読む・確かめるためだけに使う（`git diff`・`git status`・該当テスト 1 本など）。作業ツリーと git の管理フォルダを書き換えない（前後の比較で不合格になる）。一時ファイルは $LANES_SCRATCH の下だけに置く。",
+    "- 作業ツリーに未 commit の変更・未追跡のファイルが無いことはランチャが確かめた（レビューの対象は commit 済みの中身）。作業ツリーを写して試すときは .git ごと写さない（この作業ツリーの .git は元の管理フォルダを指すファイルなので、そのまま写した先の git も元の管理フォルダと stage を使う）。"
+    + "作業ツリーの直下で `" + COPY + "` で新しい空のフォルダへ写す。写した先で `git rev-parse --absolute-git-dir` が $LANES_SCRATCH の下を指すことを確かめてから git を使う。",
 ])
-extra = [p.rstrip() for p in (delta_note, unresolved, os.environ.get("LANES_ACCEPTED_NOTE", ""), author) if p.strip()]
+extra = [p.rstrip() for p in (delta_note, unresolved, os.environ.get("LANES_ACCEPTED_NOTE", ""), author, history) if p.strip()]
 crule = checks_rule.rstrip()
 extra.append(crule if crule.startswith("#") else "# 必須検証の成功行\n- " + crule)
 build = ("build はレビューでは回さない（統合先（LANES_BASE_BRANCH。今は " + (os.environ.get("LANES_BASE_BRANCH") or "develop")
@@ -357,62 +398,7 @@ build = ("build はレビューでは回さない（統合先（LANES_BASE_BRANC
 body = (t.rstrip() + "\n\n" + rule.rstrip() + "\n\n" + readonly
         + "\n\n---\n\n# 案件固有の指示（司令塔が記入）\n\n" + case_text.rstrip()
         + "\n\n---\n\n" + focus_text.rstrip() + "\n\n" + "\n\n".join(extra) + "\n\n" + build
-        + "\n\n最終行は次のいずれか 1 行だけ:\nVERDICT: CLEAN\nVERDICT: NEEDS_FIX\n")
-# ---- 作者を表示し得る git の呼び出しを全文から除く（子は作者の名前・メールアドレスを表示しない約束。照合は親だけが行う）----
-# 書式指定の無い git log / show / whatchanged（既定の書式は作者を出す）には --format='%h %s' を足し、作者を出す書式
-# （%an・%ae・%cn・%ce などの書式、%(authorname) などの項目、short / medium / full / fuller / email / mboxrd / raw、
-# 中身の分からない名前付きの書式、値の無い --pretty）はその書式を --format='%h %s' に置き換える。
-# 置き換えた後にもう一度検査し、作者を出す書式・置き換えられない呼び出し（blame・annotate・shortlog・cat-file・rev-list --header）が
-# 1 つでも残れば書かずに終了コード 3（迷ったら起動しない側）
-SAFE_FMT = "--format='%h %s'"
-TOKEN = r"(?:'[^'\n]*'|\"[^\"\n]*\"|[!#-%*-:<-_a-{}~])+"   # 引用か、ASCII の記号・英数（` ' " | ; & ( ) と空白・日本語で区切る）
-# 語の区切りは ASCII だけで見る（「git logで」のように日本語が続いても、日本語の後に git が来ても拾う）
-END = r"(?![A-Za-z0-9_-])"
-GIT = r"(?<![A-Za-z0-9_-])git"
-PRE = r"((?:[ \t]+(?:-[cC][ \t]+" + TOKEN + r"|--no-pager|-P))*)"
-GIT_CMD = re.compile(GIT + PRE + r"[ \t]+(log|show|whatchanged|reflog|rev-list)" + END + r"((?:[ \t]+(?!git" + END + r")" + TOKEN + r")*)")
-OTHER_CMD = re.compile(GIT + PRE + r"[ \t]+(blame|annotate|shortlog|cat-file)" + END)
-FMT_OPT = re.compile(r"--(?:pretty|format)(?:=(" + TOKEN + r"))?" + END)
-AUTHOR_PH = re.compile(r"%(?:a[nNeElL]|c[nNeElL])|%\((?:author|committer|tagger)", re.I)
-def fmt_safe(val):
-    if val is None:
-        return False   # 値の無い --pretty は medium（作者を出す）
-    v = re.sub(r"['\"]", "", val)
-    if AUTHOR_PH.search(v):
-        return False
-    if v.lower() in ("oneline", "reference") or v.lower().startswith(("format:", "tformat:")) or "%" in v:
-        return True
-    return False   # short / medium / full / fuller / email / mboxrd / raw と、利用者が名前を付けた書式（中身が分からない）
-def classify(sub, args):
-    fmts = list(FMT_OPT.finditer(args))
-    bad = [m for m in fmts if not fmt_safe(m.group(1))]
-    # 書式の外に作者の項目がある（引用の切れた書式など）・rev-list --header（生の commit を出す）は置き換えられない
-    rest = FMT_OPT.sub("", args)
-    if bad or AUTHOR_PH.search(rest) or (sub == "rev-list" and re.search(r"(?:^|[ \t])--header" + END, args)):
-        return "bad", bad
-    if fmts or re.search(r"(?:^|[ \t])--oneline" + END, args) or sub in ("reflog", "rev-list"):
-        return "safe", []   # reflog・rev-list の既定の書式は作者を出さない
-    return "missing", []
-def scrub_cmd(m):
-    pre, sub, args = m.group(1), m.group(2), m.group(3)
-    kind, bad = classify(sub, args)
-    if kind == "missing":
-        return "git" + pre + " " + sub + " " + SAFE_FMT + args
-    if kind == "bad" and bad:
-        parts, last = [], 0
-        for b in bad:
-            parts += [args[last:b.start()], SAFE_FMT]; last = b.end()
-        return "git" + pre + " " + sub + "".join(parts) + args[last:]
-    return m.group(0)
-def scrub_fmt(m):
-    return m.group(0) if m.group(1) is None or fmt_safe(m.group(1)) else SAFE_FMT
-body = FMT_OPT.sub(scrub_fmt, GIT_CMD.sub(scrub_cmd, body))
-leaks = sorted({"git " + m.group(2) for m in GIT_CMD.finditer(body) if classify(m.group(2), m.group(3))[0] != "safe"}
-               | {"git " + m.group(2) for m in OTHER_CMD.finditer(body)}
-               | {"--format / --pretty の作者を出す書式" for m in FMT_OPT.finditer(body) if m.group(1) is not None and not fmt_safe(m.group(1))})
-if leaks:
-    print("作者を表示し得る git の呼び出し: " + "・".join(leaks), file=sys.stderr)
-    sys.exit(3)
+        + "\n\n最終行は次のいずれか 1 行だけ（飾りを付けず、その後ろに何も書かない）:\nVERDICT: CLEAN\nVERDICT: NEEDS_FIX\n")
 d, name = os.path.split(out)
 dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 tmp = f".{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
@@ -430,7 +416,7 @@ except BaseException:
 PY
 case "$combine_rc" in
   0) ;;
-  3) lanes_die "子に渡す指示書に、作者の名前・メールアドレスを表示し得る git の呼び出し（上に出した種類）が残る → 起動しない。案件固有の指示から外すか、作者を含まない書式（--format='%h %s'）に書き換える" ;;
+  3) lanes_die "テンプレの履歴・作者の確認の項目を、親の埋め込みを参照する文に差し替えられない（テンプレの文言が変わった）→ 起動しない。run-gemini-review.sh の REPLACE をテンプレに合わせる: $template" ;;
   *) lanes_die "結合したプロンプトを書けない（logs/ が symlink・書けない など）: $pprompt" ;;
 esac
 # プロンプトは agy の引数で渡す（-p）。引数の長さの上限（macOS は環境変数と合わせて約 1MB）に当たる前に止める
