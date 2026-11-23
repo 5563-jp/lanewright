@@ -18,8 +18,9 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   scratch の `work/` だけで、実行の記録の原本と渡す指示書は子から書けない scratch の `record.<実行ごと>/`（実行ごとに新しく作り、前の実行の原本は消さない）に置き、
   監査・判定は原本で行って子の終了後に `logs/` へ写す。一時エラーのやり直しも同じ指示書を使い、残り時間は作業ツリーの比較の後に求める。
   Gemini で実装したものは、`run-gemini-review.sh` を直接呼んでも起動しない（`--impl-engine` も受け付ける）。
-  作業ツリーを scratch に写して試すときは `.git` ごと写さず（元の管理フォルダを指すため）、今の作業ツリーの中身（commit 済み・未 commit の変更・未追跡のソース。
-  無視するもの・消したものは除く）を `git ls-files` で並べて新しい空のフォルダへ写し、`git init` し直すよう指示書に書く（レビューの対象と同じ中身を試せる）。
+  Gemini のレビューは作業ツリーがきれいなときだけ起動する（`logs/` 以外に未 commit の変更・未追跡のファイルがある、またはサブモジュールがあるときは exit 2。
+  commit してから起動する）。作業ツリーを scratch に写して試すときは `.git` ごと写さず（元の管理フォルダを指すため）、`git archive HEAD` を
+  新しい空のフォルダ（`mktemp -d`）へ展開して `git init` し直すよう指示書に書く（写すのは commit 済みの中身だけ）。
 - `run-review.sh` に `--engine codex|gemini|claude`（レビュー役の明示）と `--impl-engine claude|gemini|codex`（実装した道具のヒント）を足した。
 - 設定 `LANES_REVIEW_GEMINI_PCT`（既定 `0`）: 新しい系列のレビューをこの割合で Gemini に回す（`50` なら既定の役と交互）。
   割合で決めた役は作業ツリーの `logs/.<系列>.review-pick` に残して引き継ぐ（起動前の点検で止まった系列を呼び直しても、数え方を二重に進めない。
@@ -34,15 +35,20 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 - 前回 `NEEDS_FIX` の後の再レビューも、レビュー役を変えた回は差分ではなく全体を見る（Codex・Claude・Gemini とも。前回の指摘は引き継ぐ）。
 - 読み取り専用の制限の設定（`CODEX_REVIEW_SANDBOX`・`CLAUDE_REVIEW_TOOLS`・`CLAUDE_REVIEW_DENY`・`GEMINI_REVIEW_DENY`）を再利用の条件に入れた。
 - commit の作者の照合に使う有効な作者の設定（`user.name` / `user.email`）の指紋を再利用の条件に入れた（値は入れない）。設定を変えたら同じ HEAD でもレビューし直す。
-  Gemini のレビューでは、作者の照合を親で行い、件数と一致しない commit の番号だけを指示書に入れる（名前・メールは渡さず、子に作者を表示させる指示もしない）。
-  渡す指示書の全体（テンプレ・案件固有の指示・前回の指摘本文）の作者を表示し得る git の呼び出しは、作者を含まない書式（`--format='%h %s'`）に置き換え、
-  置き換えられないもの（`git blame`・`git shortlog` など）が残る指示書では起動しない（exit 2）。
-- Claude・Gemini のレビューは、本文末尾の独立した `VERDICT` 行を最終判断とし、無ければ指摘があっても重大度から推定せず `VERDICT: NONE`（`EXIT:3`）にする
-  （round 3 以降の後回し・合格への昇格・前回の指摘の後回し・再利用の記録の保存をしない）。Codex のレビューは完了証明が最終判断の代わりなので今までどおり。
+  Gemini のレビューでは、作者の照合を親で行い、件数と一致しない commit の番号だけを指示書に入れる（名前・メールは渡さない）。
+  レビュー範囲の commit の一覧（短い SHA と件名）と変更統計（`git diff --stat`）も親が作って指示書に埋め込み、子には `git log`・`git show`・`git blame`・
+  `git shortlog` などの履歴・作者を表示し得るコマンドを使わないよう書く（中身は `git diff` と作業ツリーのファイルの読み取りで確かめる）。
+  テンプレの履歴・作者の確認の項目は固定の文言のまま埋め込みを参照する文に差し替える（指示書の全文をコマンドの形で書き換えることはしない）。
+- Claude・Gemini のレビューは、整形前の元の本文の最後の空でない行（前後の空白を除く）が `VERDICT: CLEAN` / `VERDICT: NEEDS_FIX` そのものであるときだけ
+  それを最終判断とし、そうでなければ（判定行の後ろに表・引用・補足が続く、飾りが付いている、判定行が無い）指摘があっても重大度から推定せず
+  `VERDICT: NONE`（`EXIT:3`）にする（round 3 以降の後回し・合格への昇格・前回の指摘の後回し・再利用の記録の保存をしない）。
+  Claude レビューのテンプレにも、最後の行は飾りを付けずその後ろに何も書かないことを書いた。Codex のレビューは完了証明が最終判断の代わりなので今までどおり。
 - レビューのランチャ・`review-dedup.zsh`・`_common.sh`・`chk-run.sh` が呼ぶ Python は、起動時に作業ツリーの外から選んで固定した `python3` を `-I` で動かすようにした
   （作業ツリーの中の仮想環境を有効にしたシェルから起動しても、その環境の起動時の処理や対象リポにある同じ名前のモジュールを読み込まない。
   作業ツリーの外に `python3` が無ければ exit 2）。入口（`run-review.sh`・`run-impl.sh`）で 1 回だけ決めた `python3` を、振り分け先・起動前点検（`lanes-doctor.sh`）・
   `chk-run.sh --query` へ渡し、渡された側は選び直さない（作業ツリーの外の実行ファイルであることだけ確かめ、作業ツリーの中なら止める）。
+  固定するのは `PATH` の `python3` そのものではなく実体（作業ツリーの外のフォルダだけの `PATH`・`cd /`・`PYENV_VERSION` / `PYENV_DIR` なしで一度呼んで得た
+  `sys.executable` の実パス）なので、pyenv の shim のように呼ばれるたびに元の `PATH` から作業ツリーの中の `python3` を選び直すことはない。
 - 数値の設定キーは、`lanes.env` が先頭の 0 を外して整数に揃える（`LANES_REVIEW_GEMINI_PCT=0050` は `50`）。
 - 既定（`LANES_REVIEW_GEMINI_PCT=0`）のまま `--engine` を使わなければ、新しい系列のレビュー役は今までと同じ（構成の既定の役）。
   同じ系列の途中で構成（`LANES_TOOLS`）を変えたときは、前回の役が今の構成にあればその役で続ける（変えるなら `--engine` か新しい系列の label で）。
