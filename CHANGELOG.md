@@ -6,6 +6,22 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+## [0.1.8] - レビューの重さに「起きる条件」を足し、P0/P1 が減らない周回を止める / Severity needs a trigger condition; stop loops where P0/P1 do not go down
+
+### 変えたこと / Changed
+- レビューの指示（`lanes/templates/codex-review-focus.md`・`claude-review-full.md`・`claude-review-delta.md`）に重さの決め方を足した。
+  P0 / P1 は、普通の使い方・普通の入力で起きて、利用者に誤った結果が出る・データが壊れる・お金や本番に影響する・要件が退行するものに付け、
+  指摘ごとに「起きる条件」と「影響」を書く。秘密の値・認証と認可・お金・本番のデータ・個人情報に関わるものは、起きにくい条件でも重さを下げない。
+  それ以外で起きにくい場面（途中での強制終了や停止の合図・書き込み失敗・同じ作業場所での同時実行・操作する人が持ち込む環境・
+  実際のデータ元が返さない形の入力）は P2、結果が安全な側に倒れるだけなら P3。
+  前回の直しで足したコードに出た問題はそう書かせ、守りを足すたびに新しい穴が出る作りは「作りの問題」として 1 件にまとめさせる。
+- 実装レーンの前置き（`claude-impl-preamble.md`・`gemini-impl-preamble.md`）に「レビューの指摘を直すとき」を足した。
+  指摘ごとに守りを足すのではなく根の原因を減らし、直すほど複雑になるなら作りを単純にする案を報告に書く。
+- `skills/review-loop` と `docs/operating-rules.md` に「P0+P1 が 2 回続けて前の回より減らなければ、修正を続けずに人に返す」決まりを足した。
+  系列（label）を変えて数え直さない。
+- 判定の仕組み（`VERDICT`・round 3 以降の後回し・周回の上限・必須検証の扱い）は変えていない。検証未実施は今までどおり P1。
+- 上げた後の最初のレビューは、指示書が変わったので各系列で 1 回 full になる（前回 CLEAN からの delta や同じ HEAD の省略は効かない）。
+
 ## [0.1.7] - Cloudflare Workers + vinext の構成の生成物があっても確認の結果を記録する / Record checks with Cloudflare Workers + vinext generated output
 
 ### 直したこと / Fixed
