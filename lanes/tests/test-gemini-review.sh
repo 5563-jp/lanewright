@@ -239,15 +239,44 @@ has "$T/out" '入口から渡された python3 が、作業ツリーの外の実
 out="$(LANES_PY_FIXED="$wt/.venv/bin/python3" zsh -f "$LANES_DIR/lanes-doctor.sh" --quiet "$wt" 2>&1)" && fail "点検が作業ツリーの中の python3 を受け付けた" || true
 [[ "$out" == *"渡された python3 が作業ツリーの中にある"* ]] || fail "点検が、渡された作業ツリーの中の python3 を NG にしない: $out"
 [[ ! -e "$T/venv.mark" ]] || { cat "$T/venv.mark" >&2; fail "渡された作業ツリーの中の python3 を動かした"; }
-# 固定の決め方: 作業ツリーの中（実パス）のフォルダ・python3 は飛ばし、外が無ければ使える python3 は無い（LANES_PY は空）
+# 固定の決め方: 作業ツリーの中（実パス）のフォルダ・python3 は飛ばし、外が無ければ使える python3 は無い（LANES_PY は空）。
+# 固定するのは実体（sys.executable の実パス）
+real_exe="${real_py:A}"
 ln -s "$wt/.venv/bin" "$T/venv-link"
 pin() { zsh -fc 'LANES_DIR="$1"; source "$LANES_DIR/_common.sh"; path=("${@:3}"); rc=0; lanes_python_pin "$2" || rc=$?; print -r -- "rc=$rc py=$LANES_PY"' _ "$LANES_DIR" "$@"; }
-[[ "$(pin "$wt" "$wt/.venv/bin" "$T/venv-link" "${outer_py:h}")" == "rc=0 py=$outer_py" ]] || fail "作業ツリーの中（リンクを辿った先も）の python3 を飛ばさない: $(pin "$wt" "$wt/.venv/bin" "$T/venv-link" "${outer_py:h}")"
+[[ "$(pin "$wt" "$wt/.venv/bin" "$T/venv-link" "${outer_py:h}")" == "rc=0 py=$real_exe" ]] || fail "作業ツリーの中（リンクを辿った先も）の python3 を飛ばさない: $(pin "$wt" "$wt/.venv/bin" "$T/venv-link" "${outer_py:h}")"
 [[ "$(pin "$wt" "$wt/.venv/bin" "$T/venv-link")" == "rc=1 py=" ]] || fail "作業ツリーの中にしか python3 が無いのに固定した"
-[[ "$(pin "$wt" . "${outer_py:h}")" == "rc=0 py=$outer_py" ]] || fail "相対パスのフォルダ（.）の python3 を使った"
+[[ "$(pin "$wt" . "${outer_py:h}")" == "rc=0 py=$real_exe" ]] || fail "相対パスのフォルダ（.）の python3 を使った"
 out="$(zsh -fc 'LANES_DIR="$1"; source "$LANES_DIR/_common.sh"; path=("$2/.venv/bin"); lanes_early_target "$2" lbl 0' _ "$LANES_DIR" "$wt" 2>&1)" && fail "作業ツリーの外に python3 が無いのに止めない" || true
 [[ "$out" == *"作業ツリーの外に python3 が無い"* ]] || fail "作業ツリーの外に python3 が無いときの案内が出ない: $out"
+[[ ! -e "$T/venv.mark" ]] || { cat "$T/venv.mark" >&2; fail "固定の決め方の確かめで、作業ツリーの中の python3 を動かした"; }
 pass "仮想環境を有効にしたシェルから起動しても、親の補助処理（ランチャ・入口の run-review.sh / run-impl.sh・起動前点検・chk-run.sh）は入口で決めた作業ツリーの外の python3 を使い、選び直さない（中の python3 を渡されたら止める。外に無ければ止める）"
+# 作業ツリーの外の python3 が、呼ばれるたびに PATH から Python を選び直すプログラム（pyenv の shim の代わりの偽物）でも、
+# その shim を固定せず実体を固定する（固定した後で元の PATH の先頭の .venv/bin/python3 へ選び直されない）。
+# 偽の shim は呼ばれた引数を記録し、自分のフォルダを除いた PATH の最初の python3 へ渡す
+mkdir -p "$T/shim"
+print -r -- "#!/bin/sh
+printf '%s\\n' \"\$*\" >> '$T/shim.mark'
+IFS=:
+for d in \$PATH; do
+  [ \"\$d\" = '$T/shim' ] && continue
+  [ -x \"\$d/python3\" ] && exec \"\$d/python3\" \"\$@\"
+done
+exit 127" > "$T/shim/python3"
+chmod +x "$T/shim/python3"
+[[ "$(pin "$wt" "$wt/.venv/bin" "$T/shim" "${outer_py:h}")" == "rc=0 py=$real_exe" ]] || fail "選び直す shim を実体ではなくそのまま固定した: $(pin "$wt" "$wt/.venv/bin" "$T/shim" "${outer_py:h}")"
+: > "$T/shim.mark"
+PATH="$wt/.venv/bin:$T/shim:$PATH" LANES_CHECK_CMD=/usr/bin/true STUB_AGY_RESPONSE="$CLEAN" \
+  zsh -f "$LANES_DIR/run-review.sh" "$wt" "$T/prompt.md" venv-shim --engine gemini --dry-run > "$T/out" 2>&1 \
+  || { cat "$T/out" >&2; fail "shim が PATH にあるシェルから run-review.sh を回せない"; }
+has "$T/out" '[dry-run]'
+[[ ! -e "$T/venv.mark" ]] || { cat "$T/venv.mark" >&2; fail "shim を固定して、作業ツリーの中の仮想環境の python3 へ選び直された"; }
+python3 -I - "$T/shim.mark" <<'PY' || { cat "$T/shim.mark" >&2; fail "親の補助処理が shim を通して Python を呼んだ（固定値が実体になっていない）"; }
+import sys
+calls = [l.rstrip("\n") for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+assert calls and all(c == "-I -c import sys; print(sys.executable)" for c in calls), calls
+PY
+pass "PATH の python3 が選び直す shim でも、実体を確かめて固定する（shim は実体を確かめる 1 回だけ呼ばれ、作業ツリーの中の python3 は 1 回も呼ばれない）"
 
 # ---- 3. 正常に終わっていない結果は VERDICT: NONE（EXIT:3）----
 newrepo bad

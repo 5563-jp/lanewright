@@ -162,8 +162,10 @@ lanes_now() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 # 利用者の site を読まないが、PATH から選んだ python3 そのものが作業ツリーの中の仮想環境（.venv を有効にしたシェル）だと、
 # その環境の起動時の処理（pyvenv.cfg・site-packages の .pth・sitecustomize）を読む。そこで使う python3 を起動時に 1 つに固定する:
 #   PATH の絶対パスのフォルダを前から見て、最初にある実行できる python3（. などの相対パスのフォルダは見ない）。
-#   lanes_python_pin <worktree> は、フォルダか python3 の実パスがその作業ツリーの中にあるものも飛ばして固定し直す
-#   （ランチャは lanes_early_target と lanes_require_worktree で呼ぶ。chk-run.sh も同じ関数で決める）。
+#   lanes_python_pin <worktree> は、フォルダか python3 の実パスがその作業ツリーの中にあるものも飛ばし、残った候補を
+#   作業ツリーの外のフォルダだけの PATH で一度呼んで実体（sys.executable の実パス）を確かめ、その実体を固定する
+#   （pyenv の shim のように、呼ばれるたびに PATH から Python を選び直すプログラムを固定しない。
+#   ランチャは lanes_early_target と lanes_require_worktree で呼ぶ。chk-run.sh も同じ関数で決める）。
 #   作業ツリーの外に無ければ止める（中の python3 には倒さない）。
 # zsh -f は .zshrc を読まないので PATH は起動元の継承だけ。値は export しない（子にも、chk-run.sh の環境の指紋にも入れない）
 # 入口で 1 回だけ決める: 入口（run-review.sh・run-impl.sh）が作業ツリーを知った時点で決めた python3 の絶対パスを、振り分け先・
@@ -175,7 +177,8 @@ typeset -g +x LANES_PY=""
 typeset -g +x LANES_PY_GIVEN="${LANES_PY_FIXED:-}"
 unset LANES_PY_FIXED
 lanes_python_pin() {   # [worktree] → 0 = LANES_PY を固定した / 1 = 使える python3 が無い（LANES_PY は空）
-  local root="" dir py
+  local root="" dir py exe
+  local -a outside
   [[ -z "${1:-}" ]] || root="${1:A}"
   LANES_PY=""
   if [[ -n "$LANES_PY_GIVEN" ]]; then
@@ -185,11 +188,26 @@ lanes_python_pin() {   # [worktree] → 0 = LANES_PY を固定した / 1 = 使�
     LANES_PY="$py"
     return 0
   fi
+  # 作業ツリーを知っているときは、PATH の python3 が使う Python を選び直すプログラム（pyenv の shim など）でも、後で元の PATH
+  # （作業ツリーの中の .venv/bin など）から選び直さないよう、実体の絶対パスを確かめてから固定する。確かめるときは作業ツリーの
+  # 外の絶対パスのフォルダだけの PATH・cd /・PYENV_VERSION / PYENV_DIR なしで呼ぶ（作業ツリーの中の python3 や .python-version を
+  # 選ばせない）。実体（sys.executable の実パス）が作業ツリーの外の実行ファイルでなければ、その候補は使わない
+  if [[ -n "$root" ]]; then
+    for dir in "${path[@]}"; do
+      [[ "$dir" == /* && "${dir:A}/" != "$root/"* ]] && outside+=("$dir")
+    done
+  fi
   for dir in "${path[@]}"; do
     [[ "$dir" == /* ]] || continue
     py="$dir/python3"
     [[ -f "$py" && -x "$py" ]] || continue
     if [[ -n "$root" ]] && [[ "${dir:A}/" == "$root/"* || "${py:A}/" == "$root/"* ]]; then continue; fi
+    if [[ -n "$root" ]]; then
+      exe="$( unset PYENV_VERSION PYENV_DIR; path=("${outside[@]}"); cd / && "$py" -I -c 'import sys; print(sys.executable)' < /dev/null 2>/dev/null )" || continue
+      [[ "$exe" == /* ]] || continue
+      py="${exe:A}"
+      [[ -f "$py" && -x "$py" && "$py/" != "$root/"* ]] || continue
+    fi
     LANES_PY="$py"
     return 0
   done
