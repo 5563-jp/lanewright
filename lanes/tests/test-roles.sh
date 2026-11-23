@@ -413,15 +413,15 @@ pass "logs/ の .pid に Gemini の実装レーン（lane=gemini）があれば 
 # 割合 50: 誤差の積み上げで「既定・Gemini・既定・Gemini」。dry-run は記録を進めない
 split="$T/split-state"; split_file="$split/lanewright/review-split.state"
 XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" s1
-[[ "$(lane_of s1)" == codex-review && "$(<"$split_file")" == acc=50 ]] || { cat "$split_file" >&2; fail "割合 50 の 1 回目が既定（Codex）でない / 記録が acc=50 でない"; }
+[[ "$(lane_of s1)" == codex-review && "$(head -1 "$split_file")" == acc=50 ]] || { cat "$split_file" >&2; fail "割合 50 の 1 回目が既定（Codex）でない / 記録が acc=50 でない"; }
 XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" s2 --dry-run
 gem_dry || fail "割合 50 の 2 回目の予測が Gemini でない"
 XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" s2 --dry-run
-gem_dry && [[ "$(<"$split_file")" == acc=50 ]] || fail "dry-run が割合の記録を進めた"
+gem_dry && [[ "$(head -1 "$split_file")" == acc=50 ]] || fail "dry-run が割合の記録を進めた"
 XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" s2
 XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" s3
 XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" s4
-[[ "$(lane_of s2) $(lane_of s3) $(lane_of s4)" == "gemini-review codex-review gemini-review" && "$(<"$split_file")" == acc=0 ]] \
+[[ "$(lane_of s2) $(lane_of s3) $(lane_of s4)" == "gemini-review codex-review gemini-review" && "$(head -1 "$split_file")" == acc=0 ]] \
   || { cat "$split_file" >&2; fail "割合 50 が既定・Gemini・既定・Gemini の順にならない: $(lane_of s1) $(lane_of s2) $(lane_of s3) $(lane_of s4)"; }
 grep -q '^VERDICT: CLEAN$' "$wtr/logs/s2.done" && grep -q '^VERDICT: CLEAN$' "$wtr/logs/s3.done" || fail "振り分け先のレビューが CLEAN で終わらない"
 pass "割合 50 は既定（Codex）・Gemini・既定・Gemini の順。dry-run は記録（review-split.state）を進めない"
@@ -431,7 +431,7 @@ gem_dry && [[ "$OUT" == *"同じ系列（s2）の前回のレビュー役を続�
 XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=100 rentry 0 "claude codex gemini" s1-r2 --dry-run
 codex_dry || fail "系列 s1 の r2 が前回（Codex）と同じ役にならない（割合 100 に負けた）"
 XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" s3-r2
-[[ "$(lane_of s3-r2)" == codex-review && "$(<"$split_file")" == acc=0 ]] || fail "系列の引き継ぎで割合の記録を進めた / 役が変わった"
+[[ "$(lane_of s3-r2)" == codex-review && "$(head -1 "$split_file")" == acc=0 ]] || fail "系列の引き継ぎで割合の記録を進めた / 役が変わった"
 python3 -I - "$wtr/logs/.s4.review-state" <<'PY'
 import json, sys
 p = sys.argv[1]; d = json.load(open(p, encoding="utf-8")); assert d.pop("last_reviewer") == "gemini", d
@@ -450,6 +450,15 @@ XDG_STATE_HOME="$split" rentry 0 "claude codex gemini" s2-r2 --dry-run
 codex_dry && [[ "$OUT" == *"Gemini では続けない"* ]] || fail "Gemini 実装なのに前回の役（Gemini）を続けた"
 rm -f -- "$wtr/logs/gimpl.pid"
 pass "前回の役が今の構成に無い・Gemini 実装を Gemini で見ることになるときは、構成の既定の役へ逃がす"
+# 振り分け先の起動前の点検で止まった系列（必須検証の記録が無い）を呼び直しても、同じ役を引き継ぎ、数え方を進めない
+for i in 1 2; do
+  XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 LANES_REVIEW_REQUIRE_CHECKS=1 LANES_CHECK_CMD=/usr/bin/true rentry 2 "claude codex gemini" pf
+  codex_dry && [[ "$OUT" == *"chk-run の記録を使えない"* && "$(head -1 "$split_file")" == acc=50 ]] \
+    || { cat "$split_file" >&2; fail "起動前に止まった系列の $i 回目で役が変わった・割合の記録を二重に進めた"; }
+done
+XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" pg --dry-run
+gem_dry || fail "引き継いだ系列の後の新しい系列が、数え方どおり（Gemini）にならない"
+pass "起動前の点検で止まった系列を呼び直しても、前に割り当てた役を引き継ぎ、割合の記録を二重に進めない"
 unset STUB_AGY_RESPONSE GEMINI_POLL_SEC
 # lanes-roles.sh --print の補足と、割合の値の確かめ
 out="$(LANES_TOOLS="claude codex gemini" LANES_REVIEW_GEMINI_PCT=50 roles --print)"
@@ -462,11 +471,15 @@ for env_spec in "claude codex|50" "claude codex gemini|0"; do
 done
 out="$(LANES_TOOLS="claude codex gemini" LANES_REVIEW_GEMINI_PCT=50 roles --env)"
 [[ "$out" == *"LANES_ROLE_REVIEW=codex"* ]] || fail "割合を付けると LANES_ROLE_REVIEW が変わった"
+out="$(LANES_TOOLS="claude codex gemini" LANES_REVIEW_GEMINI_PCT=0050 roles --print)"
+[[ "$out" == *"うち 50% を Gemini レビューへ振り分け"* ]] || fail "LANES_REVIEW_GEMINI_PCT=0050 が 50 として表示されない"
+XDG_STATE_HOME="$T/split-pad" LANES_REVIEW_GEMINI_PCT=0050 rentry 0 "claude codex gemini" pad1
+[[ "$(head -1 "$T/split-pad/lanewright/review-split.state" 2>/dev/null)" == acc=50 ]] || fail "LANES_REVIEW_GEMINI_PCT=0050 が入口で 50 として数えられない"
 for bad in 101 abc -1 5x; do
   rc=0; LANES_REVIEW_GEMINI_PCT="$bad" roles --print > "$T/pct.out" 2>&1 || rc=$?
   (( rc == 2 )) && grep -q 'LANES_REVIEW_GEMINI_PCT' "$T/pct.out" || { cat "$T/pct.out" >&2; fail "LANES_REVIEW_GEMINI_PCT=$bad を止めない（$rc）"; }
 done
-pass "lanes-roles.sh --print は割合が 1 以上・gemini ありのときだけ補足を出す（LANES_ROLE_REVIEW は変えない）。0〜100 の整数以外は exit 2"
+pass "lanes-roles.sh --print は割合が 1 以上・gemini ありのときだけ補足を出す（LANES_ROLE_REVIEW は変えない）。先頭の 0 は外して数える（0050 は 50）。0〜100 の整数以外は exit 2"
 
 # ---- 8. 入口は起動前点検を通す（未ログインなら振り分け先へ進まない）----
 : > "$STUB_LOG"
