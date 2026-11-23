@@ -329,7 +329,7 @@ gem_history_note() {   # <比較起点> → 指示書に足す文
   local -a rows srows
   print -r -- "# レビュー範囲の commit と変更統計（ランチャが作った。作者は含まない）"
   if ! commits="$(git -C "$wt" log --no-color --no-show-signature --abbrev=12 --format='%h %s' "$from..HEAD" 2>/dev/null)" \
-     || ! stat="$(git -C "$wt" diff --no-color --no-ext-diff --no-textconv --stat=160 "$from..HEAD" 2>/dev/null)"; then
+     || ! stat="$(git -C "$wt" -c core.quotePath=false diff --no-color --no-ext-diff --no-textconv --stat=160 "$from..HEAD" 2>/dev/null)"; then
     print -r -- "- 範囲（${from:0:12}..HEAD）の commit の一覧・変更統計をランチャが読めなかった。読めなかったことを指摘に書き、中身は \`git diff ${from:0:12}..HEAD\` で確かめる。"
     return 0
   fi
