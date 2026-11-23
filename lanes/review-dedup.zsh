@@ -185,7 +185,9 @@ PY_GUARD
 # 必須検証の使い回しの有無と使った記録（rvd_checks_key）、レビュー役（codex / claude / gemini）も含める。
 # 記録が変わった（使い回しが無くなった・親が回し直した）ら、同じ HEAD でも前回の結果を使わない。
 # キットのファイルが無い（一部だけを写したテストの置き場など）ときは「無い」ことを条件に入れる（後で置かれたら条件が変わる）。
-# <root> <prompt> <base> <mode> <policy> <model> <effort> [worktree] [使い回しの鍵] [レビュー役]
+# 読み取り専用の制限の設定（Gemini の拒否の一覧・Claude の使えるツールと拒否・Codex の sandbox）も [制限の設定] で入れる。
+# 制限を強めたら、前の制限の下で出た CLEAN を同じ HEAD でも使わない。
+# <root> <prompt> <base> <mode> <policy> <model> <effort> [worktree] [使い回しの鍵] [レビュー役] [制限の設定]
 rvd_context() {
   python3 -I - "$@" <<'PY_CONTEXT'
 import hashlib, json, os, pathlib, sys
@@ -193,8 +195,9 @@ root, prompt, base, mode, policy, model, effort = sys.argv[1:8]
 wt = sys.argv[8] if len(sys.argv) > 8 else ''
 reuse = sys.argv[9] if len(sys.argv) > 9 else ''
 kind = sys.argv[10] if len(sys.argv) > 10 else ''
+restrict = sys.argv[11] if len(sys.argv) > 11 else ''
 h = hashlib.sha256()
-for value in [base, mode, policy, model, effort, 'checks-reuse:' + reuse, 'reviewer:' + kind]: h.update(value.encode() + b'\0')
+for value in [base, mode, policy, model, effort, 'checks-reuse:' + reuse, 'reviewer:' + kind, 'restrict:' + restrict]: h.update(value.encode() + b'\0')
 h.update(pathlib.Path(prompt).read_bytes() + b'\0')
 for f in ['review-dedup.zsh', 'run-codex-review.sh', 'run-claude-review.sh', 'run-gemini-review.sh', '_common.sh',
           'codex-review-output.py', 'templates/claude-review-full.md', 'templates/claude-review-delta.md',

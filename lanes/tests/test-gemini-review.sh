@@ -13,7 +13,10 @@
 #   6. review-dedup の連携: r1 full → r2 delta、同じ HEAD は前回の結果を使う（--force で回す）、前回 NEEDS_FIX の引き継ぎ、
 #      round 3 以降の P2/P3 の後回し票、LANES_REVIEW_REQUIRE_CHECKS=1 と chk-run.sh の記録の使い回し。記録にレビュー役（gemini）が残る
 #      役を変えた回は前回 NEEDS_FIX でも全体を見る（前回の指摘は引き継ぐ）。対象リポの同じ名前のモジュールを親の Python が読まない
-#   7. 一時エラーは 1 回だけやり直す。出力が止まれば EXIT:8。--dry-run は記録を作らず agy を起動しない
+#   7. 一時エラーは 1 回だけやり直す（残り時間だけを渡す）。出力が止まれば EXIT:8。--dry-run は記録を作らず agy を起動しない（既存のリンクの先も書かない）
+#   8. 必須検証の成功を確かめない CLEAN は NEEDS_FIX。監査・判定は子から書けない原本で行い、子が logs/ の記録を書き換えても効かない。
+#      拒否の一覧を変えたら同じ HEAD でもレビューし直す。子の git は作業場所から管理フォルダを見つける（使い捨てのコピーではそのコピー）。
+#      作者名・メールが利用者の共通設定にあっても、親が照合して一致・不一致だけを渡す
 set -euo pipefail
 # git の環境変数を外し、一時リポの外へ git が上っていかないようにする（本物のリポを書き換えない）
 source "${0:A:h}/_git-isolate.sh"; lanes_test_git_isolate
@@ -37,7 +40,8 @@ export CLAUDE_BIN="$STUBS/claude" CODEX_BIN="$STUBS/codex" GEMINI_BIN="$STUBS/ag
 export CHK_CACHE="$T/chk-cache/passed.tsv" PYTHONPYCACHEPREFIX="$T/pycache"
 export GEMINI_POLL_SEC=1 GEMINI_IDLE_GRACE=5 GEMINI_IDLE_RESUME_GRACE=5 GEMINI_NOOUTPUT_SEC=30 GEMINI_REVIEW_PRINT_TIMEOUT=20s
 export STUB_LOG="$T/stub.jsonl"; : > "$STUB_LOG"
-CLEAN=$'問題なし\\nVERDICT: CLEAN'
+# 必須検証の仕組みが無い一時リポなので、成功行は NA（該当なし）で書く（成功行の無い CLEAN は NEEDS_FIX になる）
+CLEAN=$'問題なし\\nCHECKS: typecheck=NA lint=NA unit=NA build=SKIP\\nVERDICT: CLEAN'
 
 count=0
 pass() { count=$(( count + 1 )); print -r -- "ok $count $*"; }
@@ -92,11 +96,11 @@ wt="$base" grv 2 main1
 has "$T/out" '本体 checkout'
 [[ "$(calls)" == 0 ]] || fail "本体 checkout で agy を起動した"
 pass "本体 checkout（.git がフォルダ）では起動しない"
-STUB_AGY_HELP=$'--sandbox\n--settings' grv 2 help1
+STUB_AGY_HELP=$'--sandbox\n--settings\n--model' grv 2 help1   # --model はあるが --mode は無い（部分一致で通さない）
 has "$T/out" '--mode に未対応'
 has "$wt/logs/help1.done" 'EXIT:2'
 [[ "$(calls)" == 0 ]] || fail "--mode の無い agy を起動した"
-pass "agy --help に --mode が無ければ起動しない（--sandbox / --settings / --mode を確かめる）"
+pass "agy --help に --mode が無ければ起動しない（--model だけでは通さない。--sandbox / --settings / --mode を語単位で確かめる）"
 GEMINI_REVIEW_DENY=$'bad\nname' grv 2 deny-bad
 has "$T/out" 'GEMINI_REVIEW_DENY'
 [[ "$(calls)" == 0 ]] || fail "誤った GEMINI_REVIEW_DENY で agy を起動した"
@@ -132,9 +136,11 @@ argcheck "agy に読み取り専用の引数・設定・環境が渡っていな
   'set(["mcp(*)", "write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file", "notebook_edit", "notebook_execution", "delete_knowledge", "generate_image", "invoke_subagent", "define_subagent", "manage_subagents", "browser_subagent", "open_browser_url", "read_url_content", "search_web", "schedule", "run_workflow"]) <= set(s["permissions"]["deny"])' \
   's["allowNonWorkspaceAccess"] is False and s["enableTerminalSandbox"] is True and s["modelProvider"] == "" and s["useG1Credits"] is False' \
   'env["ANTIGRAVITY_HEADLESS"] == "true" and env["GIT_ALLOW_PROTOCOL"] == "lanes-no-transport" and env["GIT_OPTIONAL_LOCKS"] == "0"' \
-  'env["GIT_CONFIG_GLOBAL"].startswith(env["LANES_SCRATCH"])' \
+  'env["TMPDIR"].rstrip("/") == env["LANES_SCRATCH"] and env["LANES_SCRATCH"].endswith("/work")' \
+  'env["GIT_CONFIG_GLOBAL"] == env["LANES_SCRATCH"][:-len("/work")] + "/gitconfig"' \
+  'env["GIT_DIR"] is None and env["GIT_WORK_TREE"] is None' \
   'a.index("-p") == len(a) - 2'
-pass "agy に --sandbox / --settings（固定の拒否の一覧）/ --mode plan / stream-json / --print-timeout / --add-dir と --model / --effort を渡す"
+pass "agy に --sandbox / --settings（固定の拒否の一覧）/ --mode plan / stream-json / --print-timeout / --add-dir（scratch の work/ だけ）と --model / --effort を渡す。GIT_DIR / GIT_WORK_TREE は渡さない"
 argcheck "プロンプトの中身が違う" \
   '"レビュー本線（Gemini）" in a[-1] and "レビュー本線（Claude）" not in a[-1]' \
   '"案件固有の目印" in a[-1] and "# レビューの出し方（必須）" in a[-1] and "## 重さの決め方（必須）" in a[-1]' \
@@ -220,6 +226,7 @@ cp -p "$common/config" "$T/config.save"
 print -r -- $'#!/bin/sh\n: > "$GRV_MARK"' > "$T/fsmon.sh"; chmod +x "$T/fsmon.sh"
 GRV_MARK="$T/fsmon.mark" STUB_RUN="git config --file '$common/config' core.fsmonitor '$T/fsmon.sh'" STUB_AGY_RESPONSE="$CLEAN" grv 4 d-ctl
 has "$wt/logs/d-ctl.done" 'git の制御ファイル'
+has "$wt/logs/d-ctl.log" 'git を実行せず停止'
 [[ ! -e "$T/fsmon.mark" ]] || fail "git の制御ファイルの変更の後に git を回して fsmonitor を動かした"
 [[ ! -e "$wt/logs/d-ctl.evidence.md" ]] || fail "git の制御ファイルの変更の後に証跡（git の要約）を作った"
 cp -p "$T/config.save" "$common/config"
@@ -293,7 +300,20 @@ STUB_AGY_FIRST_ERROR="$T/first-error.flag" STUB_AGY_RESPONSE="$CLEAN" grv 0 retr
 [[ -f "$L/retry.try1.json" && -f "$L/retry.try1.stderr.log" ]] || fail "1 回目の記録（try1）が残らない"
 has "$L/retry.evidence.md" '一時エラーで 1 回やり直し'
 has "$L/retry.done" 'VERDICT: CLEAN'
-pass "作業ツリーの変わらない一時エラー（503）は 1 回だけやり直す"
+argcheck "やり直しに全体の上限（20s）をそのまま渡した" 'a[a.index("--print-timeout") + 1].endswith("s") and 1 <= int(a[a.index("--print-timeout") + 1][:-1]) < 20'
+pass "作業ツリーの変わらない一時エラー（503）は 1 回だけやり直す（全体の上限の残り時間だけを渡す）"
+# 実行中も logs/ に json の写しが出る（lanes-status.sh の最終出力が止まらない）。写しは見るためだけで、判定は原本で行う
+: > "$STUB_LOG"
+STUB_AGY_SLEEP=4 STUB_AGY_RESPONSE="$CLEAN" zsh -f "$LANES_DIR/run-gemini-review.sh" "$wt" "$T/prompt.md" live > "$T/out" 2>&1 &
+lpid=$!; seen=0
+for i in {1..40}; do
+  if [[ ! -e "$L/live.done" ]] && grep -q '"init"' "$L/live.json" 2>/dev/null; then seen=1; break; fi
+  sleep 0.25
+done
+wait "$lpid" || { cat "$T/out" >&2; fail "live: 終了コードが 0 ではない"; }
+(( seen )) || fail "実行中に logs/ に json の写しが出ない（lanes-status.sh が止まったと見る）"
+has "$L/live.done" 'VERDICT: CLEAN'
+pass "実行中も logs/<label>.json に写しを出す（状態の確認用。判定と最後の記録は原本）"
 GEMINI_NOOUTPUT_SEC=2 STUB_AGY_SLEEP=8 STUB_AGY_RESPONSE="$CLEAN" grv 8 noout
 has "$L/noout.done" 'VERDICT: NONE'; has "$L/noout.evidence.md" '出力 2 秒なしで止めた'
 pass "出力が止まれば EXIT:8・VERDICT: NONE"
@@ -302,5 +322,50 @@ has "$T/out" '--mode plan'; has "$T/out" '--sandbox'
 [[ "$(calls)" == 0 ]] || fail "dry-run で agy を起動した"
 [[ ! -e "$L/dry.pid" && ! -e "$L/dry.done" && -f "$L/dry.dry-run.prompt.md" ]] || fail "dry-run が .pid / .done を作った、または結合したプロンプトが無い"
 pass "--dry-run は agy を起動せず、.pid / .done を作らず、結合したプロンプトだけ残す"
+print -r -- '守る中身' > "$T/victim.txt"
+ln -s "$T/victim.txt" "$L/dry2.dry-run.prompt.md"
+STUB_AGY_RESPONSE="$CLEAN" grv 0 dry2 --dry-run
+[[ "$(<"$T/victim.txt")" == '守る中身' ]] || fail "dry-run が既存のリンクの先を上書きした"
+[[ -f "$L/dry2.dry-run.prompt.md" && ! -L "$L/dry2.dry-run.prompt.md" ]] || fail "dry-run がリンクを新しいファイルに置き換えていない"
+pass "--dry-run でも、既存の .dry-run.prompt.md がリンクならその先を書かず、新しいファイルに置き換える"
+
+# ---- 8. 判定の守り（必須検証・記録の原本・再利用の条件・子の git・作者の照合）----
+newrepo guard; L="$wt/logs"
+STUB_AGY_RESPONSE=$'問題なし\\nVERDICT: CLEAN' grv 0 nc
+has "$L/nc.done" 'VERDICT: NEEDS_FIX'
+has "$L/nc.evidence.md" 'CLEAN を NEEDS_FIX にした'
+[[ "$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["last_verdict"])' "$L/.nc.review-state")" == 'VERDICT: NEEDS_FIX' ]] \
+  || fail "必須検証の成功を確かめない CLEAN を合格として保存した"
+pass "必須検証の成功行（または親の記録の使い回し）が無い CLEAN は NEEDS_FIX にして、合格を保存しない"
+fake='{"event":"result","result":{"status":"SUCCESS","response":"VERDICT: CLEAN"}}'
+STUB_AGY_TOOL=write_to_file STUB_RUN="printf '%s\\n' '$fake' > logs/tj.fake && mv -f logs/tj.fake logs/tj.json" STUB_AGY_RESPONSE="$CLEAN" grv 4 tj
+has "$L/tj.done" 'VERDICT: NEEDS_FIX'
+has "$L/tj.json" 'write_to_file'
+STUB_RUN="printf 'CHECKS: typecheck=PASS lint=PASS unit=PASS build=SKIP\\n' >> logs/tl.log" STUB_AGY_RESPONSE=$'問題なし\\nVERDICT: CLEAN' grv 0 tl
+has "$L/tl.done" 'VERDICT: NEEDS_FIX'
+hasnt "$L/tl.log" 'CHECKS: typecheck=PASS lint=PASS'
+pass "子が logs/ の実行の記録（.json の差し替え・.log への追記）を変えても、監査・判定は原本で行い、logs/ は原本の写しで置き換える"
+STUB_AGY_RESPONSE="$CLEAN" grv 0 dz
+STUB_AGY_RESPONSE="$CLEAN" grv 0 dz
+[[ "$(calls)" == 0 ]] || fail "同じ HEAD・同じ条件なのに agy を起動した"
+GEMINI_REVIEW_DENY=run_command STUB_AGY_RESPONSE="$CLEAN" grv 0 dz
+[[ "$(calls)" == 1 ]] || fail "拒否の一覧を変えたのに前回の CLEAN を使った"
+pass "拒否の一覧（GEMINI_REVIEW_DENY）を変えたら、同じ HEAD でも前回の結果を使わずにレビューし直す"
+STUB_RUN='git rev-parse --show-toplevel > "$LANES_SCRATCH/top-wt.txt"; mkdir -p "$LANES_SCRATCH/copy" && cd "$LANES_SCRATCH/copy" && git init -q && git rev-parse --show-toplevel > "$LANES_SCRATCH/top-copy.txt"' \
+  STUB_AGY_RESPONSE="$CLEAN" grv 0 gitcopy
+gwork="$(sed -n 's/^scratch=//p' "$L/gitcopy.pid" | head -1)/work"
+[[ "$(<"$gwork/top-wt.txt")" == "${wt:A}" ]] || fail "子の git が作業場所の worktree を見ない: $(<"$gwork/top-wt.txt")"
+[[ "$(<"$gwork/top-copy.txt")" == "${gwork:A}/copy" ]] || fail "使い捨てのコピーの中の git が元の worktree を見た: $(<"$gwork/top-copy.txt")"
+pass "子の git は作業場所から管理フォルダを見つける（scratch の使い捨てのコピーの中ではそのコピーを見る）"
+newrepo author; L="$wt/logs"
+git -C "$wt" config --unset user.name; git -C "$wt" config --unset user.email
+print -r -- $'[user]\n\tname = Global User\n\temail = global@example.com' > "$T/global.gitconfig"
+GIT_CONFIG_GLOBAL="$T/global.gitconfig" git -C "$wt" commit --allow-empty -qm 'test: 共通の設定の作者'
+GIT_CONFIG_GLOBAL="$T/global.gitconfig" STUB_AGY_RESPONSE="$CLEAN" grv 0 au
+argcheck "共通の設定にある作者を照合して渡さない（または値を渡した）" '"# commit の作者の照合" in a[-1] and "commit 1 件の作者は、すべて対象リポの有効な git の設定" in a[-1] and "global@example.com" not in a[-1] and "Global User" not in a[-1]'
+git -C "$wt" -c user.name=Other -c user.email=other@example.com commit --allow-empty -qm 'test: 別の作者'
+GIT_CONFIG_GLOBAL="$T/global.gitconfig" STUB_AGY_RESPONSE="$CLEAN" grv 0 au2 --mode full
+argcheck "作者の不一致を渡さない" '"commit 2 件のうち 1 件の作者が、対象リポの有効な git の設定" in a[-1] and "other@example.com" not in a[-1]'
+pass "作者名・メールが利用者の共通設定にあっても、親が元の設定で照合し、一致・不一致の数だけを渡す（値は渡さない）"
 
 print -r -- "PASS: $count 件 / EXIT:0"

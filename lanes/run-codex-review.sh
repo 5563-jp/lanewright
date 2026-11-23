@@ -78,8 +78,8 @@ else
 fi
 review_base="$base"
 policy=early; (( round >= 3 )) && policy=followups
-# 再利用の条件（指示・起点・設定・検証の設定）。検証の設定が変わったら同じ HEAD でも省略しない（review-dedup.zsh の rvd_context）
-review_context() { rvd_context "$LANES_DIR" "$prompt" "$review_base" "$requested_mode" "$policy" "$CODEX_MODEL" "$CODEX_EFFORT" "$wt" "$checks_key" codex; }
+# 再利用の条件（指示・起点・設定・検証の設定・sandbox の設定）。検証や sandbox の設定が変わったら同じ HEAD でも省略しない（review-dedup.zsh の rvd_context）
+review_context() { rvd_context "$LANES_DIR" "$prompt" "$review_base" "$requested_mode" "$policy" "$CODEX_MODEL" "$CODEX_EFFORT" "$wt" "$checks_key" codex "sandbox=${CODEX_REVIEW_SANDBOX:-read-only}"; }
 context="$(review_context)"
 tree="$(rvd_snapshot "$wt")" || lanes_die "レビュー前の内容確認に失敗"
 decided="$(rvd_decide_mode "$wt" "$prev_head" "$prev_v" "$context" "$(rvd_record_get "$record" context)" "$tree" "$(rvd_record_get "$record" tree)")"

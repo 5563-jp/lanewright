@@ -84,8 +84,8 @@ prev_head="$(rvd_record_get "$record" head)"
 prev_v="$(rvd_record_get "$record" verdict)"
 requested_mode="$mode"
 policy=early; (( round >= 3 )) && policy=followups
-# 再利用の条件（指示・起点・設定・検証の設定・必須検証の使い回し）。変わったら同じ HEAD でも省略しない（review-dedup.zsh の rvd_context）
-review_context() { rvd_context "$LANES_DIR" "$prompt" "$review_base" "$requested_mode" "$policy" "$CLAUDE_MODEL" "$CLAUDE_EFFORT" "$wt" "$checks_key" claude; }
+# 再利用の条件（指示・起点・設定・検証の設定・必須検証の使い回し・使えるツールと拒否の設定）。変わったら同じ HEAD でも省略しない（review-dedup.zsh の rvd_context）
+review_context() { rvd_context "$LANES_DIR" "$prompt" "$review_base" "$requested_mode" "$policy" "$CLAUDE_MODEL" "$CLAUDE_EFFORT" "$wt" "$checks_key" claude "tools=${CLAUDE_REVIEW_TOOLS:-}|deny=${CLAUDE_REVIEW_DENY:-}"; }
 context="$(review_context)"
 tree="$(rvd_snapshot "$wt")" || lanes_die "レビュー前の内容確認に失敗"
 decided="$(rvd_decide_mode "$wt" "$prev_head" "$prev_v" "$context" "$(rvd_record_get "$record" context)" "$tree" "$(rvd_record_get "$record" tree)")"
