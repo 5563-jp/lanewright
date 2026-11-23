@@ -351,7 +351,9 @@ pass "run-review.sh の --mode の誤りは exit 2"
 # 上の $wt には、構成に無い道具の確認などで lane=gemini の .pid が残っている（Gemini 実装とみなされる）ので、専用の worktree で試す
 wtr="$T/wt-route"
 git -C "$base" worktree add -q -b feat/route "$wtr"
-export STUB_AGY_RESPONSE=$'問題なし\\nVERDICT: CLEAN' GEMINI_POLL_SEC=1   # 見張りの確認間隔（既定 5 秒）を縮めて速く回す
+# Gemini レビューの応答。必須検証の仕組みが無い一時リポなので成功行は NA（成功行の無い CLEAN は NEEDS_FIX になる）。
+# 見張りの確認間隔（既定 5 秒）も縮めて速く回す
+export STUB_AGY_RESPONSE=$'問題なし\\nCHECKS: typecheck=NA lint=NA unit=NA build=SKIP\\nVERDICT: CLEAN' GEMINI_POLL_SEC=1
 rentry() {   # <期待 rc> <構成> [引数...]（label は引数で渡す）。出力は OUT
   local want="$1" tools="$2"; shift 2
   n=$(( n + 1 )); local rc=0
