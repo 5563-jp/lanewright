@@ -28,7 +28,9 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 - 再利用の条件（`rvd_context`）に `run-gemini-review.sh` の中身を足した。上げた後の最初のレビューは、前回 `CLEAN` の系列でも 1 回 full になる。
 - 前回 `NEEDS_FIX` の後の再レビューも、レビュー役を変えた回は差分ではなく全体を見る（Codex・Claude・Gemini とも。前回の指摘は引き継ぐ）。
 - 読み取り専用の制限の設定（`CODEX_REVIEW_SANDBOX`・`CLAUDE_REVIEW_TOOLS`・`CLAUDE_REVIEW_DENY`・`GEMINI_REVIEW_DENY`）を再利用の条件に入れた。
-- ランチャ・`review-dedup.zsh`・`_common.sh`・`chk-run.sh` の `read_state` が呼ぶ Python を `python3 -I` にした（対象リポにある同じ名前のモジュールを読み込まない）。
+- レビューのランチャ・`review-dedup.zsh`・`_common.sh`・`chk-run.sh` が呼ぶ Python は、起動時に作業ツリーの外から選んで固定した `python3` を `-I` で動かすようにした
+  （作業ツリーの中の仮想環境を有効にしたシェルから起動しても、その環境の起動時の処理や対象リポにある同じ名前のモジュールを読み込まない。
+  作業ツリーの外に `python3` が無ければ exit 2）。
 - 数値の設定キーは、`lanes.env` が先頭の 0 を外して整数に揃える（`LANES_REVIEW_GEMINI_PCT=0050` は `50`）。
 - 既定（`LANES_REVIEW_GEMINI_PCT=0`）のまま `--engine` を使わなければ、新しい系列のレビュー役は今までと同じ（構成の既定の役）。
   同じ系列の途中で構成（`LANES_TOOLS`）を変えたときは、前回の役が今の構成にあればその役で続ける（変えるなら `--engine` か新しい系列の label で）。

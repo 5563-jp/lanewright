@@ -86,6 +86,14 @@ if [ -e "$wt/.git" ]; then
   unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 fi
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "git 作業ツリーではない: $wt" >&2; exit 2; }
+# 補助処理（出力先の確かめ・状態の指紋・確認コマンドの監督役）に使う Python は、作業ツリーの外のものに固定する
+# （_common.sh の lanes_python_pin。作業ツリーの中の仮想環境の python3 を選んで、その起動時の処理を読まない。ランチャと同じ決め方）。
+# 決められなければ止める（問い合わせは state-error）
+py=$(LANES_DIR="$lanes_dir" zsh -fc 'source "$LANES_DIR/_common.sh" && lanes_python_pin "$1" && print -r -- "$LANES_PY"' chk-run "$wt" 2>/dev/null) || py=""
+if [ -z "$py" ]; then
+  if [ "$query" = 1 ]; then echo "reuse=no reason=state-error"; exit 1; fi
+  echo "作業ツリーの外に python3 が無い（PATH の、作業ツリーの外の絶対パスのフォルダに python3 を置く）: $wt" >&2; exit 2
+fi
 # 確認コマンドを決める。.lanes/check.sh が優先、無ければ LANES_CHECK_CMD。どちらも無ければ何も回さず止める
 pick_check() {
   if [ -f "$wt/.lanes/check.sh" ] && [ ! -L "$wt/.lanes/check.sh" ]; then
@@ -111,7 +119,7 @@ fi
 # 出力先がソースと同じ場所でも、自身の出力ファイルだけを扱う。
 output_names=(fetch.log merge.log check.log check-state.json)
 check_outputs() {
-python3 - "$wt" "$o" "$cache" "${output_names[@]}" <<'PY_OUTPUT'
+"$py" -I - "$wt" "$o" "$cache" "${output_names[@]}" <<'PY_OUTPUT'
 import os, subprocess, sys
 wt, outdir, cache = sys.argv[1:4]
 def collect_tracked(root_dir, visited=None):
@@ -162,7 +170,7 @@ fi
 
 # 未追跡ファイルを含む作業ツリー状態と、実行環境・導入済み依存の同一性フィンガープリントを計算する
 read_state() {
-python3 -I - "$wt" "$o" "$cache" "$lanes_dir" "$port" "$generated_def" "${output_names[@]}" <<'PY'
+"$py" -I - "$wt" "$o" "$cache" "$lanes_dir" "$port" "$generated_def" "${output_names[@]}" <<'PY'
 import hashlib, os, shutil, stat, subprocess, sys
 
 wt, outdir, cache_path = [os.path.realpath(x) for x in sys.argv[1:4]]
@@ -916,7 +924,7 @@ stop_check() {
     echo "確認コマンドの監督役の開始時刻を確認できない。停止・回収未確認" >&2
     return 1
   fi
-  python3 -c "$guard" stop-supervisor "$pp" "$pp_start" || return 1
+  "$py" -I -c "$guard" stop-supervisor "$pp" "$pp_start" || return 1
   local stopped_rc=0
   wait "$pp" 2>/dev/null || stopped_rc=$?
   pp=""
@@ -929,7 +937,7 @@ trap 'exit 129' HUP
 
 : > "$o/check-state.json" || exit 1
 LANES_CHECK_PORT=$port LANES_CHECK_OUTDIR=$o \
-  python3 -c "$guard" supervise-state "$o/check-state.json" bash -c "$check_cmd" > "$o/check.log" 2>&1 < /dev/null & pp=$!
+  "$py" -I -c "$guard" supervise-state "$o/check-state.json" bash -c "$check_cmd" > "$o/check.log" 2>&1 < /dev/null & pp=$!
 read_pp_start || true
 r=0
 wait "$pp" || r=$?

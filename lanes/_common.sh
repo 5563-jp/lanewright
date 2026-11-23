@@ -116,6 +116,8 @@ lanes_unknown_opt_width() {   # <不明なオプション> [次の語...]。読�
 }
 lanes_early_target() {   # <worktree> <label> <dry-run なら 1>。保留中の引数の誤りがあれば、ここで止める（記録してから exit 2）
   local wt="$1" label="$2" dry="${3:-0}"
+  # 親の補助処理の Python を、この作業ツリーの外のものに固定し直す（記録を書くより前。固定できなければ記録せずに止める）
+  [[ -z "$wt" ]] || lanes_python_require "$wt"
   if [[ "$dry" != 1 && "$label" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' && -n "$wt" && -d "$wt/logs" && ! -L "$wt/logs" ]]; then
     typeset -g LANES_EARLY_LOGDIR="${wt:A}/logs" LANES_EARLY_LABEL="$label"
   fi
@@ -155,8 +157,35 @@ lanes_record_early_failure() {
 }
 lanes_now() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 
-# zsh -f は .zshrc を読まないので PATH は起動元の継承だけ。python3 は必須
-command -v python3 >/dev/null 2>&1 || lanes_die "python3 が PATH に無い"
+# ---- 親の補助処理に使う Python（作業ツリーの外のもの）----
+# 親の補助処理（指紋・監査・記録の読み書き・子の監督）は "$LANES_PY" -I で動かす。-I はカレントフォルダ・PYTHON* の環境変数・
+# 利用者の site を読まないが、PATH から選んだ python3 そのものが作業ツリーの中の仮想環境（.venv を有効にしたシェル）だと、
+# その環境の起動時の処理（pyvenv.cfg・site-packages の .pth・sitecustomize）を読む。そこで使う python3 を起動時に 1 つに固定する:
+#   PATH の絶対パスのフォルダを前から見て、最初にある実行できる python3（. などの相対パスのフォルダは見ない）。
+#   lanes_python_pin <worktree> は、フォルダか python3 の実パスがその作業ツリーの中にあるものも飛ばして固定し直す
+#   （ランチャは lanes_early_target と lanes_require_worktree で呼ぶ。chk-run.sh も同じ関数で決める）。
+#   作業ツリーの外に無ければ止める（中の python3 には倒さない）。
+# zsh -f は .zshrc を読まないので PATH は起動元の継承だけ。値は export しない（子にも、chk-run.sh の環境の指紋にも入れない）
+unset LANES_PY
+typeset -g +x LANES_PY=""
+lanes_python_pin() {   # [worktree] → 0 = LANES_PY を固定した / 1 = 使える python3 が無い（LANES_PY は空）
+  local root="" dir py
+  [[ -z "${1:-}" ]] || root="${1:A}"
+  LANES_PY=""
+  for dir in "${path[@]}"; do
+    [[ "$dir" == /* ]] || continue
+    py="$dir/python3"
+    [[ -f "$py" && -x "$py" ]] || continue
+    if [[ -n "$root" ]] && [[ "${dir:A}/" == "$root/"* || "${py:A}/" == "$root/"* ]]; then continue; fi
+    LANES_PY="$py"
+    return 0
+  done
+  return 1
+}
+lanes_python_require() {   # <worktree>: 作業ツリーの外の python3 に固定し直す。無ければ止める
+  lanes_python_pin "$1" || lanes_die "作業ツリーの外に python3 が無い（作業ツリーの中の python3 は親の補助処理に使わない。PATH の、作業ツリーの外の絶対パスのフォルダに python3 を置く）: $1"
+}
+lanes_python_pin || lanes_die "python3 が PATH に無い（PATH の絶対パスのフォルダに置く）"
 
 # バイナリが無ければ PATH から探す
 lanes_resolve_bin() {
@@ -220,7 +249,7 @@ lanes_entry_preflight() {
 # 共通の config / config.worktree・hooks の中身（下のフォルダも）。git は呼ばない（呼ぶ前に比べるため）。値は出さず指紋だけ出す。
 # gitdir と共通の管理フォルダは、子を起動する前に git で確かめた値を渡す（子の後で git に聞き直さない）
 lanes_git_ctl_fingerprint() {
-  python3 -I - "$1/.git" "$2" "$3" <<'PY_GIT_CTL_FP'
+  "$LANES_PY" -I - "$1/.git" "$2" "$3" <<'PY_GIT_CTL_FP'
 import hashlib, os, pathlib, sys
 dotgit, gitdir, common = (pathlib.Path(a) for a in sys.argv[1:4])
 h = hashlib.sha256()
@@ -255,6 +284,7 @@ lanes_block_git_transport() {
 
 lanes_require_worktree() {
   local wt="$1"
+  lanes_python_require "$wt"   # 親の補助処理の Python を作業ツリーの外のものに固定する（上の lanes_python_pin）
   [[ -d "$wt" ]] || lanes_die "worktree が無い: $wt"
   git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || lanes_die "git 作業ツリーじゃない: $wt"
   git -C "$wt" rev-parse --verify -q HEAD >/dev/null 2>&1 || lanes_die "commit が 1 つも無い（HEAD 無し）: $wt"
@@ -294,7 +324,7 @@ lanes_codex_auth_state() {
 lanes_claude_auth_state() {
   local s rc=0; s="$("$CLAUDE_BIN" auth status < /dev/null 2>/dev/null)" || rc=$?
   # JSON 本文をプロセス引数へ渡さず、標準入力だけで検査する。
-  print -r -- "$s" | python3 -I -c '
+  print -r -- "$s" | "$LANES_PY" -I -c '
 import json, sys
 rc = int(sys.argv[1])
 try:
@@ -340,7 +370,7 @@ lanes_codex_no_mcp_args() {
   (( $# == 1 )) && [[ -d "$1" ]] || lanes_die "MCP の確認対象 worktree を 1 つ指定すること"
   lanes_resolve_bin CODEX_BIN codex
   local overrides item
-  overrides="$(python3 -I - "$CODEX_BIN" "$1" <<'PY'
+  overrides="$("$LANES_PY" -I - "$CODEX_BIN" "$1" <<'PY'
 import json, re, subprocess, sys
 def servers(args):
     p = subprocess.run([sys.argv[1], *args, "mcp", "list", "--json"],
@@ -406,7 +436,7 @@ lanes_git_summary() {
 #                        all … LANES_CHECK_CMD が設定されているか .lanes/check.sh がある（3 項目すべてを NA にはできない）
 # 判定の呼び出し（lanes_parse_review）の前に LANES_CHECKS_PRESENT へ入れて渡す。中身（scripts の本文）は出さない
 lanes_checks_present() {   # <worktree>
-  python3 -I - "$1" <<'PYCHECKS'
+  "$LANES_PY" -I - "$1" <<'PYCHECKS'
 import json, os, sys
 wt = sys.argv[1]
 try:
@@ -430,7 +460,7 @@ PYCHECKS
 
 LANES_FINDING_RE='^[[:space:]]*(([-*+]|[0-9]+[.)])[[:space:]]+)?(\*\*)?\[P'
 lanes_parse_review() {   # <log> <extract|infer|codex|checks|resolved|followups|P0|P1|P2|P3> [完了証明]
-  python3 -I - "$1" "$2" "${3:-}" "${LANES_REVIEW_CHECKS_REUSED:-0}" <<'PYREVIEW'
+  "$LANES_PY" -I - "$1" "$2" "${3:-}" "${LANES_REVIEW_CHECKS_REUSED:-0}" <<'PYREVIEW'
 import hashlib, json, os, pathlib, re, sys
 mode = sys.argv[2]
 # 必須検証を親の chk-run.sh の記録で済ませたレビュー。未実施・省略の報告は不足に数えず、失敗の報告だけ不足にする
@@ -625,7 +655,7 @@ lanes_codex_verdict() { lanes_parse_review "$1" codex "${2:-}"; }
 # 知らせて 0 を返す（set -e の下で呼び出し元を止めない）
 lanes_records_claim() {   # <logdir> <label:名前|file:名前>...
   local logdir="$1"; shift
-  python3 -I -c 'import os, stat, sys
+  "$LANES_PY" -I -c 'import os, stat, sys
 d, entries = sys.argv[1], sys.argv[2:]
 lines = []
 for entry in entries:
@@ -671,7 +701,7 @@ lanes_ps_lstart() { LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | sed 's/^
 
 # 同一性不明は終了済みと区別する。削除・再起動は止め、停止信号は送らない。
 lanes_process_state() {
-  python3 -I - "$1" "$2" <<'PY'
+  "$LANES_PY" -I - "$1" "$2" <<'PY'
 import os, subprocess, sys
 try:
     pid = int(sys.argv[1])
@@ -726,7 +756,7 @@ lanes_record_child() {
   # 名前の付け替え（rename）で .pid を置き換える。パスで開き直さないので、作ってから書くまでの隙に差し替えられても外へ書かない。
   # rename は宛先の symlink を辿らず、その名前ごと置き換える（mv と違い、宛先がフォルダへのリンクでもその中へ移さない）
   print -r -- "${LANES_PIDFILE_BASE:-}"$'\n'"child_pid=$1"$'\n'"child_lstart=$LANES_CHILD_LSTART" \
-    | python3 -I -c 'import os,sys
+    | "$LANES_PY" -I -c 'import os,sys
 d=os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 name=sys.argv[2]; tmp=f".{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
 fd=os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666, dir_fd=d)
@@ -968,7 +998,7 @@ except Exception:
 
 # 呼び出し元の標準入出力を保って背景起動する。LANES_CHILD を wait すれば孫の回収まで完了する。
 lanes_start_child() {
-  python3 -I -c "$LANES_PROCESS_GUARD" supervise "$@" <&0 &
+  "$LANES_PY" -I -c "$LANES_PROCESS_GUARD" supervise "$@" <&0 &
   typeset -g LANES_CHILD=$!
   typeset -g LANES_MANAGED_CHILD_PID="$LANES_CHILD"
   lanes_record_child "$LANES_CHILD"
@@ -1052,7 +1082,7 @@ lanes_fresh_file() {
 
 # logs/ の識別子（dev:inode）。symlink は辿らない
 lanes_logdir_id() {
-  python3 -I -c 'import os,sys
+  "$LANES_PY" -I -c 'import os,sys
 s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$1" 2>/dev/null
 }
 
@@ -1060,7 +1090,7 @@ s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$1" 2>/dev/null
 # 0 = 無い。1 = ある（名前を stderr に出す）。ランチャは子の後に logs/<label>.* をパスのまま書くので、
 # ファイル 1 つでも外を指していると、サンドボックスの外にいるランチャが外のファイルを書き換えてしまう
 lanes_logdir_entries_ok() {
-  python3 -I -c 'import os,stat,sys
+  "$LANES_PY" -I -c 'import os,stat,sys
 bad=[]
 with os.scandir(sys.argv[1]) as it:
     for e in it:
@@ -1126,7 +1156,7 @@ lanes_kill_child() {
   [[ -n "$started" ]] || { [[ "$(lanes_process_state "$LANES_CHILD" "")" == dead ]]; return $?; }
   local mode=stop
   [[ "${LANES_MANAGED_CHILD_PID:-}" == "$LANES_CHILD" ]] && mode=stop-supervisor
-  python3 -I -c "$LANES_PROCESS_GUARD" "$mode" "$LANES_CHILD" "$started" || return $?
+  "$LANES_PY" -I -c "$LANES_PROCESS_GUARD" "$mode" "$LANES_CHILD" "$started" || return $?
 }
 
 lanes_finish_after_stop() {

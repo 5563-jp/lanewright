@@ -180,6 +180,32 @@ git -C "$wt" add -A; git -C "$wt" commit -qm 'test: 同じ名前のモジュー�
 GRV_PLANT_MARK="$T/plant.mark" STUB_AGY_RESPONSE="$CLEAN" grv 0 plant
 [[ ! -e "$T/plant.mark" ]] || { cat "$T/plant.mark" >&2; fail "親の Python が対象リポの同じ名前のモジュールを読み込んだ"; }
 pass "対象リポに json.py・hashlib.py などがあっても、親の Python はそれを読み込まない"
+# 作業ツリーの中の仮想環境（.venv）を有効にしたシェル（PATH の先頭が .venv/bin）から起動しても、親の補助処理（ランチャ・
+# chk-run.sh の記録と問い合わせ）はその python3 を使わない。偽の .venv/bin/python3 は呼ばれたら記録して本物へ渡す
+# （子の agy は ANTIGRAVITY_HEADLESS=true で動くので数えない。agy の偽物は #!/usr/bin/env python3 で動く）
+newrepo venv
+outer_py="$(command -v python3)"; real_py="$(python3 -I -c 'import sys; print(sys.executable)')"
+mkdir -p "$wt/.venv/bin"
+print -r -- "#!/bin/sh
+[ \"\${ANTIGRAVITY_HEADLESS:-}\" = true ] || printf '%s\\n' \"\$*\" >> '$T/venv.mark'
+exec '$real_py' \"\$@\"" > "$wt/.venv/bin/python3"
+chmod +x "$wt/.venv/bin/python3"
+print -r -- '.venv/' >> "$wt/.gitignore"; git -C "$wt" add -A; git -C "$wt" commit -qm 'test: 仮想環境は無視する'
+PATH="$wt/.venv/bin:$PATH" LANES_CHECK_CMD=/usr/bin/true STUB_AGY_RESPONSE="$CLEAN" bash "$LANES_DIR/chk-run.sh" "$wt" 49994 "$T/chk-venv" > "$T/chk-venv.out" 2>&1 \
+  || { cat "$T/chk-venv.out" >&2; fail "仮想環境を有効にしたシェルから chk-run.sh を回せない"; }
+PATH="$wt/.venv/bin:$PATH" LANES_CHECK_CMD=/usr/bin/true STUB_AGY_RESPONSE="$CLEAN" grv 0 venv
+[[ ! -e "$T/venv.mark" ]] || { cat "$T/venv.mark" >&2; fail "親の補助処理が作業ツリーの中の仮想環境の python3 を使った"; }
+has "$wt/logs/venv.evidence.md" '親の chk-run の記録を使用'
+has "$wt/logs/venv.done" 'VERDICT: CLEAN'
+# 固定の決め方: 作業ツリーの中（実パス）のフォルダ・python3 は飛ばし、外が無ければ使える python3 は無い（LANES_PY は空）
+ln -s "$wt/.venv/bin" "$T/venv-link"
+pin() { zsh -fc 'LANES_DIR="$1"; source "$LANES_DIR/_common.sh"; path=("${@:3}"); rc=0; lanes_python_pin "$2" || rc=$?; print -r -- "rc=$rc py=$LANES_PY"' _ "$LANES_DIR" "$@"; }
+[[ "$(pin "$wt" "$wt/.venv/bin" "$T/venv-link" "${outer_py:h}")" == "rc=0 py=$outer_py" ]] || fail "作業ツリーの中（リンクを辿った先も）の python3 を飛ばさない: $(pin "$wt" "$wt/.venv/bin" "$T/venv-link" "${outer_py:h}")"
+[[ "$(pin "$wt" "$wt/.venv/bin" "$T/venv-link")" == "rc=1 py=" ]] || fail "作業ツリーの中にしか python3 が無いのに固定した"
+[[ "$(pin "$wt" . "${outer_py:h}")" == "rc=0 py=$outer_py" ]] || fail "相対パスのフォルダ（.）の python3 を使った"
+out="$(zsh -fc 'LANES_DIR="$1"; source "$LANES_DIR/_common.sh"; path=("$2/.venv/bin"); lanes_early_target "$2" lbl 0' _ "$LANES_DIR" "$wt" 2>&1)" && fail "作業ツリーの外に python3 が無いのに止めない" || true
+[[ "$out" == *"作業ツリーの外に python3 が無い"* ]] || fail "作業ツリーの外に python3 が無いときの案内が出ない: $out"
+pass "仮想環境を有効にしたシェルから起動しても、親の補助処理（ランチャ・chk-run.sh）は作業ツリーの外の python3 に固定する（外に無ければ止める）"
 
 # ---- 3. 正常に終わっていない結果は VERDICT: NONE（EXIT:3）----
 newrepo bad

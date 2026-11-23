@@ -12,7 +12,7 @@ rvd_label_round() { if [[ "$1" =~ '-r([0-9]+)$' ]]; then print -- "${match[1]}";
 rvd_state_file() { print -- "$1/.$2.review-state"; }   # <logdir> <series>
 # 本文も同じ JSON 記録に格納する。旧 key=value 形式は読み取りだけ互換にする。
 rvd_state_get() {
-  python3 -I - "$1" "$2" <<'PY_STATE'
+  "$LANES_PY" -I - "$1" "$2" <<'PY_STATE'
 import json, pathlib, sys
 p, key = pathlib.Path(sys.argv[1]), sys.argv[2]
 if p.is_file():
@@ -70,7 +70,7 @@ rvd_prev_verdict() { rvd_record_get "$(rvd_prev_record "$1" "$2" "$3")" verdict;
 # 無視対象のファイル（.env.local・手元の設定やメモなど）も中身まで比べる（QA の写しと同じ考え方）。
 # 既知の生成物（依存・ビルドとテストの出力・キャッシュ）は、どの深さにあっても比べない。レビューがテストを回すと書き換わるため。
 rvd_snapshot() {
-  python3 -I - "$1" <<'PY_SNAPSHOT'
+  "$LANES_PY" -I - "$1" <<'PY_SNAPSHOT'
 import hashlib, os, pathlib, stat, subprocess, sys
 GENERATED_DIRS = {"node_modules", ".next", ".turbo", ".cache", "coverage", "test-results", "playwright-report",
                   "dist", "build", "out", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
@@ -147,7 +147,7 @@ PY_SNAPSHOT
 # 枝（refs/heads）と origin の追跡枝は入れない。worktree 同士で共有され、並行する他のレーンの commit や fetch で変わるため（誤検出になる）。
 # ここで見ていない書き換え（他の枝の作成など）が前後の比較に出ないことは docs/roles.md に書いてある。
 rvd_git_guard() {
-  python3 -I - "$1" <<'PY_GUARD'
+  "$LANES_PY" -I - "$1" <<'PY_GUARD'
 import hashlib, os, pathlib, subprocess, sys
 wt = sys.argv[1]
 def git(*args):
@@ -189,7 +189,7 @@ PY_GUARD
 # 制限を強めたら、前の制限の下で出た CLEAN を同じ HEAD でも使わない。
 # <root> <prompt> <base> <mode> <policy> <model> <effort> [worktree] [使い回しの鍵] [レビュー役] [制限の設定]
 rvd_context() {
-  python3 -I - "$@" <<'PY_CONTEXT'
+  "$LANES_PY" -I - "$@" <<'PY_CONTEXT'
 import hashlib, json, os, pathlib, sys
 root, prompt, base, mode, policy, model, effort = sys.argv[1:8]
 wt = sys.argv[8] if len(sys.argv) > 8 else ''
@@ -309,7 +309,7 @@ rvd_previous_followups() {
 rvd_save_state() {
   [[ "$5" == 'VERDICT: CLEAN' || "$5" == 'VERDICT: NEEDS_FIX' ]] || return 1
   local f; f="$(rvd_state_file "$1" "$2")"
-  python3 -I - "$f" "$3" "$4" "$5" "$6" "$7" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" "${13:-0}" "${14:-}" <<'PY_SAVE'
+  "$LANES_PY" -I - "$f" "$3" "$4" "$5" "$6" "$7" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" "${13:-0}" "${14:-}" <<'PY_SAVE'
 import json, os, pathlib, sys
 f, rnd, head, verdict, gate, label, context, tree, base, report, pending, blocking, reviewer = sys.argv[1:]
 body = pathlib.Path(report).read_text(encoding='utf-8') if report else ''
@@ -438,7 +438,7 @@ EOT
 # 増えた・変わった・消えた・普通のファイルでなくなった記録があれば、子の前の状態へ戻して不合格にする。
 # rvd_states_snapshot <logdir> → 覚えた中身（1 行の JSON）を出す
 rvd_states_snapshot() {
-  python3 -I - "$1" <<'PY_STATES'
+  "$LANES_PY" -I - "$1" <<'PY_STATES'
 import base64, json, os, re, stat, sys
 d = sys.argv[1]; out = {}
 if os.path.isdir(d) and not os.path.islink(d):
@@ -460,7 +460,7 @@ PY_STATES
 # 戻しきれなかったときは exit 2。ランチャは rvd_mark_blocked で「使い回し禁止」の印を置く（logs/ の中と、子の作業場所の外の
 # 両方）。ランチャはこの印があると、どの系列でも前回の記録を使わず（同じ HEAD の省略も差分にもしない）毎回 full でレビューする
 rvd_states_restore() {
-  python3 -I -c '
+  "$LANES_PY" -I -c '
 import base64, json, os, re, shutil, stat, sys
 d = sys.argv[1]
 pat = re.compile(r"\..+\.review-state")

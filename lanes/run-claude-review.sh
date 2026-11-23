@@ -155,7 +155,7 @@ delta_note=""
 [[ "$mode" == "delta" ]] && delta_note="$(rvd_delta_note "$wt" "$base" "$round" "$review_base")"
 
 # テンプレ + 案件固有プロンプト + ランチャの追記（delta の説明・前回の未解決指摘・必須検証のきまり）を結合して、実際に渡した全文を残す
-LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" python3 -I - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" "$(rvd_checks_rule)" "$delta_note" "$unresolved_note" <<'PY'
+LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" "$LANES_PY" -I - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" "$(rvd_checks_rule)" "$delta_note" "$unresolved_note" <<'PY'
 import os, sys, pathlib
 tpl, case, out, wt, branch, head, base, mode, date, checks_rule, delta_note, unresolved = sys.argv[1:13]
 t = pathlib.Path(tpl).read_text(encoding="utf-8")
@@ -236,7 +236,7 @@ elapsed=$(( ($(date +%s) - t0) / 60 ))
 # stream-json（1 行 1 イベント）から最後の result イベントを抜いて本文にする。旧形式（単一 JSON）にも対応。
 # result が無ければ exit 4（完走せず）: 生を本文に残すが、途中の tool_result 等から VERDICT を拾わない
 conv_rc=0
-python3 -I - "$json" "$log" <<'PY' || conv_rc=$?
+"$LANES_PY" -I - "$json" "$log" <<'PY' || conv_rc=$?
 import json, sys, pathlib
 src, dst = sys.argv[1], sys.argv[2]
 raw = pathlib.Path(src).read_text(encoding="utf-8", errors="replace")

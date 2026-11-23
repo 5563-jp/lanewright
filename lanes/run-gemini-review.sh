@@ -129,7 +129,7 @@ requested_mode="$mode"
 policy=early; (( round >= 3 )) && policy=followups
 # 起動ごとの設定（agy の --settings）。再利用の条件に入れるので、再利用の判定より前に確定する。利用者の許可設定より deny が優先され、設定ファイルを変更しない。
 # 拒否の固定の一覧 + GEMINI_REVIEW_DENY（カンマ区切り。空の項目は無視。制御文字・長すぎる項目は止める）
-gem_settings="$(python3 -I - "${GEMINI_REVIEW_DENY:-}" <<'PY'
+gem_settings="$("$LANES_PY" -I - "${GEMINI_REVIEW_DENY:-}" <<'PY'
 import json, sys
 BASE = ["mcp(*)", "write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file", "notebook_edit",
         "notebook_execution", "delete_knowledge", "generate_image", "invoke_subagent", "define_subagent", "manage_subagents",
@@ -147,7 +147,7 @@ print(json.dumps({"permissions": {"deny": deny}, "allowNonWorkspaceAccess": Fals
                   "modelProvider": "", "useG1Credits": False}, ensure_ascii=False, separators=(",", ":")))
 PY
 )" || lanes_die "GEMINI_REVIEW_DENY に使えない値がある（カンマ区切りの道具の名前だけ。改行などの制御文字・200 文字を超える項目は書けない）"
-deny_n="$(print -r -- "$gem_settings" | python3 -I -c 'import json, sys; print(len(json.load(sys.stdin)["permissions"]["deny"]))')"
+deny_n="$(print -r -- "$gem_settings" | "$LANES_PY" -I -c 'import json, sys; print(len(json.load(sys.stdin)["permissions"]["deny"]))')"
 # 再利用の条件（指示・起点・設定・検証の設定・必須検証の使い回し・レビュー役・実際に渡す設定（拒否の一覧））。
 # 変わったら同じ HEAD でも省略しない（review-dedup.zsh の rvd_context）
 review_context() { rvd_context "$LANES_DIR" "$prompt" "$review_base" "$requested_mode" "$policy" "${GEMINI_MODEL:-}" "${GEMINI_EFFORT:-}" "$wt" "$checks_key" gemini "$gem_settings"; }
@@ -284,7 +284,7 @@ author_note="$(gem_author_note "$base")"
 # + ランチャの追記（delta の説明・前回の未解決指摘・受け入れ済みの限界・必須検証のきまり）を結合して、実際に渡した全文を残す
 # 書き込みは logs/ を symlink を辿らずに開き、その中に新しいファイルを作ってから名前を置き換える（dry-run でも、既存の名前が
 # リンクならその先を書き換えない）
-LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" python3 -I - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" \
+LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" "$LANES_PY" -I - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" \
     "$work" "$scratch_rule" "$(rvd_checks_rule)" "$focus" "$delta_note" "$unresolved_note" "$author_note" <<'PY' || lanes_die "結合したプロンプトを書けない（logs/ が symlink・書けない など）: $final"
 import os, sys, pathlib
 (tpl, case, out, wt, branch, head, base, mode, date, scratch, rule, checks_rule, focus, delta_note, unresolved, author) = sys.argv[1:17]
@@ -526,7 +526,7 @@ gem_after_child() {
 # write のときは、ログに本文を足す（本文が使えないときは理由だけ足し、エラーの本文は字下げしてコード扱いにする＝VERDICT を拾わせない）
 gem_audit() {
   local m="$1" out="" rc=0; shift
-  out="$(python3 -I - "$plog" "$m" "$gem_settings" "$@" <<'PY'
+  out="$("$LANES_PY" -I - "$plog" "$m" "$gem_settings" "$@" <<'PY'
 import json, re, sys
 log, mode, settings, *srcs = sys.argv[1:]
 FORBIDDEN = {"write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file", "notebook_edit",
