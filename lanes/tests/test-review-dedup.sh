@@ -89,7 +89,7 @@ if rvd_impl_gemini impl-logs ''; then eq impl-review-pid gemini none; else eq im
 if rvd_impl_gemini impl-logs gemini; then eq impl-flag gemini gemini; else eq impl-flag none gemini; fi
 print -r -- $'pid=1\nlane=gemini' > impl-logs/i.pid
 if rvd_impl_gemini impl-logs claude; then eq impl-pid gemini gemini; else eq impl-pid none gemini; fi
-eq delta-note-base  "$(rvd_delta_note . "${h1:0:12}" 2 "$h1" | grep -c 'c2')" 1
+eq delta-note-base  "$(rvd_delta_note . "${h1:0:12}" 2 "$h1" | grep -cE -- ' c2$')" 1
 eq delta-note-fail  "$(rvd_delta_note . "${h1:0:12}" 2 refs/heads/no-such-branch | grep -c 'commit 一覧を取得できない')" 1
 eq delta-note-scope "$(rvd_delta_note . "${h1:0:12}" 2 | grep -c '差分の外の既存のコードは掘り返さない')" 1
 eq unresolved-noscope "$(rvd_unresolved_note "$(rvd_prev_record logs rev-foo 3)" 2 | grep -c '差分の外の既存のコードは掘り返さない')" 0
@@ -480,7 +480,10 @@ def main_only(name):
     (wt / 'a.txt').write_text('変更'); git(wt, 'commit', '-qam', 'test: 変更')
     return wt, first
 def dry(script, wt, label, *args):
-    env = dict(os.environ, RVD_CAPTURE=str(root / 'unused.json'), RVD_PROMPT=str(prompt), RVD_WT=str(wt), CHK_CACHE=str(root / 'chk-cache' / 'passed.tsv'))
+    # launch() と同じ隔離（LANES_CHECK_CMD を外し、XDG_STATE_HOME / CHK_CACHE を一時領域へ）。
+    # これが漏れると、同じ head の省略判定が launch とずれて dry-run の案内文が出ない。
+    env = launch_env(wt, '', '', '', 0, None)
+    env['RVD_CAPTURE'] = str(root / 'unused.json')
     return subprocess.run(['zsh', '-f', str(lanes / script), str(wt), str(prompt), label, *args, '--dry-run'],
                           env=env, capture_output=True, text=True, timeout=30)
 wt, first = main_only('main-only')
