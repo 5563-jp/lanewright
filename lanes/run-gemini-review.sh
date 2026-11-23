@@ -21,7 +21,8 @@
 #   - 子（agy と端末のコマンド）が書けるのは、作業ツリー（前後の比較で不合格）と scratch の work/（--add-dir・LANES_SCRATCH・TMPDIR）だけ。
 #     実行の記録の原本（scratch の record/）・子の git 用の gitconfig・設定の写しは scratch の直下に置き、子から書けない。
 #     監査と判定は原本で行い、子の終了後にだけ logs/ へ写す（写せなければ合格を保存しない。EXIT:3・VERDICT: NONE）
-#   - 子の git は最小の設定で動くので、commit の作者の照合は親が元の有効な設定で行い、一致・不一致の数だけを指示書に入れる
+#   - 子の git は最小の設定で動くので、commit の作者の照合は親が元の有効な設定で行い、件数と一致しない commit の番号だけを指示書に入れる
+#     （名前・メールは渡さず、テンプレの作者の確認の項目もこの結果を使う指示に置き換える）。作者の設定の指紋は再利用の条件に入る（rvd_context）
 # 判定: agy は時間切れ（--print-timeout）や失敗でも終了コード 0 で {"event":"result","result":{"status":"ERROR",...}} を出すことがある。
 #   result がちょうど 1 つで最後のイベント・status が SUCCESS・response が空でない文字列のときだけ、本文の最終行の VERDICT を読む。
 #   それ以外（ERROR・空の応答・result が無い・JSON の破損）は VERDICT: NONE（EXIT:3）。エラーの本文からは VERDICT を拾わない。
@@ -250,32 +251,40 @@ delta_note=""
 [[ "$mode" == "delta" ]] && delta_note="$(rvd_delta_note "$wt" "$base" "$round" "$review_base")"
 scratch_rule="$(lanes_scratch_rule "$work")"
 # 子の git は最小の設定（GIT_CONFIG_GLOBAL）で動くので、利用者の共通設定にある作者名・メールは子から見えない。
-# 親が元の有効な設定で、レビューの範囲（比較起点..HEAD）の commit の作者を照合し、一致・不一致の数だけを指示書に入れる（値は渡さない）
+# 作者の照合は親で完結させる: 元の有効な設定で、レビューの範囲（比較起点..HEAD）の commit の作者を照合し、件数と、一致しない
+# commit の番号（短い SHA）だけを指示書に入れる。名前・メールの値は渡さず、子に作者を表示させる指示もしない
+# （テンプレの作者の確認の項目は、下の結合でこの結果を使う指示に置き換える）
 gem_author_note() {   # <比較起点> → 指示書に足す文
-  local from="$1" name="" email="" out="" row n=0 bad=0
+  local from="$1" name="" email="" out="" row rest n=0 bad=0 max=50
+  local -a shas
   name="$(git -C "$wt" config user.name 2>/dev/null)" || name=""
   email="$(git -C "$wt" config user.email 2>/dev/null)" || email=""
   print -r -- "# commit の作者の照合（ランチャが元の git の設定で確かめた結果）"
-  print -r -- "- このレビューの中の git は最小の設定で動くので、git config user.name / user.email は空になる。作者の照合はこの結果を使う（値はここに書かない）。"
+  print -r -- "- このレビューの中の git は最小の設定で動くので、git config user.name / user.email は空になる。作者の照合はこの結果だけを使う。"
+  print -r -- "- 作者の名前・メールアドレスは表示しない・書かない（作者を出す書式（%an・%ae・%cn・%ce など）で git log / git show を回さない）。指摘には commit の番号と件数だけを書く。"
   if [[ -z "$name" || -z "$email" ]]; then
     print -r -- "- 対象リポの有効な git の設定に user.name か user.email が無く、ランチャは照合できなかった。照合できないことを指摘に書く。"
     return 0
   fi
-  if ! out="$(git -C "$wt" log -z --format='%an%x1f%ae' "$from..HEAD" 2>/dev/null)"; then
+  if ! out="$(git -C "$wt" log -z --abbrev=12 --format='%h%x1f%an%x1f%ae' "$from..HEAD" 2>/dev/null)"; then
     print -r -- "- commit の一覧を読めず、ランチャは照合できなかった。照合できないことを指摘に書く。"
     return 0
   fi
+  shas=()
   for row in "${(@0)out}"; do
     [[ -n "$row" ]] || continue
-    n=$(( n + 1 ))
-    [[ "${row%%$'\x1f'*}" == "$name" && "${row#*$'\x1f'}" == "$email" ]] || bad=$(( bad + 1 ))
+    n=$(( n + 1 )); rest="${row#*$'\x1f'}"
+    [[ "${rest%%$'\x1f'*}" == "$name" && "${rest#*$'\x1f'}" == "$email" ]] && continue
+    bad=$(( bad + 1 ))
+    (( ${#shas} >= max )) || shas+=("${row%%$'\x1f'*}")
   done
   if (( n == 0 )); then
     print -r -- "- 範囲（${from:0:12}..HEAD）に commit が無い。"
   elif (( bad == 0 )); then
     print -r -- "- 範囲（${from:0:12}..HEAD）の commit ${n} 件の作者は、すべて対象リポの有効な git の設定（user.name / user.email）と一致した。"
   else
-    print -r -- "- 範囲（${from:0:12}..HEAD）の commit ${n} 件のうち ${bad} 件の作者が、対象リポの有効な git の設定（user.name / user.email）と一致しない。git log --format='%h %an <%ae>' で該当の commit を確かめ、指摘に書く。"
+    local more=""; (( bad <= max )) || more="（ほか $(( bad - max )) 件）"
+    print -r -- "- 範囲（${from:0:12}..HEAD）の commit ${n} 件のうち ${bad} 件の作者が、対象リポの有効な git の設定（user.name / user.email）と一致しない。この件数と次の commit の番号を指摘に書く: ${(j:, :)shas}${more}。"
   fi
 }
 author_note="$(gem_author_note "$base")"
@@ -286,13 +295,19 @@ author_note="$(gem_author_note "$base")"
 # リンクならその先を書き換えない）
 LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" "$LANES_PY" -I - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" \
     "$work" "$scratch_rule" "$(rvd_checks_rule)" "$focus" "$delta_note" "$unresolved_note" "$author_note" <<'PY' || lanes_die "結合したプロンプトを書けない（logs/ が symlink・書けない など）: $final"
-import os, sys, pathlib
+import os, re, sys, pathlib
 (tpl, case, out, wt, branch, head, base, mode, date, scratch, rule, checks_rule, focus, delta_note, unresolved, author) = sys.argv[1:17]
 t = pathlib.Path(tpl).read_text(encoding="utf-8")
 for k, v in {"WORKTREE": wt, "BRANCH": branch, "HEAD": head, "BASE": base, "MODE": mode, "DATE": date, "SCRATCH": scratch}.items():
     t = t.replace("{{" + k + "}}", v)
 # 役名だけ Gemini に読み替え（Claude レビュー用のテンプレを流用。run-codex-review.sh と同じやり方）
 t = t.replace("Claude", "Gemini")
+# テンプレの作者の確認の項目（作者の名前・メールを git log で出して比べる）は、ランチャの照合結果を使う指示に置き換える
+# （子に作者の名前・メールアドレスを表示させない。件名の確認は作者を出さない書式で行う）
+t = re.sub(r"^(\s*\d+\.\s*).*commit author.*$",
+           lambda m: m.group(1) + "commit の作者は、下の「commit の作者の照合」（ランチャが元の git の設定で確かめた結果）だけで確かめる（作者の名前・メールアドレスを出す書式で git log / git show を回さない）。"
+           + "commit 件名が日本語（prefix は英語）であることは `git log --format='%h %s' " + base + "..HEAD` で確かめる",
+           t, flags=re.M)
 case_text = pathlib.Path(case).read_text(encoding="utf-8")
 focus_text = pathlib.Path(focus).read_text(encoding="utf-8")
 readonly = "\n".join([

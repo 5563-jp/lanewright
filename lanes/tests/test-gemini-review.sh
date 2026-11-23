@@ -390,8 +390,20 @@ GIT_CONFIG_GLOBAL="$T/global.gitconfig" git -C "$wt" commit --allow-empty -qm 't
 GIT_CONFIG_GLOBAL="$T/global.gitconfig" STUB_AGY_RESPONSE="$CLEAN" grv 0 au
 argcheck "共通の設定にある作者を照合して渡さない（または値を渡した）" '"# commit の作者の照合" in a[-1] and "commit 1 件の作者は、すべて対象リポの有効な git の設定" in a[-1] and "global@example.com" not in a[-1] and "Global User" not in a[-1]'
 git -C "$wt" -c user.name=Other -c user.email=other@example.com commit --allow-empty -qm 'test: 別の作者'
+other_sha="$(git -C "$wt" rev-parse --short=12 HEAD)"
 GIT_CONFIG_GLOBAL="$T/global.gitconfig" STUB_AGY_RESPONSE="$CLEAN" grv 0 au2 --mode full
-argcheck "作者の不一致を渡さない" '"commit 2 件のうち 1 件の作者が、対象リポの有効な git の設定" in a[-1] and "other@example.com" not in a[-1]'
-pass "作者名・メールが利用者の共通設定にあっても、親が元の設定で照合し、一致・不一致の数だけを渡す（値は渡さない）"
+argcheck "作者の不一致を、件数と commit の番号だけで渡さない（または名前・メールを渡した・表示させる指示が残った）" \
+  '"commit 2 件のうち 1 件の作者が、対象リポの有効な git の設定" in a[-1]' "'$other_sha' in a[-1]" \
+  '"other@example.com" not in a[-1] and "Other" not in a[-1] and "global@example.com" not in a[-1] and "Global User" not in a[-1]' \
+  '"commit author" not in a[-1] and "--format='"'"'%an" not in a[-1] and "%h %an" not in a[-1]'
+pass "作者名・メールが利用者の共通設定にあっても、親が元の設定で照合し、件数と一致しない commit の番号だけを渡す（値も、作者を表示させる指示も渡さない）"
+# 作者の設定を変えたら、同じ HEAD でも前回の結果（前の設定での照合）を使わない（再利用の条件に作者の設定の指紋が入る）
+GIT_CONFIG_GLOBAL="$T/global.gitconfig" STUB_AGY_RESPONSE="$CLEAN" grv 0 au2 --mode full
+[[ "$(calls)" == 0 ]] || fail "同じ HEAD・同じ作者の設定なのに agy を起動した"
+print -r -- $'[user]\n\tname = Global User\n\temail = changed@example.com' > "$T/global.gitconfig"
+GIT_CONFIG_GLOBAL="$T/global.gitconfig" STUB_AGY_RESPONSE="$CLEAN" grv 0 au2 --mode full
+[[ "$(calls)" == 1 ]] || fail "作者の設定を変えたのに、同じ HEAD の前回の結果を使った"
+argcheck "設定を変えた後の照合で不一致を数えない" '"commit 2 件のうち 2 件の作者が" in a[-1] and "changed@example.com" not in a[-1]'
+pass "作者の設定（user.name / user.email）を変えたら、同じ HEAD でも前回の結果を使わずに照合し直す"
 
 print -r -- "PASS: $count 件 / EXIT:0"

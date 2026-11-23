@@ -187,10 +187,11 @@ PY_GUARD
 # キットのファイルが無い（一部だけを写したテストの置き場など）ときは「無い」ことを条件に入れる（後で置かれたら条件が変わる）。
 # 読み取り専用の制限の設定（Gemini の拒否の一覧・Claude の使えるツールと拒否・Codex の sandbox）も [制限の設定] で入れる。
 # 制限を強めたら、前の制限の下で出た CLEAN を同じ HEAD でも使わない。
+# commit の作者の照合に使う有効な作者の設定（git config user.name / user.email）の指紋も入れる（値は入れない）。
 # <root> <prompt> <base> <mode> <policy> <model> <effort> [worktree] [使い回しの鍵] [レビュー役] [制限の設定]
 rvd_context() {
   "$LANES_PY" -I - "$@" <<'PY_CONTEXT'
-import hashlib, json, os, pathlib, sys
+import hashlib, json, os, pathlib, subprocess, sys
 root, prompt, base, mode, policy, model, effort = sys.argv[1:8]
 wt = sys.argv[8] if len(sys.argv) > 8 else ''
 reuse = sys.argv[9] if len(sys.argv) > 9 else ''
@@ -226,6 +227,15 @@ if wt:
     if not isinstance(scripts, dict): scripts = {}
     names = ['typecheck', 'type-check', 'typecheck:all', 'check-types', 'tsc', 'lint', 'test', 'test:unit', 'unit', 'test:ci']
     h.update(b'scripts:' + json.dumps({n: scripts.get(n) for n in names}, sort_keys=True, ensure_ascii=False).encode() + b'\0')
+    # commit の作者の照合に使う有効な作者の設定（user.name / user.email）。値そのものではなく指紋だけを入れる。
+    # 作者の設定を変えたら、前の設定で照合した結果（全件一致など）を同じ HEAD でも使わない
+    for key in ('user.name', 'user.email'):
+        try:
+            p = subprocess.run(['git', '-C', wt, 'config', key], stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+            value = b'rc:%d:' % p.returncode + hashlib.sha256(p.stdout).digest()
+        except (OSError, subprocess.SubprocessError):
+            value = b'error'
+        h.update(b'author-' + key.encode() + b':' + value + b'\0')
 print(h.hexdigest())
 PY_CONTEXT
 }
