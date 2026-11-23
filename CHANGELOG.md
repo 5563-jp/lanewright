@@ -18,7 +18,8 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   scratch の `work/` だけで、実行の記録の原本と渡す指示書は子から書けない scratch の `record.<実行ごと>/`（実行ごとに新しく作り、前の実行の原本は消さない）に置き、
   監査・判定は原本で行って子の終了後に `logs/` へ写す。一時エラーのやり直しも同じ指示書を使い、残り時間は作業ツリーの比較の後に求める。
   Gemini で実装したものは、`run-gemini-review.sh` を直接呼んでも起動しない（`--impl-engine` も受け付ける）。
-  作業ツリーを scratch に写して試すときは `.git` ごと写さず（元の管理フォルダを指すため）、`git archive` で写して `git init` し直すよう指示書に書く。
+  作業ツリーを scratch に写して試すときは `.git` ごと写さず（元の管理フォルダを指すため）、今の作業ツリーの中身（commit 済み・未 commit の変更・未追跡のソース。
+  無視するもの・消したものは除く）を `git ls-files` で並べて新しい空のフォルダへ写し、`git init` し直すよう指示書に書く（レビューの対象と同じ中身を試せる）。
 - `run-review.sh` に `--engine codex|gemini|claude`（レビュー役の明示）と `--impl-engine claude|gemini|codex`（実装した道具のヒント）を足した。
 - 設定 `LANES_REVIEW_GEMINI_PCT`（既定 `0`）: 新しい系列のレビューをこの割合で Gemini に回す（`50` なら既定の役と交互）。
   割合で決めた役は作業ツリーの `logs/.<系列>.review-pick` に残して引き継ぐ（起動前の点検で止まった系列を呼び直しても、数え方を二重に進めない。

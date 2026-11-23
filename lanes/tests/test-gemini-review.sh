@@ -19,7 +19,8 @@
 #      記録の原本は実行ごとに新しい置き場所に作り、写せなかった回の原本を起動し直しで消さない。実行中の logs/ の写しは子が動いている間に出る。
 #      出力が止まれば EXIT:8。--dry-run は記録を作らず agy を起動しない（既存のリンクの先も書かない）
 #   8. 必須検証の成功を確かめない CLEAN は NEEDS_FIX。監査・判定は子から書けない原本で行い、子が logs/ の記録を書き換えても効かない。
-#      拒否の一覧を変えたら同じ HEAD でもレビューし直す。子の git は作業場所から管理フォルダを見つける（.git ごと写したコピーは元を指すので、git archive + git init で写す）。
+#      拒否の一覧を変えたら同じ HEAD でもレビューし直す。子の git は作業場所から管理フォルダを見つける（.git ごと写したコピーは元を指すので、
+#      今の作業ツリーの中身を git ls-files で写して git init する。未 commit の変更・未追跡・削除が写しに反映される）。
 #      作者名・メールが利用者の共通設定にあっても、親が照合して件数と一致しない commit の番号だけを渡す（作者の設定を変えたら照合し直す）
 set -euo pipefail
 # git の環境変数を外し、一時リポの外へ git が上っていかないようにする（本物のリポを書き換えない）
@@ -461,21 +462,34 @@ GEMINI_REVIEW_DENY=run_command STUB_AGY_RESPONSE="$CLEAN" grv 0 dz
 [[ "$(calls)" == 1 ]] || fail "拒否の一覧を変えたのに前回の CLEAN を使った"
 pass "拒否の一覧（GEMINI_REVIEW_DENY）を変えたら、同じ HEAD でも前回の結果を使わずにレビューし直す"
 # 子の git は作業場所から管理フォルダを見つける。作業ツリー（.git が元の管理フォルダを指すファイル）を実際に写して確かめる:
-# そのまま写したもの（cp -R）は元の管理フォルダを指したまま。指示書の作り方（git archive で写して git init）なら、
-# 作業ルートも管理フォルダ（git rev-parse --absolute-git-dir）も scratch の中になる
-STUB_RUN='git rev-parse --show-toplevel > "$LANES_SCRATCH/top-wt.txt"
-cp -R . "$LANES_SCRATCH/naive" && git -C "$LANES_SCRATCH/naive" rev-parse --absolute-git-dir > "$LANES_SCRATCH/gitdir-naive.txt"
-mkdir -p "$LANES_SCRATCH/copy" && git archive HEAD | tar -x -C "$LANES_SCRATCH/copy" && cd "$LANES_SCRATCH/copy" && git init -q \
-  && git rev-parse --show-toplevel > "$LANES_SCRATCH/top-copy.txt" && git rev-parse --absolute-git-dir > "$LANES_SCRATCH/gitdir-copy.txt"' \
+# そのまま写したもの（cp -R）は元の管理フォルダを指したまま。指示書に書いた写し方（dry-run の指示書からそのまま取り出す）なら、
+# 作業ルートも管理フォルダ（git rev-parse --absolute-git-dir）も scratch の中になり、未 commit の変更・未追跡のソース・
+# 作業ツリーで消したものがそのまま写る（git が無視するもの・元の .git は入らない）
+newrepo cp; L="$wt/logs"
+print -r -- '*.tmp' >> "$wt/.gitignore"; print -r -- '消す前' > "$wt/del.txt"; mkdir -p "$wt/sub"; print -r -- '下の段' > "$wt/sub/s.txt"
+git -C "$wt" add -A; git -C "$wt" commit -qm 'test: 写す元'
+print -r -- '未 commit の変更' >> "$wt/a.txt"; print -r -- '新しいテスト' > "$wt/new-test.sh"; rm -f -- "$wt/del.txt"; print -r -- '無視する' > "$wt/x.tmp"
+STUB_AGY_RESPONSE="$CLEAN" grv 0 cp-dry --dry-run
+copy_cmd="$(python3 -I -c 'import re, sys
+t = open(sys.argv[1], encoding="utf-8").read()
+c = re.findall(r"`([^`]*git ls-files[^`]*)`", t)
+assert len(c) == 1 and "git archive" not in t, c
+print(c[0].replace("<名前>", "copy"))' "$L/cp-dry.dry-run.prompt.md")" || fail "指示書から写し方を 1 つだけ取り出せない（または git archive が残る）"
+STUB_RUN_RC="$T/gitcopy.rc" STUB_RUN="git rev-parse --show-toplevel > \"\$LANES_SCRATCH/top-wt.txt\"
+cp -R . \"\$LANES_SCRATCH/naive\" && git -C \"\$LANES_SCRATCH/naive\" rev-parse --absolute-git-dir > \"\$LANES_SCRATCH/gitdir-naive.txt\"
+$copy_cmd && git rev-parse --show-toplevel > \"\$LANES_SCRATCH/top-copy.txt\" && git rev-parse --absolute-git-dir > \"\$LANES_SCRATCH/gitdir-copy.txt\"" \
   STUB_AGY_RESPONSE="$CLEAN" grv 0 gitcopy
-argcheck "指示書に、.git ごと写さず git archive で写して git init する作り方が無い" \
-  '"git archive HEAD | tar -x -C" in a[-1] and "git init -q" in a[-1] and "git rev-parse --absolute-git-dir" in a[-1]'
-gwork="$(sed -n 's/^scratch=//p' "$L/gitcopy.pid" | head -1)/work"; gwork="${gwork:A}"
+[[ "$(<"$T/gitcopy.rc")" == 0 ]] || fail "指示書に書いた写し方が失敗した（終了コード $(<"$T/gitcopy.rc")）"
+gwork="$(sed -n 's/^scratch=//p' "$L/gitcopy.pid" | head -1)/work"; gwork="${gwork:A}"; c="$gwork/copy"
 [[ -f "$wt/.git" && "$(<"$gwork/top-wt.txt")" == "${wt:A}" ]] || fail "子の git が作業場所の worktree を見ない: $(<"$gwork/top-wt.txt")"
 [[ "$(<"$gwork/gitdir-naive.txt")" != "$gwork/"* ]] || fail "用意の誤り: .git ごと写したコピーの管理フォルダが scratch の中にある（写し方の注意を確かめられない）"
-[[ -f "$gwork/copy/a.txt" && "$(<"$gwork/top-copy.txt")" == "$gwork/copy" ]] || fail "指示書の作り方で写したコピーの作業ルートが scratch の中にない: $(<"$gwork/top-copy.txt")"
-[[ "$(<"$gwork/gitdir-copy.txt")" == "$gwork/copy/.git" ]] || fail "指示書の作り方で写したコピーの管理フォルダが scratch の中にない: $(<"$gwork/gitdir-copy.txt")"
-pass "子の git は作業場所から管理フォルダを見つける。作業ツリーを .git ごと写すと元の管理フォルダを指すので、指示書の作り方（git archive + git init）で写すと管理フォルダも scratch の中になる"
+[[ "$(<"$gwork/top-copy.txt")" == "$c" && "$(<"$gwork/gitdir-copy.txt")" == "$c/.git" && -d "$c/.git" ]] \
+  || fail "指示書の写し方で写したコピーの作業ルート・管理フォルダが scratch の中にない: $(<"$gwork/top-copy.txt") / $(<"$gwork/gitdir-copy.txt")"
+grep -qx '未 commit の変更' "$c/a.txt" || fail "未 commit の変更が写しに入らない"
+[[ "$(<"$c/new-test.sh")" == '新しいテスト' && "$(<"$c/sub/s.txt")" == '下の段' ]] || fail "未追跡のソース・下の段の追跡ファイルが写しに入らない"
+[[ ! -e "$c/del.txt" ]] || fail "作業ツリーで消したファイルが写しに残る"
+[[ ! -e "$c/x.tmp" && ! -e "$c/logs" ]] || fail "git が無視するもの（*.tmp・logs/）が写しに入った"
+pass "子の git は作業場所から管理フォルダを見つける。.git ごと写すと元を指すので、指示書の写し方（git ls-files で今の中身を写して git init）を使い、未 commit の変更・未追跡・削除が写しに反映され、無視するものと元の .git は入らない"
 newrepo author; L="$wt/logs"
 git -C "$wt" config --unset user.name; git -C "$wt" config --unset user.email
 print -r -- $'[user]\n\tname = Global User\n\temail = global@example.com' > "$T/global.gitconfig"

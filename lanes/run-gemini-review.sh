@@ -19,8 +19,9 @@
 #   - 本体 checkout（.git がフォルダ）では起動しない（専用の linked worktree が前提。run-gemini.sh と同じ）
 #   - 子の git は通信（push・fetch）を止め（GIT_ALLOW_PROTOCOL）、任意のロックを取らない（GIT_OPTIONAL_LOCKS=0）。
 #     管理フォルダは作業場所（cwd）から見つける（GIT_DIR / GIT_WORK_TREE は渡さない）。作業ツリーを scratch に写して試すときは
-#     .git ごと写さず（元の管理フォルダを指すファイルなので、写した先の git も元の管理フォルダを使う）、git archive で写して
-#     git init し直すよう指示書に書く（写した先の管理フォルダが scratch の下になる）
+#     .git ごと写さず（元の管理フォルダを指すファイルなので、写した先の git も元の管理フォルダを使う）、今の作業ツリーの中身
+#     （追跡・未 commit の変更・未追跡のソース。無視するもの・消したものは除く）を git ls-files で並べて新しい空のフォルダへ写し、
+#     git init し直すよう指示書に書く（写した先の管理フォルダが scratch の下になる。レビューの対象と同じ中身を試せる）
 #   - 子（agy と端末のコマンド）が書けるのは、作業ツリー（前後の比較で不合格）と scratch の work/（--add-dir・LANES_SCRATCH・TMPDIR）だけ。
 #     実行の記録の原本（scratch の record.<実行ごと>/。mktemp -d で実行ごとに新しく作り、前の実行の原本は消さない）・子の git 用の
 #     gitconfig・設定の写しは scratch の直下に置き、子から書けない。子に渡す指示書も原本の置き場所に一度だけ書いて固定し、
@@ -336,12 +337,17 @@ t = re.sub(r"^(\s*\d+\.\s*).*commit author.*$",
            t, flags=re.M)
 case_text = pathlib.Path(case).read_text(encoding="utf-8")
 focus_text = pathlib.Path(focus).read_text(encoding="utf-8")
+# 作業ツリーの写し方（子への指示）。元の .git は持ち込まず、今の作業ツリーの中身（commit 済み・未 commit の変更・未追跡のソース。
+# git が無視するもの・作業ツリーで消したものは除く。リンクは辿らずリンクのまま）を新しい空のフォルダへ写して git init する
+COPY = r'''mkdir -p "$LANES_SCRATCH/<名前>" && git ls-files -z --cached --others --exclude-standard | perl -0 -ne 'chomp; print "$_\0" if -e || -l' | tar --null --no-recursion -T - -cf - | tar -xpf - -C "$LANES_SCRATCH/<名前>" && cd "$LANES_SCRATCH/<名前>" && git init -q'''
 readonly = "\n".join([
     "# Gemini レビューの約束（ランチャが実行の記録で確かめる）",
     "- このレビューは読み取り専用（plan モード・端末サンドボックス）。ファイルを書く・置き換える・消す道具、MCP、サブエージェント、ブラウザ、Web の検索・取得、予約・ワークフローの道具は使わない。1 回でも使うと、本文に関係なく不合格になる。",
     "- 質問・承認の道具（名前が ask_ で始まるもの）は使わない（非対話なので答える人がいない。使うと不合格）。分からない点は前提を書いたうえで指摘に含める。",
     "- 端末のコマンドは読む・確かめるためだけに使う（`git diff`・`git log --format='%h %s'`・`git show --format='%h %s' --stat`・該当テスト 1 本など。履歴を見るコマンドには、この作者を含まない書式を必ず付ける）。作業ツリーと git の管理フォルダを書き換えない（前後の比較で不合格になる）。一時ファイルは $LANES_SCRATCH の下だけに置く。",
-    "- 作業ツリーを写して試すときは .git ごと写さない（この作業ツリーの .git は元の管理フォルダを指すファイルなので、そのまま写した先の git も元の管理フォルダと stage を使う）。commit 済みの中身を `mkdir -p \"$LANES_SCRATCH/<名前>\" && git archive HEAD | tar -x -C \"$LANES_SCRATCH/<名前>\"` で写し、写した先で `git init -q` してから使う。写した先で `git rev-parse --absolute-git-dir` が $LANES_SCRATCH の下を指すことを確かめてから git を使う。",
+    "- 作業ツリーを写して試すときは .git ごと写さない（この作業ツリーの .git は元の管理フォルダを指すファイルなので、そのまま写した先の git も元の管理フォルダと stage を使う）。"
+    + "レビューの対象と同じ今の作業ツリーの中身（commit 済みのもの・未 commit の変更・未追跡のソース。git が無視するものと作業ツリーで消したものは除く。リンクは辿らない）を、作業ツリーの直下で `" + COPY + "` で写す（新しい空のフォルダへ写して git init する）。"
+    + "写した先で `git rev-parse --absolute-git-dir` が $LANES_SCRATCH の下を指すことを確かめてから git を使う。",
 ])
 extra = [p.rstrip() for p in (delta_note, unresolved, os.environ.get("LANES_ACCEPTED_NOTE", ""), author) if p.strip()]
 crule = checks_rule.rstrip()
