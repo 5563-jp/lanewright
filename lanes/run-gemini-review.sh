@@ -41,8 +41,8 @@ set -euo pipefail
 typeset +x LANES_DEFER_CONFIG_ERROR=1
 LANES_DIR="${0:A:h}"; source "$LANES_DIR/_common.sh"
 source "$LANES_DIR/review-dedup.zsh"
-# git は作業場所から管理フォルダを見つける（呼び出し元の GIT_DIR などを使わない。子にも渡さない）
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
+# git は作業場所から管理フォルダを見つける（呼び出し元の GIT_DIR などを使わない。子にも渡さない。外すものは chk-run.sh と同じ）
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
 usage="使い方: run-gemini-review.sh <worktree> <prompt.md> [label] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--allow-missing-checks] [--impl-engine claude|gemini|codex] [--dry-run]"
 wt="${1:-}"; prompt="${2:-}"
@@ -805,8 +805,11 @@ gate="$(rvd_escalate "$round" "$verdict" "$gate")"
   print -- "- 見張り: $stop_line / print-timeout $print_timeout（全体の上限。やり直しには残り時間だけを渡す）"
   print -- "- 実行: $started 開始 / 約 ${elapsed} 分 / EXIT:$rc"
   print -- "- HEAD: $head → $head_after / 内容・履歴・条件の変更検出 $dirty（0=なし、1=あり）"
-  print -- "- ログ: $log（本文）/ $json（生）/ $final（渡した全文）。どれも子の終了後に原本（$rec）から写した"
-  (( publish_ok )) || print -- "- 記録の写し: logs/ へ写せなかった → 合格を保存しない（EXIT:3）。原本は $rec にある"
+  if (( publish_ok )); then
+    print -- "- ログ: $log（本文）/ $json（生）/ $final（渡した全文）。本文と生の記録は、子の終了後に原本（$rec）から写した"
+  else
+    print -- "- ログ: logs/ へ写せなかった → 合格を保存しない（EXIT:3）。原本は $rec にある（渡した全文: $final）"
+  fi
   print -- "- 作業場所（scratch）: $scratch（子が書けるのは $work だけ。${LANES_BASE_BRANCH:-develop} へのマージ後の cleanup で削除）"
 } > "$evidence"
 

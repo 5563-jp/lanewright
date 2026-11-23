@@ -97,6 +97,7 @@ review_split() {
   fi
   if [[ -n "$prev" ]]; then
     (( dry )) || zsystem flock -u "$fd" 2>/dev/null || true
+    ( print -u2 -- "注意: 同じ系列（$4）に前に割り当てた役（$prev。default は構成の既定の役）を引き継ぐ。割合の数え方は進めない" ) || true
     print -r -- "$prev"; return 0
   fi
   if [[ "$v" == <-> && ${#v} -le 3 ]] && (( v < 100 )); then acc=$v; fi
