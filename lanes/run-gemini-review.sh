@@ -1,11 +1,13 @@
 #!/bin/zsh -f
 # レビューランチャ（Gemini / Antigravity CLI agy・読み取り専用）。構成（LANES_TOOLS）に gemini があるときに使える、もう 1 つのレビュー役。
 # 振り分けの入口は run-review.sh（--engine gemini か LANES_REVIEW_GEMINI_PCT の割合。Gemini で実装したものは Gemini でレビューしない）。使い方:
-#   run-gemini-review.sh <worktree> <prompt.md> [label] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--allow-missing-checks] [--dry-run]
+#   run-gemini-review.sh <worktree> <prompt.md> [label] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--allow-missing-checks] [--impl-engine claude|gemini|codex] [--dry-run]
 #   label は指示書の直後に置く（不明なオプションは止めて記録する。その後ろの - で始まらない語は、そのオプションの値として読み捨てる）
 # 同じ確認を繰り返さない仕組み（--mode auto の full / delta / 同じ head の結果の再利用、--round と round 3 以降の P2/P3 の後回し、
 #   --force、--base）と、親の chk-run.sh の記録による必須検証の使い回し（LANES_REVIEW_REUSE_CHECKS / LANES_REVIEW_REQUIRE_CHECKS と
 #   --allow-missing-checks）は run-claude-review.sh / run-codex-review.sh と同じ（review-dedup.zsh）。
+# 同じ道具でのレビューの禁止: Gemini で実装したもの（--impl-engine gemini か、logs/ の .pid に lane=gemini）は、直接呼ばれても
+#   前回の結果の再利用・子の起動より前に止める（exit 2。判定は入口の run-review.sh と同じ review-dedup.zsh の rvd_impl_gemini）
 # 読み取り専用の担保:
 #   - agy に --sandbox（端末サンドボックス）・--settings（起動ごとの設定）・--mode plan を必ず付け、ANTIGRAVITY_HEADLESS=true で起動する
 #   - 設定の permissions.deny で MCP・ファイルを書く道具・サブエージェント・ブラウザ・外部からの取得・予約を拒否する
@@ -33,11 +35,11 @@ typeset +x LANES_DEFER_CONFIG_ERROR=1
 LANES_DIR="${0:A:h}"; source "$LANES_DIR/_common.sh"
 source "$LANES_DIR/review-dedup.zsh"
 
-usage="使い方: run-gemini-review.sh <worktree> <prompt.md> [label] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--allow-missing-checks] [--dry-run]"
+usage="使い方: run-gemini-review.sh <worktree> <prompt.md> [label] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--allow-missing-checks] [--impl-engine claude|gemini|codex] [--dry-run]"
 wt="${1:-}"; prompt="${2:-}"
 [[ -n "$wt" && -n "$prompt" ]] || lanes_die "$usage"
 shift 2
-label=""; mode="auto"; base=""; dry=0; round=0; force=0; allow_missing=0
+label=""; mode="auto"; base=""; dry=0; round=0; force=0; allow_missing=0; impl_engine=""
 while (( $# )); do
   case "$1" in
     --mode) (( $# >= 2 )) || { lanes_defer_die "--mode に値が無い"; shift; continue; }; mode="$2"; shift 2 ;;
@@ -46,6 +48,7 @@ while (( $# )); do
     --dry-run) dry=1; shift ;;
     --force) force=1; shift ;;
     --allow-missing-checks) allow_missing=1; shift ;;
+    --impl-engine) (( $# >= 2 )) || { lanes_defer_die "--impl-engine に値が無い"; shift; continue; }; [[ -z "$impl_engine" ]] || lanes_defer_die "--impl-engine が 2 回"; impl_engine="$2"; shift 2 ;;
     --*) lanes_defer_die "不明なオプション: $1 / $usage"; lanes_unknown_opt_width "$@"; shift "$REPLY" ;;   # 値らしい次の語も読み捨てる（label と取り違えない）
     *) [[ -z "$label" ]] || lanes_die "label が 2 回指定されている: '$label' と '$1'"; label="$1"; shift ;;
   esac
@@ -58,6 +61,8 @@ lanes_require_label "$label"
 lanes_require_worktree "$wt"
 [[ "$mode" == "auto" || "$mode" == "full" || "$mode" == "delta" ]] || lanes_die "--mode は auto|full|delta（渡されたのは '$mode'）"
 [[ "$round" == <-> && ${#round} -le 6 ]] || lanes_die "--round は 0〜999999 の整数"
+[[ -z "$impl_engine" || "$impl_engine" == claude || "$impl_engine" == gemini || "$impl_engine" == codex ]] \
+  || lanes_die "--impl-engine は claude|gemini|codex（渡されたのは '$impl_engine'）"
 # 比較起点はレビュー開始前に commit へ固定し、再利用判定にも含める。統合先の枝が無い repo（main だけの運用など）では --base を案内して止める
 if [[ -n "$base" ]]; then
   base="$(git -C "$wt" rev-parse --verify --end-of-options "$base^{commit}" 2>/dev/null)" || lanes_die "--base を commit として解決できない: $base"
@@ -90,6 +95,11 @@ series="$(rvd_series "$label")"
 if rvd_checks_block "$allow_missing"; then lanes_die "$RVD_CHECKS_BLOCK"; fi
 (( dry )) || lanes_mark_start "$logdir" "$label" gemini-review "$wt" "file:.$series.review-state" "file:$series.followups.md" "file:.review-reuse-blocked"
 lanes_require_tool gemini run-gemini-review.sh
+# 同じ道具でのレビューの禁止（入口の run-review.sh と同じ判定 rvd_impl_gemini）。直接呼ばれても、前回の結果の再利用・子の起動より前に止める
+# （再利用の記録・後回し票には触らない。今回の .done に EXIT:2 を残す）
+if rvd_impl_gemini "$wt/logs" "$impl_engine"; then
+  lanes_die "Gemini で実装したもの（--impl-engine gemini か logs/ の .pid の lane=gemini）は Gemini でレビューしない（同じ道具のレビューは独立性が無い）。run-review.sh で codex / claude に回す"
+fi
 lanes_entry_preflight
 lanes_require_prompt "$prompt"
 round="$(rvd_round "$logdir" "$series" "$label" "$round")"
@@ -122,7 +132,7 @@ if [[ "$prev_v" == 'VERDICT: NEEDS_FIX' ]]; then
   skip_same=0
   [[ -n "$(rvd_record_get "$record" report)" ]] || lanes_die "前回の未解決指摘本文が無い。復元してから再レビューする"
   if [[ "$requested_mode" != full ]] && ! rvd_reuse_blocked "$logdir" \
-     && [[ "$(rvd_fix_mode "$wt" "$prev_head" "$tree" "$(rvd_record_get "$record" tree)" "$review_base" "$(rvd_record_get "$record" base)")" == delta ]]; then
+     && [[ "$(rvd_fix_mode "$wt" "$prev_head" "$tree" "$(rvd_record_get "$record" tree)" "$review_base" "$(rvd_record_get "$record" base)" gemini "$(rvd_record_reviewer "$record")")" == delta ]]; then
     mode=delta; base="$prev_head"
   else
     mode=full; base="$review_base"

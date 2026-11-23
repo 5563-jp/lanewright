@@ -107,7 +107,7 @@ if [[ "$prev_v" == 'VERDICT: NEEDS_FIX' ]]; then
   skip_same=0
   [[ -n "$(rvd_record_get "$record" report)" ]] || lanes_die "前回の未解決指摘本文が無い。復元してから再レビューする"
   if [[ "$requested_mode" != full ]] && ! rvd_reuse_blocked "$logdir" \
-     && [[ "$(rvd_fix_mode "$wt" "$prev_head" "$tree" "$(rvd_record_get "$record" tree)" "$review_base" "$(rvd_record_get "$record" base)")" == delta ]]; then
+     && [[ "$(rvd_fix_mode "$wt" "$prev_head" "$tree" "$(rvd_record_get "$record" tree)" "$review_base" "$(rvd_record_get "$record" base)" claude "$(rvd_record_reviewer "$record")")" == delta ]]; then
     mode=delta; base="$prev_head"
   else
     mode=full; base="$review_base"

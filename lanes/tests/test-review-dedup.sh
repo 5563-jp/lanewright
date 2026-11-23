@@ -65,14 +65,30 @@ eq mode-legacy "$(rvd_decide_mode . "$h1")" full
 eq mode-unresolved "$(rvd_decide_mode . "$h1" 'VERDICT: NEEDS_FIX' ctx ctx clean:a clean:a)" full
 eq mode-conditions "$(rvd_decide_mode . "$h1" 'VERDICT: CLEAN' ctx changed clean:a clean:a)" full
 eq mode-dirty "$(rvd_decide_mode . "$h1" 'VERDICT: CLEAN' ctx ctx dirty:a clean:a)" full
-# 前回 NEEDS_FIX の後: 前回の HEAD が祖先で、比較起点が一致し、前後とも未保存変更が無ければ delta。起点違い・起点空・同じ HEAD・旧記録・未保存変更・壊れた SHA は full
-eq fixmode-delta    "$(rvd_fix_mode . "$h1" clean:a clean:b "$h1" "$h1")" delta
-eq fixmode-basechg  "$(rvd_fix_mode . "$h1" clean:a clean:b "$(git rev-parse HEAD)" "$h1")" full
-eq fixmode-nobase   "$(rvd_fix_mode . "$h1" clean:a clean:b "$h1" '')" full
-eq fixmode-same     "$(rvd_fix_mode . "$(git rev-parse HEAD)" clean:a clean:a "$h1" "$h1")" full
-eq fixmode-dirty    "$(rvd_fix_mode . "$h1" dirty:a clean:b "$h1" "$h1")" full
-eq fixmode-legacy   "$(rvd_fix_mode . "$h1" clean:a '' "$h1" "$h1")" full
-eq fixmode-badsha   "$(rvd_fix_mode . deadbeef clean:a clean:a "$h1" "$h1")" full
+# 前回 NEEDS_FIX の後: 前回の HEAD が祖先で、比較起点とレビュー役が一致し、前後とも未保存変更が無ければ delta。起点違い・起点空・役の変更・役の不明・同じ HEAD・旧記録・未保存変更・壊れた SHA は full
+eq fixmode-delta    "$(rvd_fix_mode . "$h1" clean:a clean:b "$h1" "$h1" codex codex)" delta
+eq fixmode-basechg  "$(rvd_fix_mode . "$h1" clean:a clean:b "$(git rev-parse HEAD)" "$h1" codex codex)" full
+eq fixmode-nobase   "$(rvd_fix_mode . "$h1" clean:a clean:b "$h1" '' codex codex)" full
+eq fixmode-same     "$(rvd_fix_mode . "$(git rev-parse HEAD)" clean:a clean:a "$h1" "$h1" codex codex)" full
+eq fixmode-dirty    "$(rvd_fix_mode . "$h1" dirty:a clean:b "$h1" "$h1" codex codex)" full
+eq fixmode-legacy   "$(rvd_fix_mode . "$h1" clean:a '' "$h1" "$h1" codex codex)" full
+eq fixmode-badsha   "$(rvd_fix_mode . deadbeef clean:a clean:a "$h1" "$h1" codex codex)" full
+eq fixmode-rolechg  "$(rvd_fix_mode . "$h1" clean:a clean:b "$h1" "$h1" gemini codex)" full
+eq fixmode-roleless "$(rvd_fix_mode . "$h1" clean:a clean:b "$h1" "$h1" codex '')" full
+# 記録を残したレビュー役: 再利用の記録の last_reviewer・旧記録は last_label の証跡の見出し・証跡の記録はその見出し
+rvd_save_state logs role-a 1 "$h1" "VERDICT: NEEDS_FIX" FIX role-a-r1 ctx clean:a "$h1" "" "" 0 gemini
+eq record-reviewer-state "$(rvd_record_reviewer "$(rvd_state_file logs role-a)")" gemini
+rvd_save_state logs role-b 1 "$h1" "VERDICT: NEEDS_FIX" FIX role-b-r1
+print -r -- '## Claude レビュー証跡（role-b-r1）' > logs/role-b-r1.evidence.md
+eq record-reviewer-legacy "$(rvd_record_reviewer "$(rvd_state_file logs role-b)")" claude
+eq record-reviewer-evidence "$(rvd_record_reviewer logs/role-b-r1.evidence.md)" claude
+eq record-reviewer-none "$(rvd_record_reviewer '')" ''
+# 実装した道具: --impl-engine gemini か、logs/ の .pid に lane=gemini の実装レーンがあれば Gemini 実装（レビューの .pid は数えない）
+mkdir -p impl-logs; print -r -- $'pid=1\nlane=gemini-review' > impl-logs/r.pid
+if rvd_impl_gemini impl-logs ''; then eq impl-review-pid gemini none; else eq impl-review-pid none none; fi
+if rvd_impl_gemini impl-logs gemini; then eq impl-flag gemini gemini; else eq impl-flag none gemini; fi
+print -r -- $'pid=1\nlane=gemini' > impl-logs/i.pid
+if rvd_impl_gemini impl-logs claude; then eq impl-pid gemini gemini; else eq impl-pid none gemini; fi
 eq delta-note-base  "$(rvd_delta_note . "${h1:0:12}" 2 "$h1" | grep -c 'c2')" 1
 eq delta-note-fail  "$(rvd_delta_note . "${h1:0:12}" 2 refs/heads/no-such-branch | grep -c 'commit 一覧を取得できない')" 1
 eq delta-note-scope "$(rvd_delta_note . "${h1:0:12}" 2 | grep -c '差分の外の既存のコードは掘り返さない')" 1

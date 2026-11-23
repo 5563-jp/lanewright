@@ -333,22 +333,29 @@ rvd_evidence_reviewer() {   # <evidence.md>
   if [[ "$first" =~ '^## (Codex|Gemini|Claude) レビュー証跡' ]]; then print -r -- "${(L)match[1]}"; fi
   return 0
 }
-# <logdir> <series> → 前回のレビュー役（codex / gemini / claude）。分からなければ何も出さない。次の順で探す:
-#   1. 再利用の記録（logs/.<系列>.review-state）の last_reviewer
-#   2. 同じ記録の last_label の証跡の見出し（last_reviewer の無い旧記録）
-#   3. 系列の証跡（logs/<系列>-r<N>.evidence.md）のうち N が最大のものの見出し（記録が無いとき。失敗した回の証跡でもよい）
-rvd_prev_reviewer() {
-  local logdir="$1" series="$2" state v label f n best=-1 latest=""
-  state="$(rvd_state_file "$logdir" "$series")"
-  if [[ -f "$state" && ! -L "$state" ]]; then
-    v="$(rvd_state_get "$state" last_reviewer 2>/dev/null)" || v=""
+# <record>（rvd_prev_record の結果）→ その記録を残したレビュー役（codex / gemini / claude）。分からなければ何も出さない。
+#   再利用の記録（.review-state）なら last_reviewer、無い旧記録は last_label の証跡の見出し。証跡の記録ならその見出し
+rvd_record_reviewer() {
+  local f="$1" v label
+  [[ -n "$f" ]] || return 0
+  if [[ "$f" == *.review-state ]]; then
+    [[ -f "$f" && ! -L "$f" ]] || return 0
+    v="$(rvd_state_get "$f" last_reviewer 2>/dev/null)" || v=""
     case "$v" in codex|gemini|claude) print -r -- "$v"; return 0 ;; esac
-    label="$(rvd_state_get "$state" last_label 2>/dev/null)" || label=""
-    if [[ "$label" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' ]]; then
-      v="$(rvd_evidence_reviewer "$logdir/$label.evidence.md")"
-      if [[ -n "$v" ]]; then print -r -- "$v"; return 0; fi
-    fi
+    label="$(rvd_state_get "$f" last_label 2>/dev/null)" || label=""
+    [[ ! "$label" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' ]] || rvd_evidence_reviewer "${f:h}/$label.evidence.md"
+    return 0
   fi
+  rvd_evidence_reviewer "$f"
+}
+# <logdir> <series> → 前回のレビュー役（codex / gemini / claude）。分からなければ何も出さない。次の順で探す:
+#   1. 再利用の記録（logs/.<系列>.review-state）の last_reviewer（無い旧記録は、その記録の last_label の証跡の見出し）
+#   2. 系列の証跡（logs/<系列>-r<N>.evidence.md）のうち N が最大のものの見出し（記録が無いとき。失敗した回の証跡でもよい）
+rvd_prev_reviewer() {
+  local logdir="$1" series="$2" state v f n best=-1 latest=""
+  state="$(rvd_state_file "$logdir" "$series")"
+  v="$(rvd_record_reviewer "$state")"
+  if [[ -n "$v" ]]; then print -r -- "$v"; return 0; fi
   for f in "$logdir/$series"-r<->.evidence.md(N); do
     n="${${f:t}#"$series"-r}"; n="${n%.evidence.md}"
     if [[ "$n" == <-> && ${#n} -le 6 ]] && (( n > best )); then best=$n; latest="$f"; fi
@@ -356,13 +363,30 @@ rvd_prev_reviewer() {
   [[ -z "$latest" ]] || rvd_evidence_reviewer "$latest"
   return 0
 }
+# ---- 実装した道具（同じ道具でのレビューの禁止。入口の run-review.sh と run-gemini-review.sh が同じ判定を使う）----
+# <logdir> [--impl-engine の値] → 0 = Gemini で実装した。--impl-engine gemini か、logs/ の .pid に Gemini の実装レーン（lane=gemini）が
+# 1 つでもあれば当たり（どちらかに当たれば Gemini で実装したとみなす。--impl-engine claude でも logs/ の記録は打ち消さない。
+# 迷ったら Gemini に回さない側）。レビュー・QA の .pid（lane=gemini-review など）は数えない。logs/ が symlink なら中を読まない
+rvd_impl_gemini() {
+  local logdir="$1" impl="${2:-}" f v
+  [[ "$impl" != gemini ]] || return 0
+  [[ -d "$logdir" && ! -L "$logdir" ]] || return 1
+  for f in "$logdir"/*.pid(N.); do
+    v="$(sed -n 's/^lane=//p' "$f" 2>/dev/null)" || v=""
+    [[ "${v%%$'\n'*}" != gemini ]] || return 0
+  done
+  return 1
+}
 
 # 前回 NEEDS_FIX の後の周回（round 2 以降）は差分だけを見る（1 回目は全体・2 回目からは差分）。
-# 前回レビューした HEAD が今の HEAD の祖先で、前後とも未保存変更が無く、比較起点（今の base == 前回の base）が同じで確かめられるときだけ delta。
-# それ以外（起点変更・旧記録・同じ HEAD・枝の作り直し・未保存変更）は full。
+# 前回レビューした HEAD が今の HEAD の祖先で、前後とも未保存変更が無く、比較起点（今の base == 前回の base）と
+# レビュー役（今の役 == 前回の役。rvd_record_reviewer）が同じだと確かめられるときだけ delta。
+# それ以外（起点変更・役の変更・役の分からない記録・旧記録・同じ HEAD・枝の作り直し・未保存変更）は full。
+# 役を変えたら、新しい役は元の変更を一度も見ていないので全体を見る（前回の指摘はどちらでも引き継ぐ）。
 # 指示の変更（round 3 からの後回しの方針を含む）は前回の指摘の引き継ぎで足りるので、ここでは見ない。
-rvd_fix_mode() {   # <worktree> <前回の head> <今の tree> <前回の tree> <今の base> <前回の base> → delta / full
-  local wt="$1" prev="$2" tree="${3:-}" old_tree="${4:-}" cur_base="${5:-}" prev_base="${6:-}"
+rvd_fix_mode() {   # <worktree> <前回の head> <今の tree> <前回の tree> <今の base> <前回の base> <今の役> <前回の役> → delta / full
+  local wt="$1" prev="$2" tree="${3:-}" old_tree="${4:-}" cur_base="${5:-}" prev_base="${6:-}" cur_kind="${7:-}" prev_kind="${8:-}"
+  [[ -n "$cur_kind" && "$cur_kind" == "$prev_kind" ]] || { print -- full; return; }
   [[ -n "$prev" && -n "$cur_base" && "$cur_base" == "$prev_base" && "$tree" == clean:* && "$old_tree" == clean:* ]] || { print -- full; return; }
   git -C "$wt" rev-parse -q --verify "$prev^{commit}" >/dev/null 2>&1 || { print -- full; return; }
   [[ "$(git -C "$wt" rev-parse "$prev^{commit}")" != "$(git -C "$wt" rev-parse HEAD)" ]] || { print -- full; return; }

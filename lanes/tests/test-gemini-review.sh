@@ -3,6 +3,7 @@
 # この中で構成（LANES_TOOLS）を自分で固定するので、呼び出し元の構成には左右されない。全データを一時領域に置く。
 # 確かめること:
 #   1. 構成に gemini が無ければ exit 2・.done あり・agy を起動しない。本体 checkout・オプションの足りない agy・誤った GEMINI_REVIEW_DENY でも起動しない
+#      Gemini で実装したもの（logs/ の lane=gemini・--impl-engine gemini）は直接呼んでも起動しない（再利用より前。記録は変えない）
 #   2. agy に --sandbox / --settings（permissions.deny の固定の一覧 + GEMINI_REVIEW_DENY）/ --mode plan / stream-json / --print-timeout /
 #      --add-dir（scratch）を渡し、ANTIGRAVITY_HEADLESS=true・git の通信止め・GIT_OPTIONAL_LOCKS=0 の環境で起動する。
 #      --model / --effort は空なら付けない。.pid（lane=gemini-review）と証跡にモデルと effort が残る
@@ -11,6 +12,7 @@
 #   5. 作業ツリーの変更・git の制御ファイルの変更・再利用の記録の偽造を検出して不合格（EXIT:4）。制御ファイルの変更の後は git を呼ばない
 #   6. review-dedup の連携: r1 full → r2 delta、同じ HEAD は前回の結果を使う（--force で回す）、前回 NEEDS_FIX の引き継ぎ、
 #      round 3 以降の P2/P3 の後回し票、LANES_REVIEW_REQUIRE_CHECKS=1 と chk-run.sh の記録の使い回し。記録にレビュー役（gemini）が残る
+#      役を変えた回は前回 NEEDS_FIX でも全体を見る（前回の指摘は引き継ぐ）。対象リポの同じ名前のモジュールを親の Python が読まない
 #   7. 一時エラーは 1 回だけやり直す。出力が止まれば EXIT:8。--dry-run は記録を作らず agy を起動しない
 set -euo pipefail
 # git の環境変数を外し、一時リポの外へ git が上っていかないようにする（本物のリポを書き換えない）
@@ -99,6 +101,25 @@ GEMINI_REVIEW_DENY=$'bad\nname' grv 2 deny-bad
 has "$T/out" 'GEMINI_REVIEW_DENY'
 [[ "$(calls)" == 0 ]] || fail "誤った GEMINI_REVIEW_DENY で agy を起動した"
 pass "制御文字の入った GEMINI_REVIEW_DENY は exit 2（起動しない）"
+# Gemini で実装したもの（logs/ の .pid に lane=gemini・--impl-engine gemini）は、run-gemini-review.sh を直接呼んでも起動しない。
+# 前回の結果の再利用（同じ HEAD の省略）より前に止め、再利用の記録は変えない
+newrepo self
+STUB_AGY_RESPONSE="$CLEAN" grv 0 self-r1
+saved="$(<"$wt/logs/.self.review-state")"
+print -r -- $'pid=999999\nlane=gemini' > "$wt/logs/gimpl.pid"
+STUB_AGY_RESPONSE="$CLEAN" grv 2 self-r1
+has "$T/out" 'Gemini で実装したもの'
+hasnt "$T/out" '同じ head をもう一度レビューしない'
+has "$wt/logs/self-r1.done" 'EXIT:2'
+[[ "$(calls)" == 0 ]] || fail "Gemini で実装したものなのに agy を起動した"
+[[ "$(<"$wt/logs/.self.review-state")" == "$saved" ]] || fail "自己レビューを拒否したのに再利用の記録を変えた"
+mv "$wt/logs/gimpl.pid" "$T/gimpl.pid.save"
+STUB_AGY_RESPONSE="$CLEAN" grv 2 self-r2 --impl-engine gemini
+has "$T/out" 'Gemini で実装したもの'
+[[ "$(calls)" == 0 ]] || fail "--impl-engine gemini なのに agy を起動した"
+STUB_AGY_RESPONSE="$CLEAN" grv 2 self-r2 --impl-engine other
+has "$T/out" '--impl-engine は claude|gemini|codex'
+pass "Gemini で実装したもの（logs/ の lane=gemini・--impl-engine gemini）は直接呼んでも exit 2（再利用・起動より前。記録は変えない）"
 
 # ---- 2. 正常な起動: 引数・設定・環境・記録 ----
 newrepo ok
@@ -235,6 +256,17 @@ argcheck "前回の未解決指摘が引き継がれない" '"# 前回の未解�
 has "$L/fx-r2.evidence.md" 'モード: delta'
 has "$L/fx-r2.done" 'VERDICT: NEEDS_FIX'   # 解消の宣言が無いので通さない
 pass "前回 NEEDS_FIX の後は前回の HEAD からの delta で、未解決指摘を引き継ぐ（解消の宣言が無ければ通さない）"
+newrepo role; L="$wt/logs"
+STUB_AGY_RESPONSE=$'- [P1] a.txt:1 認証の不具合（起きる条件: 普通の入力）\\nVERDICT: NEEDS_FIX' grv 0 ro-r1
+# 前回の役が別の役（Codex）だった系列にする（--engine で役を変えて続けた場面）
+python3 -I -c 'import json, sys
+p = sys.argv[1]; d = json.load(open(p, encoding="utf-8")); d["last_reviewer"] = "codex"
+open(p, "w", encoding="utf-8").write(json.dumps(d, ensure_ascii=False) + "\n")' "$L/.ro.review-state"
+change '直した'
+STUB_AGY_RESPONSE="$CLEAN" grv 0 ro-r2
+has "$L/ro-r2.evidence.md" 'モード: full'
+argcheck "役を変えた回に前回の未解決指摘が引き継がれない" '"# 前回の未解決指摘" in a[-1] and "認証の不具合" in a[-1]' '"再レビュー（round 2・delta" not in a[-1]'
+pass "前回 NEEDS_FIX でも、役を変えた回は差分でなく全体を見る（前回の指摘は引き継ぐ）"
 newrepo fu; L="$wt/logs"
 STUB_AGY_RESPONSE=$'- [P2] 文言の残件\\nCHECKS: typecheck=NA lint=NA unit=NA build=SKIP\\nVERDICT: NEEDS_FIX' grv 0 fu-r3
 has "$L/fu-r3.done" 'VERDICT: CLEAN'; has "$L/fu-r3.done" 'gate=MERGE_WITH_FOLLOWUP'

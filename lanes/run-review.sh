@@ -63,15 +63,10 @@ if [[ -n "$engine" ]] && ! lanes_roles_has_tool "$engine"; then
 fi
 source "$LANES_DIR/review-dedup.zsh"
 
-# Gemini で実装したか（--impl-engine gemini か、logs/ の .pid に lane=gemini の実装レーンが 1 つでもある）
+# Gemini で実装したか（--impl-engine gemini か、logs/ の .pid に lane=gemini の実装レーンが 1 つでもある。
+# run-gemini-review.sh も同じ判定 review-dedup.zsh の rvd_impl_gemini を使い、直接呼ばれても自分では拒否する）
 impl_gemini=0
-[[ "$impl_engine" != gemini ]] || impl_gemini=1
-if (( ! impl_gemini )) && [[ -d "${wt:A}/logs" && ! -L "${wt:A}/logs" ]]; then
-  for pidf in "${wt:A}"/logs/*.pid(N.); do
-    lane_v="$(sed -n 's/^lane=//p' "$pidf" 2>/dev/null)" || lane_v=""
-    if [[ "${lane_v%%$'\n'*}" == gemini ]]; then impl_gemini=1; break; fi
-  done
-fi
+rvd_impl_gemini "${wt:A}/logs" "$impl_engine" && impl_gemini=1
 
 # 割合の振り分け。<割合 1〜99> <dry-run なら 1> → 標準出力に gemini か default。
 # 記録を読めない・書けない・排他を取れないときは default（構成の既定の役。今までどおりのレビュー）に倒し、理由を標準エラーに出す
