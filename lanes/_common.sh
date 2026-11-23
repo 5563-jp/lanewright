@@ -477,7 +477,7 @@ PYCHECKS
 }
 
 LANES_FINDING_RE='^[[:space:]]*(([-*+]|[0-9]+[.)])[[:space:]]+)?(\*\*)?\[P'
-# review は extract と同じ判定に「本文末尾の独立した VERDICT 行が無ければ NONE」を足したもの（Claude・Gemini のレビューランチャが使う。
+# review は extract と同じ判定に「整形前の元の本文の最後の空でない行が VERDICT 行そのものでなければ NONE」を足したもの（Claude・Gemini のレビューランチャが使う。
 # Codex のレビューは完了証明が最終判断の代わりなので codex を使う。実装・QA の自己申告は extract のまま）
 lanes_parse_review() {   # <log> <extract|review|infer|codex|checks|resolved|followups|P0|P1|P2|P3> [完了証明]
   "$LANES_PY" -I - "$1" "$2" "${3:-}" "${LANES_REVIEW_CHECKS_REUSED:-0}" <<'PYREVIEW'
@@ -634,18 +634,24 @@ success = re.search(
     r"|(?:修正が必要な(?:具体的な)?(?:不具合|問題)|新たな不具合|変更に問題|不具合|問題)は?"
     r"(?:確認できなかった|見つかりませんでした|見つからなかった)", text, re.I)
 explicit = bool(verdicts) and verdicts[-1][0] == lines[-1]
+# レビュー役（Claude・Gemini）の最終判断は、整形前の元の本文の最後の空でない行（前後の空白を除く）が
+# `VERDICT: CLEAN` か `VERDICT: NEEDS_FIX` そのものであるときだけ（表・引用・コードを除いた後の行では見ない。判定はここ 1 か所）
+raw_last = next((l.strip() for l in reversed(raw.splitlines()) if l.strip()), "")
+final_line = re.fullmatch(r"VERDICT: (CLEAN|NEEDS_FIX)", raw_last)
 if unavailable or fence is not None:
     verdict = "NONE"
 elif mode == "codex" and sys.argv[3] and not completed:
     verdict = "NONE"
-elif mode == "review" and not explicit:
-    # レビュー役（Claude・Gemini）の最終判断は、本文末尾の独立した VERDICT 行だけ。無ければ指摘の重大度から推定しない
+elif mode == "review" and final_line is None:
+    # 最後の行が判定行でなければ、指摘の重大度から推定しない
     # （推定した NEEDS_FIX が round 3 以降の後回し・昇格で CLEAN に化けないよう、ここで判定なしにする）
     verdict = "NONE"
 elif checks_missing or na_blocked or (check_lines and not checks_complete):
     verdict = "NEEDS_FIX"
 elif any(findings[:3]):
     verdict = "NEEDS_FIX"
+elif mode == "review":
+    verdict = "NEEDS_FIX" if any(v == "NEEDS_FIX" for _, v in verdicts) else final_line[1]
 elif mode != "infer" and explicit:
     verdict = "NEEDS_FIX" if any(v == "NEEDS_FIX" for _, v in verdicts) else verdicts[-1][1]
 elif completed and success and not verdicts:

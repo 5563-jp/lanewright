@@ -366,6 +366,12 @@ nvrun 3 nv-r3 $'- [P2] 判定行の無い残件'
 nvrun 0 nv-r3 $'- [P2] 判定行の無い残件\\nVERDICT: NEEDS_FIX'
 has "$L/nv-r3.done" 'VERDICT: CLEAN'; has "$L/nv-r3.done" 'gate=MERGE_WITH_FOLLOWUP'
 has "$L/nv.followups.md" '判定行の無い残件'
+# 判定行の後ろに表（検証結果など）が続く応答も、元の本文の最後の行が判定行ではないので同じく NONE（表を除いた後の行では見ない）
+newrepo nt; L="$wt/logs"; mkdir -p "$L"
+nvrun 3 nt-r3 $'- [P2] 表の前の残件\\nVERDICT: NEEDS_FIX\\n| 検証 | 結果 |\\n|---|---|\\n| unit | PASS |'
+has "$L/nt-r3.done" 'VERDICT: NONE'; has "$L/nt-r3.done" 'EXIT:3'
+hasnt "$L/nt-r3.done" 'MERGE_WITH_FOLLOWUP'
+[[ ! -e "$L/.nt.review-state" && ! -e "$L/nt.followups.md" ]] || fail "判定行の後ろに表がある応答で、再利用の記録か後回し票を残した"
 # 前回の指摘の後回し（前回 NEEDS_FIX の P2 を後回し票へ移して通す経路）も、明示の VERDICT 行が無ければ通らない
 newrepo dp; L="$wt/logs"
 STUB_AGY_RESPONSE=$'- [P2] 前回の残件\\nVERDICT: NEEDS_FIX' grv 0 dp-r2
