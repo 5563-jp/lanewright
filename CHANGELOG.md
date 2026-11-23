@@ -12,14 +12,22 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   必須検証の使い回し）・同じ終了コードの決まりで動く。agy に `--sandbox`・`--settings`（MCP・書く道具・サブエージェント・ブラウザ・Web・予約・ワークフローを拒否）・
   `--mode plan` を必ず付け、実行の記録で禁止の道具・質問の道具（`ask_*`）が呼ばれていれば不合格（`EXIT:4`）にする。
   agy は時間切れや失敗でも終了コード 0 で `status: "ERROR"` を出すことがあるので、`SUCCESS` で本文があるときだけ判定する（それ以外は `VERDICT: NONE`）。
+  `CLEAN` は必須検証の成功（成功行か親の `chk-run.sh` の記録の使い回し）を確かめたときだけ保存する。子が書けるのは作業ツリー（前後の比較で不合格）と
+  scratch の `work/` だけで、実行の記録の原本は子から書けない scratch の `record/` に置き、監査・判定は原本で行って子の終了後に `logs/` へ写す。
+  Gemini で実装したものは、`run-gemini-review.sh` を直接呼んでも起動しない（`--impl-engine` も受け付ける）。
 - `run-review.sh` に `--engine codex|gemini|claude`（レビュー役の明示）と `--impl-engine claude|gemini|codex`（実装した道具のヒント）を足した。
 - 設定 `LANES_REVIEW_GEMINI_PCT`（既定 `0`）: 新しい系列のレビューをこの割合で Gemini に回す（`50` なら既定の役と交互）。
+  同じ worktree の同じ系列に前に割り当てた役は引き継ぐ（起動前の点検で止まった系列を呼び直しても、数え方を二重に進めない）。
   同じ系列の r2 以降は前回と同じレビュー役で続ける。**Gemini で実装したもの（`--impl-engine gemini` か `logs/` の `.pid` に `lane=gemini`）は Gemini でレビューしない。**
 - 設定 `GEMINI_REVIEW_DENY`: Gemini レビューで拒否する道具を足す（固定の一覧は外せない）。
 
 ### 変えたこと / Changed
 - 再利用の記録（`logs/.<系列>.review-state`）にレビュー役（`last_reviewer`）を残すようにした（Codex・Claude のレビューとも。旧記録は証跡の見出しで判別する）。
 - 再利用の条件（`rvd_context`）に `run-gemini-review.sh` の中身を足した。上げた後の最初のレビューは、前回 `CLEAN` の系列でも 1 回 full になる。
+- 前回 `NEEDS_FIX` の後の再レビューも、レビュー役を変えた回は差分ではなく全体を見る（Codex・Claude・Gemini とも。前回の指摘は引き継ぐ）。
+- 読み取り専用の制限の設定（`CODEX_REVIEW_SANDBOX`・`CLAUDE_REVIEW_TOOLS`・`CLAUDE_REVIEW_DENY`・`GEMINI_REVIEW_DENY`）を再利用の条件に入れた。
+- ランチャ・`review-dedup.zsh`・`_common.sh`・`chk-run.sh` の `read_state` が呼ぶ Python を `python3 -I` にした（対象リポにある同じ名前のモジュールを読み込まない）。
+- 数値の設定キーは、`lanes.env` が先頭の 0 を外して整数に揃える（`LANES_REVIEW_GEMINI_PCT=0050` は `50`）。
 - 既定（`LANES_REVIEW_GEMINI_PCT=0`）のまま `--engine` を使わなければ、新しい系列のレビュー役は今までと同じ（構成の既定の役）。
   同じ系列の途中で構成（`LANES_TOOLS`）を変えたときは、前回の役が今の構成にあればその役で続ける（変えるなら `--engine` か新しい系列の label で）。
 

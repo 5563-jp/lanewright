@@ -58,6 +58,8 @@ zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> [label] [--mode auto|full|d
 | `--impl-engine claude\|gemini\|codex` | 実装した道具のヒント（`gemini` なら Gemini でレビューしない） |
 
 レビュー役（codex / claude / gemini）も再利用の条件に入るので、構成やレビュー役を変えたら前回の結果は使いません。
+前回が `NEEDS_FIX` でも、役を変えた回は前回の HEAD からの差分ではなく全体を見ます（新しい役は元の変更を見ていないため。前回の指摘は引き継ぎます）。
+読み取り専用の制限の設定（Codex の `CODEX_REVIEW_SANDBOX`、Claude の `CLAUDE_REVIEW_TOOLS` と `CLAUDE_REVIEW_DENY`、Gemini に渡す拒否の一覧）も条件に入り、変えたら同じ HEAD でもレビューし直します。
 親が同じ中身で `chk-run.sh` を通した記録があれば、どちらのレビューでも必須検証（typecheck / lint / unit）をレビューの中で回させません
 （`LANES_REVIEW_REUSE_CHECKS`。`lanes/README.md` の 6 章「必須検証の使い回し」）。何を確かめたことになるかは確認コマンドの中身次第です。
 
@@ -72,11 +74,12 @@ zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> [label] [--mode auto|full|d
 3. `LANES_REVIEW_GEMINI_PCT`（`0`〜`100`。既定 `0`）の割合で Gemini（構成に `gemini` があるときだけ）。`100` なら毎回 Gemini。
    `1`〜`99` は `${XDG_STATE_HOME:-~/.local/state}/lanewright/review-split.state` に誤差を積み上げて決めます（毎回 `acc` に割合を足し、100 以上になったら 100 を引いて Gemini）。
    `50` なら「既定の役・Gemini・既定の役・Gemini …」と厳密に交互です。記録は排他を取ってから書き、読めない・書けないときは既定の役に倒します。`--dry-run` は記録を進めません（次に選ぶ役を見せるだけ）。
+   同じ worktree の同じ系列に前に割り当てた役があれば、それを引き継いで数え方を進めません（振り分け先の起動前の点検、たとえば必須検証の記録が無くて止まった系列を、直して呼び直しても別の役にならない）。
 4. 構成の既定のレビュー役（`LANES_ROLE_REVIEW`。① Codex / ③ Claude）。
 
 **同じ道具でのレビューの禁止**: Gemini で実装したものは Gemini でレビューしません。`--impl-engine gemini` か、`logs/` の `.pid` に Gemini の実装レーン（`lane=gemini`）が 1 つでもあれば Gemini で実装したとみなします
 （どちらかに当たれば。`--impl-engine claude` でも `logs/` の記録は打ち消しません。迷ったら Gemini に回さない側に倒します）。
-そのとき `--engine gemini` は exit 2、2 と 3 では Gemini を選ばず構成の既定の役へ逃がします。ほかの組み合わせ（③④ で Claude の実装を Claude がレビューする、など）は今までどおりです。
+そのとき `--engine gemini` は exit 2、2 と 3 では Gemini を選ばず構成の既定の役へ逃がします。`run-gemini-review.sh` を直接呼んでも同じ判定（`--impl-engine` も受け付けます）で、前回の結果の再利用・起動より前に止まります（exit 2）。ほかの組み合わせ（③④ で Claude の実装を Claude がレビューする、など）は今までどおりです。
 
 Gemini のレビュー（`run-gemini-review.sh`）は、Codex・Claude のレビューと同じ入口・同じ判定・同じ終了コードの決まりで動き、読み取り専用を次のように担保します:
 
@@ -85,11 +88,17 @@ Gemini のレビュー（`run-gemini-review.sh`）は、Codex・Claude のレビ
 - 実行の記録（stream-json）を監査し、禁止の道具か質問の道具（`ask_*`）が 1 回でも呼ばれていれば、本文に関係なく不合格（`EXIT:4`・`VERDICT: NEEDS_FIX`）にします。名前から書き込みと分かる道具（`write`・`edit`・`delete` などを含む名前）も禁止として数えます。
 - agy は時間切れや失敗でも終了コード 0 で `status: "ERROR"` の結果を出すことがあるので、結果がちょうど 1 つで最後にあり、`status` が `SUCCESS`、本文が空でないときだけ判定します。それ以外（`ERROR`・空の応答・結果が無い・JSON の破損）は `VERDICT: NONE`（`EXIT:3`）で、エラーの本文からは `VERDICT` を拾いません。
 - 子の前後で作業ツリー・git の管理フォルダ（設定・hooks・タグ・stash）・再利用の記録を比べ、変わっていれば不合格（`EXIT:4`）。git の制御ファイル（`.git`・`config`・hooks など）が変わったら、git を 1 回も呼ばずに止めます。本体の checkout（`.git` がフォルダ）では起動しません（`run-gemini.sh` と同じく専用の worktree が前提）。
-- 子の git は通信（push・fetch）を止め（`GIT_ALLOW_PROTOCOL`）、任意のロックを取らない設定（`GIT_OPTIONAL_LOCKS=0`）で動かします。書けるのは scratch（`--add-dir`）だけです。
-- 見張りは `run-gemini.sh` と同じです（出力が `GEMINI_NOOUTPUT_SEC` 秒止まれば `EXIT:8`。全体の上限は `GEMINI_REVIEW_PRINT_TIMEOUT`、無ければ `GEMINI_PRINT_TIMEOUT`、既定 `75m`）。作業ツリーの変わらない一時エラー（503 など）だけ 1 回やり直します。
+- 子の git は通信（push・fetch）を止め（`GIT_ALLOW_PROTOCOL`）、任意のロックを取らない設定（`GIT_OPTIONAL_LOCKS=0`）で動かします。管理フォルダは作業場所から見つけます（`GIT_DIR` / `GIT_WORK_TREE` は渡さないので、scratch に写した使い捨てのコピーの中ではそのコピーを見ます）。
+- 書き込みは、防ぐ範囲と後から見つける範囲に分かれます。ファイルを書く道具は拒否の一覧と監査で防ぎます。端末のコマンドはサンドボックスの中で動き、書けるのは**作業ツリー**と scratch の **`work/`**（`--add-dir`・`LANES_SCRATCH`・`TMPDIR`）です。
+  作業ツリーへの書き込みは防げず、前後の比較で見つけて不合格にします（元には戻しません。守りたい未保存の変更は commit してからレビューに回します）。`work/` の中は比べません。
+  実行の記録の原本（scratch の `record/`）・子の git 用の設定・設定の写しは scratch の直下にあり、子からは書けません。監査と判定は原本で行い、子の終了後にだけ `logs/` へ写します（写せなければ合格を保存せず `EXIT:3`・`VERDICT: NONE`）。実行中の `logs/<label>.json` などは状態の確認用の写しです。
+- `CLEAN` を保存するのは、必須検証の成功行（`CHECKS:`）か、親の `chk-run.sh` の記録の使い回しで成功を確かめたときだけです（どちらも無ければ `NEEDS_FIX`）。
+- 子の git は最小の設定で動くので、commit の作者の照合は親が元の有効な設定（利用者の共通設定を含む）で行い、一致・不一致の数だけを指示書に入れます（名前・メールの値は渡しません）。
+- 親の補助処理（Python）は `python3 -I` で動かし、レビュー対象のリポにある同じ名前のモジュールを読み込みません。
+- 見張りは `run-gemini.sh` と同じです（出力が `GEMINI_NOOUTPUT_SEC` 秒止まれば `EXIT:8`。全体の上限は `GEMINI_REVIEW_PRINT_TIMEOUT`、無ければ `GEMINI_PRINT_TIMEOUT`、既定 `75m`。単位なしは秒）。作業ツリーの変わらない一時エラー（503 など）だけ 1 回やり直し、やり直しには初回の開始から数えた残り時間だけを渡します（残りが全体の 1 割未満ならやり直しません）。
 
 限界: 監査は「呼ばれた道具の名前」を後から見るもので、拒否された呼び出しも違反として数えます（読み取り専用の約束を指示書に書いているので、普通は呼ばれません）。
-端末のコマンドはサンドボックスの中で動き、worktree と scratch に書けてしまいます。worktree への書き込みは前後の比較で見つけますが、scratch の中は比べません。
+書き込みを防げるのは上に書いた範囲だけで、作業ツリーへの書き込みは後から見つけるだけです（上の「書き込みは、防ぐ範囲と後から見つける範囲に分かれます」）。
 
 ### Claude と Gemini の分け方（①③）
 
