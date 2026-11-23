@@ -279,7 +279,8 @@ export LANES_CHECKS_PRESENT="$checks_present"
 if (( conv_rc != 0 )); then
   verdict="VERDICT: NONE"
 else
-  verdict="$(lanes_extract_verdict "$log")"
+  # 最終判断は本文末尾の明示の VERDICT 行だけ（無ければ NONE。run-gemini-review.sh と同じ lanes_parse_review の review）
+  verdict="$(lanes_review_verdict "$log")"
 fi
 [[ "$verdict" == "VERDICT: PASS" ]] && verdict="VERDICT: CLEAN"
 (( rc == 0 )) || verdict="VERDICT: NONE"   # claude が非 0 で終わった本文の VERDICT は採用しない

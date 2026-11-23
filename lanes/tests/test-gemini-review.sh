@@ -320,6 +320,38 @@ STUB_AGY_RESPONSE=$'- [P2] 文言の残件\\nCHECKS: typecheck=NA lint=NA unit=N
 has "$L/fu-r3.done" 'VERDICT: CLEAN'; has "$L/fu-r3.done" 'gate=MERGE_WITH_FOLLOWUP'
 has "$L/fu.followups.md" '文言の残件'
 pass "round 3 以降の P2 は後回し票に保存して通す（必須検証の成功行あり）"
+# 最終の VERDICT 行が無い応答は、round 3 以降・必須検証の使い回し（COMPLETE）・P2 だけでも合格に昇格しない
+# （EXIT:3・VERDICT: NONE。後回し票・再利用の記録を残さず、次の起動も同じ head の結果として省略しない）。
+# 親の chk-run.sh はレビューと同じ環境で回す（入力の指紋に環境変数が入る）
+newrepo nv; L="$wt/logs"; mkdir -p "$L"
+nvrun() {   # <期待の終了コード> <label> <応答>
+  ( export LANES_CHECK_CMD=/usr/bin/true STUB_AGY_RESPONSE="$3"
+    out="$(bash "$LANES_DIR/chk-run.sh" "$wt" 49993 "$T/chk-nv" 2>&1)" || { print -u2 -r -- "$out"; fail "chk-run.sh が失敗"; }
+    grv "$1" "$2" )
+}
+nvrun 3 nv-r3 $'- [P2] 判定行の無い残件'
+has "$L/nv-r3.done" 'VERDICT: NONE'; has "$L/nv-r3.done" 'EXIT:3'
+has "$L/nv-r3.evidence.md" '親の chk-run の記録を使用'
+[[ ! -e "$L/.nv.review-state" ]] || fail "最終の VERDICT 行が無いのに再利用の記録を残した"
+[[ ! -e "$L/nv.followups.md" ]] || fail "最終の VERDICT 行が無いのに後回し票に保存した"
+nvrun 3 nv-r3 $'- [P2] 判定行の無い残件'
+[[ "$(calls)" == 1 ]] || fail "最終の VERDICT 行が無かった回を、同じ head の結果として省略した"
+nvrun 0 nv-r3 $'- [P2] 判定行の無い残件\\nVERDICT: NEEDS_FIX'
+has "$L/nv-r3.done" 'VERDICT: CLEAN'; has "$L/nv-r3.done" 'gate=MERGE_WITH_FOLLOWUP'
+has "$L/nv.followups.md" '判定行の無い残件'
+# 前回の指摘の後回し（前回 NEEDS_FIX の P2 を後回し票へ移して通す経路）も、明示の VERDICT 行が無ければ通らない
+newrepo dp; L="$wt/logs"
+STUB_AGY_RESPONSE=$'- [P2] 前回の残件\\nVERDICT: NEEDS_FIX' grv 0 dp-r2
+change '直した'
+STUB_AGY_RESPONSE=$'- [P2] 今回の残件\\nCHECKS: typecheck=NA lint=NA unit=NA build=SKIP' grv 3 dp-r3
+has "$L/dp-r3.done" 'VERDICT: NONE'
+[[ "$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["last_verdict"])' "$L/.dp.review-state")" == 'VERDICT: NEEDS_FIX' ]] \
+  || fail "最終の VERDICT 行が無い回で、前回の NEEDS_FIX の記録を書き換えた"
+[[ ! -e "$L/dp.followups.md" ]] || fail "最終の VERDICT 行が無いのに前回の指摘を後回し票へ移した"
+STUB_AGY_RESPONSE=$'- [P2] 今回の残件\\nCHECKS: typecheck=NA lint=NA unit=NA build=SKIP\\nVERDICT: NEEDS_FIX' grv 0 dp-r3
+has "$L/dp-r3.done" 'VERDICT: CLEAN'; has "$L/dp-r3.done" 'gate=MERGE_WITH_FOLLOWUP'
+has "$L/dp.followups.md" '前回の残件'
+pass "最終の VERDICT 行が無い応答は、round 3 以降・必須検証の使い回し・P2 だけでも EXIT:3・NONE（後回し・昇格・前回の指摘の後回し・記録の保存をしない）。明示の NEEDS_FIX なら今までどおり後回しで通す"
 newrepo chk; L="$wt/logs"
 mkdir -p "$L"   # logs/ が無い初回の起動では .done を作らない決まりなので、先に作っておく（logs/ は git に無視されている）
 export LANES_CHECK_CMD=/usr/bin/true STUB_AGY_RESPONSE="$CLEAN"

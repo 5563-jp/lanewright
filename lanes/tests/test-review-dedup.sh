@@ -612,6 +612,12 @@ r, argv, done = launch(wt, 'cf4-r3', claude=True, body='- [P1] 重大\n'+skip_li
 check('Claude-round3のP1はSTOP', 'VERDICT: NEEDS_FIX' in done and 'gate=STOP_P0P1' in done)
 r, argv, done = launch(wt, 'cf5', claude=True, args=('--round', '3'), body='- [P3] 軽微\n'+skip_line+'\nVERDICT: CLEAN')
 check('Claude---roundでも後回し票', 'VERDICT: CLEAN' in done and '軽微' in (wt / 'logs' / 'cf5.followups.md').read_text())
+# 最終の VERDICT 行が無い本文は、round 3 以降・必須検証の成功行あり・P2 だけでも合格に昇格しない（EXIT:3・NONE。記録と後回し票なし）
+r, argv, done = launch(wt, 'cf6-r3', claude=True, body='- [P2] 判定行の無い残件\n'+skip_line)
+check('Claude-明示のVERDICT行が無ければNONE', r.returncode == 3 and 'VERDICT: NONE' in done
+      and not (wt / 'logs' / '.cf6.review-state').exists() and not (wt / 'logs' / 'cf6.followups.md').exists())
+r, argv, done = launch(wt, 'cf6-r3', claude=True, body='- [P2] 判定行の無い残件\n'+skip_line)
+check('Claude-判定なしの回を同じheadの結果に使わない', argv is not None and r.returncode == 3)
 # 子が再利用の記録を偽造したら元に戻して不合格（Codex と同じ）
 wt, base = repo('claude-forge-state')
 launch(wt, 'review-r1', claude=True)

@@ -459,7 +459,9 @@ PYCHECKS
 }
 
 LANES_FINDING_RE='^[[:space:]]*(([-*+]|[0-9]+[.)])[[:space:]]+)?(\*\*)?\[P'
-lanes_parse_review() {   # <log> <extract|infer|codex|checks|resolved|followups|P0|P1|P2|P3> [完了証明]
+# review は extract と同じ判定に「本文末尾の独立した VERDICT 行が無ければ NONE」を足したもの（Claude・Gemini のレビューランチャが使う。
+# Codex のレビューは完了証明が最終判断の代わりなので codex を使う。実装・QA の自己申告は extract のまま）
+lanes_parse_review() {   # <log> <extract|review|infer|codex|checks|resolved|followups|P0|P1|P2|P3> [完了証明]
   "$LANES_PY" -I - "$1" "$2" "${3:-}" "${LANES_REVIEW_CHECKS_REUSED:-0}" <<'PYREVIEW'
 import hashlib, json, os, pathlib, re, sys
 mode = sys.argv[2]
@@ -613,15 +615,20 @@ success = re.search(
     r"|\bdid not find any (?:discrete, actionable )?(?:bugs|issues)\b"
     r"|(?:修正が必要な(?:具体的な)?(?:不具合|問題)|新たな不具合|変更に問題|不具合|問題)は?"
     r"(?:確認できなかった|見つかりませんでした|見つからなかった)", text, re.I)
+explicit = bool(verdicts) and verdicts[-1][0] == lines[-1]
 if unavailable or fence is not None:
     verdict = "NONE"
 elif mode == "codex" and sys.argv[3] and not completed:
+    verdict = "NONE"
+elif mode == "review" and not explicit:
+    # レビュー役（Claude・Gemini）の最終判断は、本文末尾の独立した VERDICT 行だけ。無ければ指摘の重大度から推定しない
+    # （推定した NEEDS_FIX が round 3 以降の後回し・昇格で CLEAN に化けないよう、ここで判定なしにする）
     verdict = "NONE"
 elif checks_missing or na_blocked or (check_lines and not checks_complete):
     verdict = "NEEDS_FIX"
 elif any(findings[:3]):
     verdict = "NEEDS_FIX"
-elif mode != "infer" and verdicts and verdicts[-1][0] == lines[-1]:
+elif mode != "infer" and explicit:
     verdict = "NEEDS_FIX" if any(v == "NEEDS_FIX" for _, v in verdicts) else verdicts[-1][1]
 elif completed and success and not verdicts:
     verdict = "CLEAN"
@@ -631,6 +638,7 @@ print("VERDICT: " + verdict)
 PYREVIEW
 }
 lanes_extract_verdict() { lanes_parse_review "$1" extract; }
+lanes_review_verdict() { lanes_parse_review "$1" review; }
 lanes_count_findings() { lanes_parse_review "$1" "$2"; }
 lanes_infer_verdict() { lanes_parse_review "$1" infer; }
 lanes_codex_verdict() { lanes_parse_review "$1" codex "${2:-}"; }
