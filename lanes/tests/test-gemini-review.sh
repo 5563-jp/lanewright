@@ -642,5 +642,20 @@ GRV_PROMPT="$T/prompt-blame.md" STUB_AGY_RESPONSE="$CLEAN" grv 0 nm-blame --mode
 has "$L/nm-blame.prompt.md" '経緯は `git blame a.txt` で見る'
 has "$L/nm-blame.done" 'VERDICT: CLEAN'
 pass "案件固有の指示に git blame などがあっても、指示書を書き換えず・起動を拒否せずに渡す（使わない約束は子への指示で伝える）"
+# 比較起点（統合先の枝）がこの枝より先に進んでいても、埋め込む変更統計は分岐点からの変更だけ（統合先だけの変更を逆向きに含めない）
+newrepo ahead; L="$wt/logs"
+change '枝の変更'
+print -r -- '統合先だけ' > "$base/dev-only.txt"; git -C "$base" add -A
+git -C "$base" -c user.name="Test User" -c user.email=you@example.com -c commit.gpgSign=false commit -qm 'test: 統合先だけの変更'
+git -C "$wt" update-ref refs/remotes/origin/develop "$(git -C "$base" rev-parse HEAD)"
+STUB_AGY_RESPONSE="$CLEAN" grv 0 ah --dry-run
+python3 -I - "$L/ah.dry-run.prompt.md" <<'PY' || fail "統合先が先に進んだとき、埋め込む範囲の commit・変更統計が分岐点からの変更になっていない"
+import sys
+t = open(sys.argv[1], encoding="utf-8").read()
+hist = t.split("# レビュー範囲の commit と変更統計（ランチャが作った。作者は含まない）")[1].split("\n# ")[0]
+assert "test: 枝の変更" in hist and "a.txt" in hist, hist
+assert "dev-only.txt" not in hist and "統合先だけの変更" not in hist, hist
+PY
+pass "比較起点が先に進んでいても、埋め込む commit の一覧と変更統計はこの枝の変更だけ（変更統計は分岐点からの差分）"
 
 print -r -- "PASS: $count 件 / EXIT:0"

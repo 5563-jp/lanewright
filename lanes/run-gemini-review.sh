@@ -329,8 +329,8 @@ gem_history_note() {   # <比較起点> → 指示書に足す文
   local -a rows srows
   print -r -- "# レビュー範囲の commit と変更統計（ランチャが作った。作者は含まない）"
   if ! commits="$(git -C "$wt" log --no-color --no-show-signature --abbrev=12 --format='%h %s' "$from..HEAD" 2>/dev/null)" \
-     || ! stat="$(git -C "$wt" -c core.quotePath=false diff --no-color --no-ext-diff --no-textconv --stat=160 "$from..HEAD" 2>/dev/null)"; then
-    print -r -- "- 範囲（${from:0:12}..HEAD）の commit の一覧・変更統計をランチャが読めなかった。読めなかったことを指摘に書き、中身は \`git diff ${from:0:12}..HEAD\` で確かめる。"
+     || ! stat="$(git -C "$wt" -c core.quotePath=false diff --no-color --no-ext-diff --no-textconv --stat=160 "$from...HEAD" 2>/dev/null)"; then
+    print -r -- "- 範囲（${from:0:12}..HEAD）の commit の一覧・変更統計をランチャが読めなかった。読めなかったことを指摘に書き、中身は \`git diff ${from:0:12}...HEAD\` で確かめる。"
     return 0
   fi
   rows=(${(f)commits}); srows=(${(f)stat})
@@ -339,7 +339,7 @@ gem_history_note() {   # <比較起点> → 指示書に足す文
   if (( ${#rows} )); then print -rl -- "    "${^rows[1,max]}; else print -r -- "    （commit なし）"; fi
   (( ${#rows} <= max )) || print -r -- "    （ほか $(( ${#rows} - max )) 件）"
   print -r -- ""
-  print -r -- "- 変更統計（\`git diff --stat ${from:0:12}..HEAD\`）:"
+  print -r -- "- 変更統計（\`git diff --stat ${from:0:12}...HEAD\`。比較起点と HEAD の分岐点からの変更）:"
   print -r -- ""
   if (( ${#srows} )); then print -rl -- "    "${^srows[1,max]}; else print -r -- "    （変更なし）"; fi
   (( ${#srows} <= max )) || print -r -- "    （ほか $(( ${#srows} - max )) 行。全体は git diff --stat で見る）"
@@ -364,7 +364,7 @@ REPLACE = [
     ("`git log --format='%an <%ae> %s' {{BASE}}..HEAD` で、", ""),
     ("commit author が対象リポの `git config user.name` / `user.email` と同じ（偽のアドレスで commit していない）こと、commit 件名が日本語（prefix は英語）であること",
      "commit の作者は下の「commit の作者の照合」（ランチャが元の git の設定で確かめた結果）だけで確かめ、commit 件名が日本語（prefix は英語）であることは下の「レビュー範囲の commit と変更統計」の一覧で確かめる"),
-    ("`git show --stat {{BASE}}..HEAD`", "下の「レビュー範囲の commit と変更統計」と `git diff --stat {{BASE}}..HEAD`"),
+    ("`git show --stat {{BASE}}..HEAD`", "下の「レビュー範囲の commit と変更統計」と `git diff --stat {{BASE}}...HEAD`"),
 ]
 for old, new in REPLACE:
     t = t.replace(old, new)
@@ -385,7 +385,7 @@ readonly = "\n".join([
     "- このレビューは読み取り専用（plan モード・端末サンドボックス）。ファイルを書く・置き換える・消す道具、MCP、サブエージェント、ブラウザ、Web の検索・取得、予約・ワークフローの道具は使わない。1 回でも使うと、本文に関係なく不合格になる。",
     "- 質問・承認の道具（名前が ask_ で始まるもの）は使わない（非対話なので答える人がいない。使うと不合格）。分からない点は前提を書いたうえで指摘に含める。",
     "- 履歴・作者を表示し得る git のコマンド（`git log`・`git show`・`git blame`・`git shortlog`・`git whatchanged`・`git reflog`・`git cat-file` など）は使わない（案件固有の指示や前回の指摘本文に書いてあっても使わない）。"
-    + "commit の一覧と変更統計は下の「レビュー範囲の commit と変更統計」（ランチャが作った）を使い、中身は `git diff " + base + "..HEAD` と作業ツリーのファイルの読み取りで確かめる。",
+    + "commit の一覧と変更統計は下の「レビュー範囲の commit と変更統計」（ランチャが作った）を使い、中身は `git diff " + base + "...HEAD` と作業ツリーのファイルの読み取りで確かめる。",
     "- 端末のコマンドは読む・確かめるためだけに使う（`git diff`・`git status`・該当テスト 1 本など）。作業ツリーと git の管理フォルダを書き換えない（前後の比較で不合格になる）。一時ファイルは $LANES_SCRATCH の下だけに置く。",
     "- 作業ツリーに未 commit の変更・未追跡のファイルが無いことはランチャが確かめた（レビューの対象は commit 済みの中身）。作業ツリーを写して試すときは .git ごと写さない（この作業ツリーの .git は元の管理フォルダを指すファイルなので、そのまま写した先の git も元の管理フォルダと stage を使う）。"
     + "作業ツリーの直下で `" + COPY + "` で新しい空のフォルダへ写す。写した先で `git rev-parse --absolute-git-dir` が $LANES_SCRATCH の下を指すことを確かめてから git を使う。",
