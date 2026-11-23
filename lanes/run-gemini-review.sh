@@ -19,8 +19,10 @@
 #   - 子の git は通信（push・fetch）を止め（GIT_ALLOW_PROTOCOL）、任意のロックを取らない（GIT_OPTIONAL_LOCKS=0）。
 #     管理フォルダは作業場所（cwd）から見つける（GIT_DIR / GIT_WORK_TREE は渡さない。scratch に写したコピーの中ではそのコピーを見る）
 #   - 子（agy と端末のコマンド）が書けるのは、作業ツリー（前後の比較で不合格）と scratch の work/（--add-dir・LANES_SCRATCH・TMPDIR）だけ。
-#     実行の記録の原本（scratch の record/）・子の git 用の gitconfig・設定の写しは scratch の直下に置き、子から書けない。
-#     監査と判定は原本で行い、子の終了後にだけ logs/ へ写す（写せなければ合格を保存しない。EXIT:3・VERDICT: NONE）
+#     実行の記録の原本（scratch の record.<実行ごと>/。mktemp -d で実行ごとに新しく作り、前の実行の原本は消さない）・子の git 用の
+#     gitconfig・設定の写しは scratch の直下に置き、子から書けない。子に渡す指示書も原本の置き場所に一度だけ書いて固定し、
+#     やり直しを含む全部の試行と最後の証跡で同じものを使う。監査と判定は原本で行い、子の終了後にだけ logs/ へ写す
+#     （写せなければ合格を保存しない。EXIT:3・VERDICT: NONE。原本は同じ label で起動し直しても残る）
 #   - 子の git は最小の設定で動くので、commit の作者の照合は親が元の有効な設定で行い、件数と一致しない commit の番号だけを指示書に入れる
 #     （名前・メールは渡さず、テンプレの作者の確認の項目もこの結果を使う指示に置き換える）。作者の設定の指紋は再利用の条件に入る（rvd_context）
 # 判定: agy は時間切れ（--print-timeout）や失敗でも終了コード 0 で {"event":"result","result":{"status":"ERROR",...}} を出すことがある。
@@ -30,11 +32,13 @@
 # 見張り（run-gemini.sh と同じ）: json / stderr が GEMINI_NOOUTPUT_SEC（既定 600）秒止まれば EXIT:8。idle のまま子が無ければ EXIT:3。
 #   全体の上限は agy の --print-timeout（GEMINI_REVIEW_PRINT_TIMEOUT、無ければ GEMINI_PRINT_TIMEOUT、既定 75m。単位なしは秒）。
 #   作業ツリーが変わっていない一時エラー（503 / UNAVAILABLE / interrupted）だけ 1 回やり直す（1 回目は <label>.try1.json / .try1.stderr.log）。
-#   やり直しには、初回の開始から数えた残り時間だけを --print-timeout で渡す（残りが全体の 1 割未満ならやり直さない）
-# 出力: <worktree>/logs/<label>.log（見張りの記録と本文）/ <label>.json（生。stream-json）/ <label>.stderr.log（この 3 つと try1 は record/ の原本の写し）
-#       / <label>.prompt.md（実際に渡した全文。dry-run は <label>.dry-run.prompt.md）/ <label>.evidence.md（PR 貼り付け用）
+#   やり直しには、初回の開始から数えた残り時間だけを --print-timeout で渡す。残り時間は作業ツリーの比較とエラーの確認を終えた後、
+#   2 回目を起動する直前に求める（残りが全体の 1 割未満ならやり直さない）
+# 出力: <worktree>/logs/<label>.log（見張りの記録と本文）/ <label>.json（生。stream-json）/ <label>.stderr.log（この 3 つと try1 は record.<実行ごと>/ の原本の写し）
+#       / <label>.prompt.md（実際に渡した全文の写し。dry-run は <label>.dry-run.prompt.md）/ <label>.evidence.md（PR 貼り付け用）
 #       / <label>.pid（起動時）/ <label>.done（終了時）/ .<系列>.review-state / <系列>.followups.md
-#       scratch の直下には gemini-settings.json（渡した設定の写し）・子の git 用の gitconfig・record/（記録の原本）を置き、子が書ける work/ と分ける
+#       scratch の直下には gemini-settings.json（渡した設定の写し）・子の git 用の gitconfig・record.<実行ごと>/（記録と指示書の原本）を
+#       置き、子が書ける work/ と分ける
 # 最終行は必ず VERDICT: CLEAN | NEEDS_FIX | NONE。終了コード: 0 / 2=引数・前提 / 3=agy の異常・判定なし / 4=監査・変更の検出
 #   / 5=logs/ の差し替え / 8=無出力で停止 / それ以外の非 0 = agy の終了コード
 set -euo pipefail
@@ -210,10 +214,9 @@ fi
 mkdir -p "$logdir"
 (( ! dry )) || lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
 # レーン専用の作業場所（scratch）。マージ後 cleanup が消す。子に渡すのは中の work/ だけ（--add-dir・LANES_SCRATCH・TMPDIR）。
-# 記録の原本の record/・gitconfig・設定の写しは scratch の直下に置き、子から書けないようにする
+# 記録の原本の record.<実行ごと>/・gitconfig・設定の写しは scratch の直下に置き、子から書けないようにする
 if (( dry )); then scratch="$(lanes_scratch_path "$wt" "$label")"; else lanes_scratch_prepare "$wt" "$label" gemini-review; scratch="$LANES_SCRATCH"; fi
-work="$scratch/work"; rec="$scratch/record"
-plog="$rec/$label.log"; pjson="$rec/$label.json"; perr="$rec/$label.stderr.log"; pjson1="$rec/$label.try1.json"; perr1="$rec/$label.try1.stderr.log"
+work="$scratch/work"
 
 lanes_check_gemini_subscription
 # --sandbox が無効になる環境では走らせない。対象は Mac の端末サンドボックス（run-gemini.sh と同じ確かめ）
@@ -240,8 +243,19 @@ gitlink="$wt/.git"
 for gd in "$gitdir" "$gitcommon"; do
   [[ "${gd:A}/" != "${wt:A}/"* && "${gd:A}/" != "${scratch:A}/"* ]] || lanes_die "Git 管理領域が worktree / scratch の中にある → 起動禁止: $gd"
 done
-# scratch が worktree の中にあると、子が記録の原本（record/）を書き換えられる
+# scratch が worktree の中にあると、子が記録の原本（record.<実行ごと>/）を書き換えられる
 [[ "${scratch:A}/" != "${wt:A}/"* ]] || lanes_die "scratch が worktree の中にある → 起動禁止（記録の原本を子から守れない。LANES_SCRATCH_ROOT を worktree の外にする）: $scratch"
+# 記録の原本の置き場所（scratch の直下・子から書けない）は、実行ごとに新しいフォルダを作る（mktemp -d。名前が重ならず、中は空）。
+# 前の実行の原本（logs/ へ写せなかったときは唯一の記録）は消さない。消すのはマージ後の後片付け（scratch ごと）。
+# 子に渡す指示書もここに一度だけ書いて固定し、やり直しを含む全部の試行と最後の証跡で同じものを使う（logs/ の写しは見るためだけ）
+if (( dry )); then
+  rec="$scratch/record.<実行ごと>"
+else
+  rec="$(mktemp -d "$scratch/record.XXXXXXXX" 2>/dev/null)" && [[ -d "$rec" && ! -L "$rec" ]] \
+    || lanes_die "記録の原本の置き場所（scratch の record.*/）を作れない: $scratch"
+fi
+plog="$rec/$label.log"; pjson="$rec/$label.json"; perr="$rec/$label.stderr.log"; pjson1="$rec/$label.try1.json"; perr1="$rec/$label.try1.stderr.log"
+pprompt="$final"; (( dry )) || pprompt="$rec/$label.prompt.md"   # 子に渡す指示書（dry-run は logs/ の .dry-run.prompt.md だけ）
 
 template="$LANES_DIR/templates/claude-review-$mode.md"
 [[ -s "$template" ]] || lanes_die "テンプレが無い: $template"
@@ -290,11 +304,12 @@ gem_author_note() {   # <比較起点> → 指示書に足す文
 author_note="$(gem_author_note "$base")"
 
 # テンプレ（役名だけ Gemini に読み替え）+ 置き場所 + 読み取り専用の約束 + 案件固有の指示 + レビューの出し方（Codex と同じ観点）
-# + ランチャの追記（delta の説明・前回の未解決指摘・受け入れ済みの限界・必須検証のきまり）を結合して、実際に渡した全文を残す
-# 書き込みは logs/ を symlink を辿らずに開き、その中に新しいファイルを作ってから名前を置き換える（dry-run でも、既存の名前が
-# リンクならその先を書き換えない）
-LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" "$LANES_PY" -I - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" \
-    "$work" "$scratch_rule" "$(rvd_checks_rule)" "$focus" "$delta_note" "$unresolved_note" "$author_note" <<'PY' || lanes_die "結合したプロンプトを書けない（logs/ が symlink・書けない など）: $final"
+# + ランチャの追記（delta の説明・前回の未解決指摘・受け入れ済みの限界・必須検証のきまり）を結合して、実際に渡す全文を作る。
+# 書く先は記録の原本の置き場所（$pprompt。子から書けない）で、全部の試行がこれを読む。logs/ の <label>.prompt.md はその写し。
+# dry-run は logs/ の <label>.dry-run.prompt.md に書く。書き込みは書く先のフォルダを symlink を辿らずに開き、その中に新しい
+# ファイルを作ってから名前を置き換える（既存の名前がリンクならその先を書き換えない）
+LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" "$LANES_PY" -I - "$template" "$prompt" "$pprompt" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" \
+    "$work" "$scratch_rule" "$(rvd_checks_rule)" "$focus" "$delta_note" "$unresolved_note" "$author_note" <<'PY' || lanes_die "結合したプロンプトを書けない（logs/ が symlink・書けない など）: $pprompt"
 import os, re, sys, pathlib
 (tpl, case, out, wt, branch, head, base, mode, date, scratch, rule, checks_rule, focus, delta_note, unresolved, author) = sys.argv[1:17]
 t = pathlib.Path(tpl).read_text(encoding="utf-8")
@@ -341,9 +356,11 @@ except BaseException:
     raise
 PY
 # プロンプトは agy の引数で渡す（-p）。引数の長さの上限（macOS は環境変数と合わせて約 1MB）に当たる前に止める
-prompt_bytes=$(wc -c < "$final" | tr -d ' ')
+prompt_bytes=$(wc -c < "$pprompt" | tr -d ' ')
 [[ "$prompt_bytes" == <-> ]] && (( prompt_bytes <= 800000 )) \
-  || lanes_die "結合したプロンプトが大きすぎて agy の引数に渡せない（${prompt_bytes} bytes。前回の指摘本文が大きいなら --mode full --force でやり直す）: $final"
+  || lanes_die "結合したプロンプトが大きすぎて agy の引数に渡せない（${prompt_bytes} bytes。前回の指摘本文が大きいなら --mode full --force でやり直す）: $pprompt"
+# 人が見るための写しを logs/ に置く（子の起動前。子の終了後に gem_publish が原本で置き換える）
+if (( ! dry )); then lanes_fresh_file "$final"; cp -- "$pprompt" "$final" || lanes_die "渡す指示書の写しを logs/ に置けない: $final"; fi
 
 settings_copy="$scratch/gemini-settings.json"
 if (( ! dry )); then lanes_fresh_file "$settings_copy"; print -r -- "$gem_settings" > "$settings_copy"; fi
@@ -355,18 +372,16 @@ if [[ -n "$GEMINI_EFFORT" ]]; then cmd+=(--effort "$GEMINI_EFFORT"); fi
 cmd+=(--output-format stream-json)   # 続けて run_agy_once が --print-timeout（残り時間）・--add-dir（work/）・-p（指示書）を付ける
 if (( dry )); then
   print -- "[dry-run] series=$series round=$round mode=$mode base=$base prev_head=${prev_head:0:12}（判定 $decided）/ 必須検証の使い回し: $RVD_CHECKS_REUSE"
-  print -- "[dry-run] scratch: $scratch（子が書けるのは work/ だけ: TMPDIR / LANES_SCRATCH / --add-dir。記録の原本は record/）/ 拒否の一覧 ${deny_n} 件"
+  print -- "[dry-run] scratch: $scratch（子が書けるのは work/ だけ: TMPDIR / LANES_SCRATCH / --add-dir。記録の原本は実行ごとの record.*/）/ 拒否の一覧 ${deny_n} 件"
   print -- "[dry-run] cd ${(q)wt} && ANTIGRAVITY_HEADLESS=true LANES_SCRATCH=${(q)work} TMPDIR=${(q)work}/ GIT_CONFIG_GLOBAL=${(q)scratch}/gitconfig GIT_OPTIONAL_LOCKS=0 ${(q)cmd[@]} --print-timeout $print_timeout --add-dir ${(q)work} -p \"\$(<${(q)final})\" < /dev/null > ${(q)pjson} 2> ${(q)perr}"
   print -- "[dry-run] 見張り: idle（root agent idle）の後 子が無く json が ${idle_grace} 秒動かなければ止める / 出力 ${noout_sec} 秒なしで EXIT:8 / --print-timeout $print_timeout / 確認間隔 ${poll} 秒"
   print -- "[dry-run] 結合済みプロンプト: $final"
   exit 0
 fi
 
-# 子が書ける work/ は前回の中身を残してよいが、フォルダでない物（前の子が置いたリンクなど）なら作り直す。
-# 記録の原本の record/ は毎回空から作る（前の子が中に置いた物を使わない）。どちらも子の起動前なので、消してから作れば安全
+# 子が書ける work/ は前回の中身を残してよいが、フォルダでない物（前の子が置いたリンクなど）なら作り直す（子の起動前なので、
+# 消してから作れば安全）。記録の原本の置き場所は上で実行ごとに新しく作ったもの（前の実行の原本は消さない）
 if [[ ! -d "$work" || -L "$work" ]]; then lanes_fresh_file "$work"; mkdir -- "$work" || lanes_die "scratch の work/ を作れない: $work"; fi
-rm -rf -- "$rec" 2>/dev/null || true
-mkdir -m 700 -- "$rec" 2>/dev/null || lanes_die "記録の原本の置き場所（scratch の record/）を作れない: $rec"
 # サンドボックス内の git 用の最小 gitconfig（利用者の設定を読ませない。秘密は入れない）
 lanes_fresh_file "$scratch/gitconfig"
 { print -- "[core]"; print -- "\tpager = cat"; print -- "[safe]"; print -- "\tdirectory = *"; } > "$scratch/gitconfig"
@@ -431,7 +446,8 @@ gem_mirror() {
 idle_count() { local n; n="$(grep -c 'root agent idle' "$1" 2>/dev/null)" || n=0; print -- "${n:-0}"; }
 
 # agy を 1 回走らせて見張る。<json> <stderr> <--print-timeout に渡す値>。結果: GEM_RC / GEM_IDLE_KILLED / GEM_NOOUT / GEM_SECS
-# 出力の受け先（json・stderr）と見張りの記録（plog）は、子から書けない scratch の record/ にある（logs/ へは子の終了後に写す）。
+# 出力の受け先（json・stderr）と見張りの記録（plog）・渡す指示書（pprompt）は、子から書けない scratch の record.<実行ごと>/ にある
+# （logs/ へは子の終了後に写す。指示書はやり直しでも同じ原本を読む）。
 # 子の書ける場所は work/（LANES_SCRATCH・TMPDIR・--add-dir）。git は作業場所（cwd）から管理フォルダを見つける（GIT_DIR は渡さない）
 run_agy_once() {
   local j="$1" e="$2" to="$3" now last m idle_at=0 idle_seen=0 n ta grace=$idle_grace
@@ -442,7 +458,7 @@ run_agy_once() {
   lanes_fresh_file "$logdir/${j:t}"; lanes_fresh_file "$logdir/${e:t}"
   exec {GEM_JR}<"$j" {GEM_ER}<"$e" {GEM_JM}>"$logdir/${j:t}" {GEM_EM}>"$logdir/${e:t}"
   ANTIGRAVITY_HEADLESS=true LANES_SCRATCH="$work" TMPDIR="$work/" GIT_CONFIG_GLOBAL="$scratch/gitconfig" GIT_OPTIONAL_LOCKS=0 GIT_PAGER=cat \
-    lanes_start_child "${cmd[@]}" --print-timeout "$to" --add-dir "$work" -p "$(<"$final")" < /dev/null > "$j" 2> "$e"
+    lanes_start_child "${cmd[@]}" --print-timeout "$to" --add-dir "$work" -p "$(<"$pprompt")" < /dev/null > "$j" 2> "$e"
   GEM_PGID="$LANES_CHILD"; GEM_TRACK=()
   GEM_ROOT_LS="$(LC_ALL=C TZ=UTC ps -o lstart= -p "$LANES_CHILD" 2>/dev/null)" || GEM_ROOT_LS=""
   GEM_ROOT_LS="${(j: :)${=GEM_ROOT_LS}}"
@@ -490,12 +506,12 @@ run_agy_once() {
   return 0
 }
 
-# 記録の原本（record/ の log・json・stderr・try1）を logs/ へ写す。子（と孫）の回収が済んでから呼ぶ。
+# 記録の原本（record.<実行ごと>/ の log・json・stderr・try1・渡した指示書）を logs/ へ写す。子（と孫）の回収が済んでから呼ぶ。
 # 写し先に前からある物（子が実行中に置いたファイル・フォルダなど）は消してから新しく作る。1 つでも写せなければ 1 を返す
 gem_publish() {
   local name ok=0
   lanes_logdir_intact || return 1
-  for name in "$label.log" "$label.json" "$label.stderr.log" "$label.try1.json" "$label.try1.stderr.log"; do
+  for name in "$label.log" "$label.json" "$label.stderr.log" "$label.try1.json" "$label.try1.stderr.log" "$label.prompt.md"; do
     [[ -f "$rec/$name" ]] || continue
     rm -f -- "$logdir/$name" 2>/dev/null || true
     if [[ -e "$logdir/$name" || -L "$logdir/$name" ]] || ! cp -- "$rec/$name" "$logdir/$name" 2>/dev/null; then
@@ -653,7 +669,7 @@ states_before="$(rvd_states_snapshot "$logdir")" || lanes_die "レビュー前�
 # 「使い回し禁止」の印の有無も覚える（子が印を消したら改ざんとして扱う）
 blocked_before=0; rvd_reuse_blocked "$logdir" && blocked_before=1
 started="$(lanes_now)"; t0=$(date +%s)
-# 見張りの記録の頭（原本の record/ に書く。本文は子の後に足す。ここには判定に紛れる語（VERDICT・指摘の印など）を書かない）
+# 見張りの記録の頭（原本の record.<実行ごと>/ に書く。本文は子の後に足す。ここには判定に紛れる語（VERDICT・指摘の印など）を書かない）
 { print -- "# Gemini の実行記録（$label）"; print -- "started: $started"; } > "$plog"
 
 # レビューの子から push（と fetch）をできなくする（読み取り専用の役。git の通信は要らない）
@@ -663,19 +679,25 @@ run_agy_once "$pjson" "$perr" "$print_timeout"
 gem_after_child
 first_rc=0; gem_audit check "$pjson" || first_rc=$?
 # 1 回だけの自動再実行: 見張りで止めていない・最後の結果が SUCCESS でない・監査に引っかかっていない・記録の形が正しい・
-# 全体の上限の残り（初回の開始から数える）が 1 割以上ある・作業ツリーが変わっていない・一時的なエラー（503 / UNAVAILABLE / stream interrupted）
-remaining=$(( pt_total - ($(date +%s) - t0) )); retry_to=""
-if (( first_rc != 0 && ! GEM_IDLE_KILLED && ! GEM_NOOUT && remaining >= 1 && remaining * 10 >= pt_total )) && [[ "$(audit_get status)" != SUCCESS ]] \
+# 作業ツリーが変わっていない・一時的なエラー（503 / UNAVAILABLE / stream interrupted）・全体の上限の残り（初回の開始から数える）が 1 割以上ある。
+# 残り時間は作業ツリーの比較（大きなリポでは時間がかかる）とエラーの確認を終えた後、2 回目を起動する直前に求める（比較中に過ぎた分も引く）
+retry_to=""
+if (( first_rc != 0 && ! GEM_IDLE_KILLED && ! GEM_NOOUT )) && [[ "$(audit_get status)" != SUCCESS ]] \
    && [[ "$(audit_get asks)" == 0 && "$(audit_get violations)" == 0 && "$(audit_get invalid)" == 0 ]]; then
   snap_mid="$(rvd_snapshot "$wt")" || snap_mid=ERROR
   if [[ "$snap_mid" == "$snapshot_before" ]] \
      && { grep -q -E 'UNAVAILABLE|code 503|(^|[^0-9])503([^0-9]|$)|stream was interrupted|interrupted' "$perr" 2>/dev/null \
           || [[ "$(audit_get error)" =~ '(UNAVAILABLE|503|interrupted)' ]]; }; then
-    retried=1; retry_to="${remaining}s"
-    print -- "[見張り] $(lanes_now) agy が $(audit_get status)（一時的なエラー）・作業ツリーの変更なし → 残り ${retry_to} で 1 回だけやり直す（1 回目は ${json1:t} / ${err1:t}）" >> "$plog"
-    mv -f "$pjson" "$pjson1"; mv -f "$perr" "$perr1"
-    run_agy_once "$pjson" "$perr" "$retry_to"
-    gem_after_child
+    remaining=$(( pt_total - ($(date +%s) - t0) ))
+    if (( remaining >= 1 && remaining * 10 >= pt_total )); then
+      retried=1; retry_to="${remaining}s"
+      print -- "[見張り] $(lanes_now) agy が $(audit_get status)（一時的なエラー）・作業ツリーの変更なし → 残り ${retry_to} で 1 回だけやり直す（1 回目は ${json1:t} / ${err1:t}）" >> "$plog"
+      mv -f "$pjson" "$pjson1"; mv -f "$perr" "$perr1"
+      run_agy_once "$pjson" "$perr" "$retry_to"
+      gem_after_child
+    else
+      print -- "[見張り] $(lanes_now) agy が $(audit_get status)（一時的なエラー）だが、全体の上限の残りが ${remaining} 秒（1 割未満）→ やり直さない" >> "$plog"
+    fi
   fi
 fi
 typeset -a audit_srcs; audit_srcs=("$pjson"); (( ! retried )) || audit_srcs=("$pjson1" "$pjson")
@@ -821,9 +843,9 @@ gate="$(rvd_escalate "$round" "$verdict" "$gate")"
   print -- "- 実行: $started 開始 / 約 ${elapsed} 分 / EXIT:$rc"
   print -- "- HEAD: $head → $head_after / 内容・履歴・条件の変更検出 $dirty（0=なし、1=あり）"
   if (( publish_ok )); then
-    print -- "- ログ: $log（本文）/ $json（生）/ $final（渡した全文）。本文と生の記録は、子の終了後に原本（$rec）から写した"
+    print -- "- ログ: $log（本文）/ $json（生）/ $final（渡した全文）。どれも子の終了後に原本（$rec）から写した"
   else
-    print -- "- ログ: logs/ へ写せなかった → 合格を保存しない（EXIT:3）。原本は $rec にある（渡した全文: $final）"
+    print -- "- ログ: logs/ へ写せなかった → 合格を保存しない（EXIT:3）。原本は $rec にある（渡した全文: $pprompt）。この原本は同じ label で起動し直しても消さない"
   fi
   print -- "- 作業場所（scratch）: $scratch（子が書けるのは $work だけ。${LANES_BASE_BRANCH:-develop} へのマージ後の cleanup で削除）"
 } > "$evidence"

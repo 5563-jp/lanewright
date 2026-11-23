@@ -15,7 +15,8 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   `--mode plan` を必ず付け、実行の記録で禁止の道具・質問の道具（`ask_*`）が呼ばれていれば不合格（`EXIT:4`）にする。
   agy は時間切れや失敗でも終了コード 0 で `status: "ERROR"` を出すことがあるので、`SUCCESS` で本文があるときだけ判定する（それ以外は `VERDICT: NONE`）。
   `CLEAN` は必須検証の成功（成功行か親の `chk-run.sh` の記録の使い回し）を確かめたときだけ保存する。子が書けるのは作業ツリー（前後の比較で不合格）と
-  scratch の `work/` だけで、実行の記録の原本は子から書けない scratch の `record/` に置き、監査・判定は原本で行って子の終了後に `logs/` へ写す。
+  scratch の `work/` だけで、実行の記録の原本と渡す指示書は子から書けない scratch の `record.<実行ごと>/`（実行ごとに新しく作り、前の実行の原本は消さない）に置き、
+  監査・判定は原本で行って子の終了後に `logs/` へ写す。一時エラーのやり直しも同じ指示書を使い、残り時間は作業ツリーの比較の後に求める。
   Gemini で実装したものは、`run-gemini-review.sh` を直接呼んでも起動しない（`--impl-engine` も受け付ける）。
 - `run-review.sh` に `--engine codex|gemini|claude`（レビュー役の明示）と `--impl-engine claude|gemini|codex`（実装した道具のヒント）を足した。
 - 設定 `LANES_REVIEW_GEMINI_PCT`（既定 `0`）: 新しい系列のレビューをこの割合で Gemini に回す（`50` なら既定の役と交互）。

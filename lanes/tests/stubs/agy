@@ -15,8 +15,10 @@
 #   STUB_AGY_RC          終了コード（既定 0）
 #   STUB_AGY_FIRST_ERROR ファイルのパス。そのファイルが無い最初の呼び出しだけ、ファイルを作り、stderr に UNAVAILABLE 503 を出して
 #                        status=ERROR・終了コード 1 で終わる（一時エラーの再試行を試す）。2 回目からは通常どおり
+#   STUB_AGY_FIRST_SLEEP STUB_AGY_FIRST_ERROR の最初の呼び出しで、エラーを出す前に眠る秒数（全体の上限の残りが少ないときを試す）
 #   STUB_AGY_HELP        --help の出力を差し替える（オプションが足りない agy を試す）
-#   STUB_RUN             指定があれば、result を返す前にこのシェルのコマンドを子として実行する（作業ツリーで実行。claude / codex のスタブと同じ）
+#   STUB_RUN             指定があれば、result を返す前にこのシェルのコマンドを子として実行する（作業ツリーで実行。claude / codex のスタブと同じ）。
+#                        STUB_AGY_FIRST_ERROR の最初の呼び出しでも、エラーを出す前に実行する
 #   STUB_RUN_RC          STUB_RUN の終了コードを追記するファイル
 #   STUB_LOG             指定があれば、呼ばれた引数と一部の環境変数（秘密を含まない名前だけ）を 1 行 1 JSON で追記する
 import json, os, subprocess, sys, time
@@ -36,13 +38,6 @@ if "--help" in args or args[:1] == ["help"]:
 if "-p" in args or "--print" in args:
     def event(value):
         print(json.dumps(value, ensure_ascii=False), flush=True)
-    first = os.environ.get("STUB_AGY_FIRST_ERROR")
-    if first and not os.path.exists(first):
-        open(first, "w").close()
-        print("UNAVAILABLE 503", file=sys.stderr, flush=True)
-        event({"event": "init"})
-        event({"event": "result", "result": {"status": "ERROR", "response": "", "error": "UNAVAILABLE 503"}})
-        sys.exit(1)
     cmd = os.environ.get("STUB_RUN")
     if cmd:
         rc = subprocess.run(["/bin/sh", "-c", cmd], stdin=subprocess.DEVNULL,
@@ -50,6 +45,15 @@ if "-p" in args or "--print" in args:
         if os.environ.get("STUB_RUN_RC"):
             with open(os.environ["STUB_RUN_RC"], "a", encoding="utf-8") as f:
                 f.write(f"{rc}\n")
+    first = os.environ.get("STUB_AGY_FIRST_ERROR")
+    if first and not os.path.exists(first):
+        open(first, "w").close()
+        if os.environ.get("STUB_AGY_FIRST_SLEEP"):
+            time.sleep(float(os.environ["STUB_AGY_FIRST_SLEEP"]))
+        print("UNAVAILABLE 503", file=sys.stderr, flush=True)
+        event({"event": "init"})
+        event({"event": "result", "result": {"status": "ERROR", "response": "", "error": "UNAVAILABLE 503"}})
+        sys.exit(1)
     event({"event": "init"})
     for name in filter(None, os.environ.get("STUB_AGY_TOOL", "").split(",")):
         event({"event": "step_update", "step_update": {"step_type": "tool", "tool_name": name,

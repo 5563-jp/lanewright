@@ -328,6 +328,35 @@ has "$L/retry.evidence.md" '一時エラーで 1 回やり直し'
 has "$L/retry.done" 'VERDICT: CLEAN'
 argcheck "やり直しに全体の上限（20s）をそのまま渡した" 'a[a.index("--print-timeout") + 1].endswith("s") and 1 <= int(a[a.index("--print-timeout") + 1][:-1]) < 20'
 pass "作業ツリーの変わらない一時エラー（503）は 1 回だけやり直す（全体の上限の残り時間だけを渡す）"
+# やり直しでも、親が一度だけ固定した指示書を渡す（1 回目の子が logs/ の写しの <label>.prompt.md を書き換えても効かない）
+STUB_AGY_FIRST_ERROR="$T/first-error-fp.flag" STUB_RUN='printf "差し替えた指示\n" >> logs/fp.prompt.md' STUB_AGY_RESPONSE="$CLEAN" grv 0 fp
+[[ "$(calls)" == 2 ]] || fail "fp: 一時エラーの後にやり直していない（呼び出し $(calls) 回）"
+python3 -I - "$STUB_LOG" <<'PY' || fail "やり直しに、1 回目と違う（子が書き換えた）指示書を渡した"
+import json, sys
+runs = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+ps = [r["args"][r["args"].index("-p") + 1] for r in runs if "-p" in r["args"]]
+assert len(ps) == 2 and ps[0] == ps[1] and "差し替えた指示" not in ps[1], "指示書が試行で違う"
+PY
+hasnt "$L/fp.prompt.md" '差し替えた指示'
+has "$L/fp.done" 'VERDICT: CLEAN'
+pass "やり直しでも親が固定した指示書（記録の原本の置き場所）を渡し、logs/ の写しも子の終了後に原本で置き換える"
+# 残り時間は作業ツリーの比較の後に求める。1 回目で全体の上限（11 秒）をほぼ使い切ったら、一時エラーでもやり直さない
+GEMINI_REVIEW_PRINT_TIMEOUT=11s STUB_AGY_FIRST_ERROR="$T/first-error-late.flag" STUB_AGY_FIRST_SLEEP=10.2 STUB_AGY_RESPONSE="$CLEAN" grv 1 late   # agy の終了コード（1）のまま
+[[ "$(calls)" == 1 ]] || fail "全体の上限の残りが 1 割未満なのにやり直した（呼び出し $(calls) 回）"
+has "$L/late.log" 'やり直さない'
+has "$L/late.done" 'VERDICT: NONE'
+pass "全体の上限の残りが 1 割未満なら、一時エラーでもやり直さない（残り時間は比較の後、2 回目の直前に求める）"
+# 記録の原本の置き場所は実行ごとに新しく作る。logs/ へ写せなかった回の原本は、原因を直して同じ label で起動し直しても消えない
+STUB_RUN='rm -f logs/pub.stderr.log && mkdir logs/pub.stderr.log' STUB_AGY_RESPONSE="$CLEAN" grv 3 pub
+has "$L/pub.evidence.md" 'logs/ へ写せなかった'
+rec1="$(sed -n 's/.*原本は \(.*\) にある（渡した全文.*/\1/p' "$L/pub.evidence.md" | head -1)"
+[[ -n "$rec1" && -f "$rec1/pub.log" && -f "$rec1/pub.prompt.md" ]] || fail "写せなかった回の原本の場所が証跡に無い・中身が無い: $rec1"
+rm -rf -- "$L/pub.stderr.log"
+STUB_AGY_RESPONSE="$CLEAN" grv 0 pub
+[[ -f "$rec1/pub.log" && -f "$rec1/pub.json" ]] || fail "同じ label で起動し直したら、前の回の原本（logs/ へ写せなかった唯一の記録）が消えた"
+rec2="$(sed -n 's/.*どれも子の終了後に原本（\(.*\)）から写した.*/\1/p' "$L/pub.evidence.md" | head -1)"
+[[ -n "$rec2" && -d "$rec2" && "$rec2" != "$rec1" ]] || fail "起動し直した回が、前の回と同じ原本の置き場所を使った: $rec2"
+pass "記録の原本の置き場所は実行ごとに新しく作り、写せなかった回の原本を同じ label の起動し直しで消さない"
 # 実行中も logs/ に json の写しが出る（lanes-status.sh の最終出力が止まらない）。写しは見るためだけで、判定は原本で行う
 : > "$STUB_LOG"
 STUB_AGY_SLEEP=4 STUB_AGY_RESPONSE="$CLEAN" zsh -f "$LANES_DIR/run-gemini-review.sh" "$wt" "$T/prompt.md" live > "$T/out" 2>&1 &
