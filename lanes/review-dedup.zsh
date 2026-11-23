@@ -1,4 +1,5 @@
-# review-dedup.zsh — run-codex-review.sh と run-claude-review.sh から source する。同じレビューの繰り返しを省く
+# review-dedup.zsh — run-codex-review.sh・run-claude-review.sh・run-gemini-review.sh から source する。同じレビューの繰り返しを省く
+#  （入口の run-review.sh も、系列の前回のレビュー役を読むのに source する: rvd_prev_reviewer）
 #  - 系列（series）: label の末尾 -r<N> を外したもの（rev-wap83-r5 → rev-wap83）。round は -r<N> から取る
 #  - 前回 CLEAN・未保存変更なし・条件一致のときだけ delta または同一結果を再利用する
 #  - 前回 NEEDS_FIX は指摘本文を渡し、前回レビューした HEAD からの delta で見る（rvd_fix_mode）。旧記録・同じ HEAD・未保存変更は full
@@ -181,8 +182,9 @@ PY_GUARD
 # 起点・案件指示・設定・実装・テンプレの内容を条件に含める（値そのものは記録しない）。
 # 検証の設定（LANES_CHECK_CMD の値・対象の .lanes/check.sh の中身・package.json の scripts のうち検証に関わるもの）も含める。
 # 検証が「未導入」で CLEAN になった後に検証を足したら、同じ HEAD でも前回の結果を使わずにレビューし直す。
-# 必須検証の使い回しの有無と使った記録（rvd_checks_key）、レビュー役（codex / claude）も含める。
+# 必須検証の使い回しの有無と使った記録（rvd_checks_key）、レビュー役（codex / claude / gemini）も含める。
 # 記録が変わった（使い回しが無くなった・親が回し直した）ら、同じ HEAD でも前回の結果を使わない。
+# キットのファイルが無い（一部だけを写したテストの置き場など）ときは「無い」ことを条件に入れる（後で置かれたら条件が変わる）。
 # <root> <prompt> <base> <mode> <policy> <model> <effort> [worktree] [使い回しの鍵] [レビュー役]
 rvd_context() {
   python3 - "$@" <<'PY_CONTEXT'
@@ -193,10 +195,14 @@ reuse = sys.argv[9] if len(sys.argv) > 9 else ''
 kind = sys.argv[10] if len(sys.argv) > 10 else ''
 h = hashlib.sha256()
 for value in [base, mode, policy, model, effort, 'checks-reuse:' + reuse, 'reviewer:' + kind]: h.update(value.encode() + b'\0')
-for p in [pathlib.Path(prompt), *[pathlib.Path(root) / f for f in
-          ['review-dedup.zsh', 'run-codex-review.sh', 'run-claude-review.sh', '_common.sh', 'codex-review-output.py',
-           'templates/claude-review-full.md', 'templates/claude-review-delta.md', 'templates/codex-review-focus.md']]]:
-    h.update(p.read_bytes() + b'\0')
+h.update(pathlib.Path(prompt).read_bytes() + b'\0')
+for f in ['review-dedup.zsh', 'run-codex-review.sh', 'run-claude-review.sh', 'run-gemini-review.sh', '_common.sh',
+          'codex-review-output.py', 'templates/claude-review-full.md', 'templates/claude-review-delta.md',
+          'templates/codex-review-focus.md']:
+    try:
+        h.update((pathlib.Path(root) / f).read_bytes() + b'\0')
+    except FileNotFoundError:
+        h.update(b'missing:' + f.encode() + b'\0')
 # 検証の設定。名前は _common.sh の lanes_checks_present が見るものと同じ
 h.update(b'check-cmd:' + os.environ.get('LANES_CHECK_CMD', '').encode() + b'\0')
 if wt:
@@ -296,21 +302,59 @@ rvd_previous_followups() {
 }
 
 # <logdir> <series> <round> <head> <verdict> <gate> <label> <context> <tree> <base> <report> [未解決本文] [前回の解消確認必須:0|1]
+#   [レビュー役: codex|claude|gemini]（入口の run-review.sh が、同じ系列の r2 以降を同じレビュー役で続けるのに読む。rvd_prev_reviewer）
 rvd_save_state() {
   [[ "$5" == 'VERDICT: CLEAN' || "$5" == 'VERDICT: NEEDS_FIX' ]] || return 1
   local f; f="$(rvd_state_file "$1" "$2")"
-  python3 - "$f" "$3" "$4" "$5" "$6" "$7" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" "${13:-0}" <<'PY_SAVE'
+  python3 - "$f" "$3" "$4" "$5" "$6" "$7" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" "${13:-0}" "${14:-}" <<'PY_SAVE'
 import json, os, pathlib, sys
-f, rnd, head, verdict, gate, label, context, tree, base, report, pending, blocking = sys.argv[1:]
+f, rnd, head, verdict, gate, label, context, tree, base, report, pending, blocking, reviewer = sys.argv[1:]
 body = pathlib.Path(report).read_text(encoding='utf-8') if report else ''
 record = dict(last_round=rnd, last_head=head, last_verdict=verdict, last_gate=gate,
               last_label=label, last_context=context, last_tree=tree, last_base=base,
               last_report=(pending + '\n' if pending else '') + body,
               last_blocking_previous=blocking, last_exit=0)
+# レビュー役は分かるときだけ残す（渡されない旧の呼び出しは、読む側が証跡の見出しから判別する）
+if reviewer in ('codex', 'claude', 'gemini'):
+    record['last_reviewer'] = reviewer
 tmp = pathlib.Path(f + '.tmp.' + str(os.getpid()))
 tmp.write_text(json.dumps(record, ensure_ascii=False) + '\n', encoding='utf-8')
 os.replace(tmp, f)
 PY_SAVE
+}
+
+# ---- 系列の前回のレビュー役（入口の run-review.sh が、r2 以降も同じ役で続けるのに使う）----
+# 証跡（<label>.evidence.md）の 1 行目の見出し「## Codex|Gemini|Claude レビュー証跡（…）」から役を読む（codex / gemini / claude）。
+# 読めない・見出しが違うときは何も出さない。symlink は辿らない
+rvd_evidence_reviewer() {   # <evidence.md>
+  local first=""
+  [[ -f "$1" && ! -L "$1" ]] || return 0
+  { IFS= read -r first < "$1"; } 2>/dev/null || true
+  if [[ "$first" =~ '^## (Codex|Gemini|Claude) レビュー証跡' ]]; then print -r -- "${(L)match[1]}"; fi
+  return 0
+}
+# <logdir> <series> → 前回のレビュー役（codex / gemini / claude）。分からなければ何も出さない。次の順で探す:
+#   1. 再利用の記録（logs/.<系列>.review-state）の last_reviewer
+#   2. 同じ記録の last_label の証跡の見出し（last_reviewer の無い旧記録）
+#   3. 系列の証跡（logs/<系列>-r<N>.evidence.md）のうち N が最大のものの見出し（記録が無いとき。失敗した回の証跡でもよい）
+rvd_prev_reviewer() {
+  local logdir="$1" series="$2" state v label f n best=-1 latest=""
+  state="$(rvd_state_file "$logdir" "$series")"
+  if [[ -f "$state" && ! -L "$state" ]]; then
+    v="$(rvd_state_get "$state" last_reviewer 2>/dev/null)" || v=""
+    case "$v" in codex|gemini|claude) print -r -- "$v"; return 0 ;; esac
+    label="$(rvd_state_get "$state" last_label 2>/dev/null)" || label=""
+    if [[ "$label" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' ]]; then
+      v="$(rvd_evidence_reviewer "$logdir/$label.evidence.md")"
+      if [[ -n "$v" ]]; then print -r -- "$v"; return 0; fi
+    fi
+  fi
+  for f in "$logdir/$series"-r<->.evidence.md(N); do
+    n="${${f:t}#"$series"-r}"; n="${n%.evidence.md}"
+    if [[ "$n" == <-> && ${#n} -le 6 ]] && (( n > best )); then best=$n; latest="$f"; fi
+  done
+  [[ -z "$latest" ]] || rvd_evidence_reviewer "$latest"
+  return 0
 }
 
 # 前回 NEEDS_FIX の後の周回（round 2 以降）は差分だけを見る（1 回目は全体・2 回目からは差分）。

@@ -6,6 +6,23 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+### 足したこと / Added
+- 読み取り専用の Gemini レビューランチャ `lanes/run-gemini-review.sh` を足した（構成に `gemini` がある ① `full` / ③ `claude-gemini` で使える）。
+  Codex・Claude のレビューと同じ入口（`run-review.sh`）・同じ判定（`review-dedup.zsh` の full / delta / 同じ head の再利用・round 3 以降の後回し票・
+  必須検証の使い回し）・同じ終了コードの決まりで動く。agy に `--sandbox`・`--settings`（MCP・書く道具・サブエージェント・ブラウザ・Web・予約・ワークフローを拒否）・
+  `--mode plan` を必ず付け、実行の記録で禁止の道具・質問の道具（`ask_*`）が呼ばれていれば不合格（`EXIT:4`）にする。
+  agy は時間切れや失敗でも終了コード 0 で `status: "ERROR"` を出すことがあるので、`SUCCESS` で本文があるときだけ判定する（それ以外は `VERDICT: NONE`）。
+- `run-review.sh` に `--engine codex|gemini|claude`（レビュー役の明示）と `--impl-engine claude|gemini|codex`（実装した道具のヒント）を足した。
+- 設定 `LANES_REVIEW_GEMINI_PCT`（既定 `0`）: 新しい系列のレビューをこの割合で Gemini に回す（`50` なら既定の役と交互）。
+  同じ系列の r2 以降は前回と同じレビュー役で続ける。**Gemini で実装したもの（`--impl-engine gemini` か `logs/` の `.pid` に `lane=gemini`）は Gemini でレビューしない。**
+- 設定 `GEMINI_REVIEW_DENY`: Gemini レビューで拒否する道具を足す（固定の一覧は外せない）。
+
+### 変えたこと / Changed
+- 再利用の記録（`logs/.<系列>.review-state`）にレビュー役（`last_reviewer`）を残すようにした（Codex・Claude のレビューとも。旧記録は証跡の見出しで判別する）。
+- 再利用の条件（`rvd_context`）に `run-gemini-review.sh` の中身を足した。上げた後の最初のレビューは、前回 `CLEAN` の系列でも 1 回 full になる。
+- 既定（`LANES_REVIEW_GEMINI_PCT=0`）のまま `--engine` を使わなければ、新しい系列のレビュー役は今までと同じ（構成の既定の役）。
+  同じ系列の途中で構成（`LANES_TOOLS`）を変えたときは、前回の役が今の構成にあればその役で続ける（変えるなら `--engine` か新しい系列の label で）。
+
 ## [0.1.8] - レビューの重さに「起きる条件」を足し、P0/P1 が減らない周回を止める / Severity needs a trigger condition; stop loops where P0/P1 do not go down
 
 ### 変えたこと / Changed

@@ -975,7 +975,7 @@ lanes_start_child() {
 }
 
 # 記録用: このレーンが CLI に渡す設定のモデルと effort（考える深さ）を LANES_REC_MODEL / LANES_REC_EFFORT に入れる。
-# <lane> = lanes_mark_start に渡す名前（claude / claude-review / qa / codex / codex-review / gemini）。知らない名前は 1 を返す。
+# <lane> = lanes_mark_start に渡す名前（claude / claude-review / qa / codex / codex-review / gemini / gemini-review）。知らない名前は 1 を返す。
 # 空（引数を付けない＝CLI の既定に任せる）は空のまま。後から「どの設定で回したか」を集計できるように .pid と証跡に残す。
 # 値は設定を読み終えた時点のもの（ランチャが CLI に渡す値と同じ変数）。改行は 1 行の記録を壊すので空白にする
 lanes_lane_model_effort() {
@@ -983,7 +983,7 @@ lanes_lane_model_effort() {
   case "$1" in
     claude|claude-review|qa) m="${CLAUDE_MODEL:-}"; e="${CLAUDE_EFFORT:-}" ;;
     codex|codex-review)      m="${CODEX_MODEL:-}";  e="${CODEX_EFFORT:-}" ;;
-    gemini)                  m="${GEMINI_MODEL:-}"; e="${GEMINI_EFFORT:-}" ;;
+    gemini|gemini-review)    m="${GEMINI_MODEL:-}"; e="${GEMINI_EFFORT:-}" ;;
     *) return 1 ;;
   esac
   typeset -g LANES_REC_MODEL="${${m//$'\n'/ }//$'\r'/ }" LANES_REC_EFFORT="${${e//$'\n'/ }//$'\r'/ }"

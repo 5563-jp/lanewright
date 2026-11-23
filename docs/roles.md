@@ -14,10 +14,12 @@
 | ④ `claude-only` | `claude` | Claude | Claude（同上） | **弱い** |
 
 - Claude は必須です（実装の主力で、③④ではレビューも担います）。
-- Gemini（Antigravity CLI `agy`）はレビューには使いません。軽い実装専用です。
+- Gemini（Antigravity CLI `agy`）の主な役は軽い実装です。
   `run-impl.sh ... --engine gemini --verify "<検証コマンド>" --allow-path <相対パス>` のように、検証コマンドと保存してよいパスを必ず渡します。
+- ①③では、レビューの一部を Gemini（`run-gemini-review.sh`・読み取り専用）に回すこともできます（`LANES_REVIEW_GEMINI_PCT` の割合か `--engine gemini`。
+  既定は `0` で回しません）。**Gemini で実装したものは Gemini でレビューしません**（下の「レビュー役の振り分け」）。
 - 割り振りの結果は変数で出ます: `LANES_PROFILE`（構成名）、`LANES_ROLE_IMPL`（`claude` か `claude gemini`）、
-  `LANES_ROLE_REVIEW`（`codex` か `claude`）、`LANES_REVIEW_INDEPENDENT`（独立したレビューなら `1`、そうでなければ `0`）。
+  `LANES_ROLE_REVIEW`（`codex` か `claude`。構成の既定のレビュー役で、割合の振り分けでは変わりません）、`LANES_REVIEW_INDEPENDENT`（独立したレビューなら `1`、そうでなければ `0`）。
 
 ## 入口と起動前点検
 
@@ -26,7 +28,8 @@ zsh <kit>/lanes/lanes-roles.sh --print   # 今の構成と割り振りを表示�
 zsh <kit>/lanes/lanes-doctor.sh [<worktree>]   # 起動前点検。--quiet なら問題が無いとき何も出さない。worktree を渡すと logs/ が無視されているかも見る
 zsh <kit>/lanes/run-impl.sh <worktree> <prompt.md> [label] [--engine claude|gemini] [--dry-run] \
     [gemini 用: --verify "<検証コマンド>" --allow-path <相対パス> ... --no-push]
-zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> [label] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] [--dry-run]
+zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> [label] [--mode auto|full|delta] [--base <sha|branch>] [--round N] [--force] \
+    [--allow-missing-checks] [--engine codex|gemini|claude] [--impl-engine claude|gemini|codex] [--dry-run]
 ```
 
 - `lanes-doctor.sh` は、構成に入っている道具が入っているか・サブスク（月額契約）でログインしているか（API キーでの起動になっていないか）を確かめ、
@@ -40,10 +43,10 @@ zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> [label] [--mode auto|full|d
 
 ### レビューの入口（①② と ③④ で同じ）
 
-`run-review.sh` は同じ引数で呼べ、①②（Codex レビュー）でも③④（Claude レビュー）でもそのまま振り分け先へ渡します。
-どちらのレビューも同じ仕組み（`lanes/review-dedup.zsh`）を使います。
+`run-review.sh` は同じ引数で呼べ、①②（Codex レビュー）でも③④（Claude レビュー）でも、①③で Gemini に回したレビューでも、そのまま振り分け先へ渡します。
+どのレビューも同じ仕組み（`lanes/review-dedup.zsh`）を使います。
 
-| 引数 | ①②（Codex）・③④（Claude） |
+| 引数 | ①②（Codex）・③④（Claude）・①③の Gemini |
 |---|---|
 | `--mode auto`（省略時） | 前回の結果から full / delta / 省略を自動で選ぶ（初回は full、前回 CLEAN・条件一致・未保存変更なしなら前回の HEAD からの delta、同じ HEAD なら前回の結果を使う。前回 NEEDS_FIX の後も前回の HEAD からの delta で未解決指摘を引き継ぐ。delta にできなければ full） |
 | `--mode delta` | 前回レビューした HEAD からの差分（前回の記録が使えなければ full に戻す） |
@@ -51,9 +54,42 @@ zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> [label] [--mode auto|full|d
 | `--force` | 同じ head でもレビューし直す |
 | `--round N` | round 3 以降の P2/P3 後回しの判定に使う（label 末尾の `-r<N>` でも可） |
 
-レビュー役（codex / claude）も再利用の条件に入るので、構成を変えたら前回の結果は使いません。
+| `--engine codex\|gemini\|claude` | レビュー役を明示する（構成に無い道具・知らない名前は exit 2）。下の「レビュー役の振り分け」 |
+| `--impl-engine claude\|gemini\|codex` | 実装した道具のヒント（`gemini` なら Gemini でレビューしない） |
+
+レビュー役（codex / claude / gemini）も再利用の条件に入るので、構成やレビュー役を変えたら前回の結果は使いません。
 親が同じ中身で `chk-run.sh` を通した記録があれば、どちらのレビューでも必須検証（typecheck / lint / unit）をレビューの中で回させません
 （`LANES_REVIEW_REUSE_CHECKS`。`lanes/README.md` の 6 章「必須検証の使い回し」）。何を確かめたことになるかは確認コマンドの中身次第です。
+
+### レビュー役の振り分け（①③ の Gemini レビュー）
+
+`run-review.sh` は、次の順で最初に当てはまるものをレビュー役にします（選んだ役と理由を標準エラーに `レビュー役: <役>（理由）→ <ランチャ>` の 1 行で出します）。
+
+1. `--engine codex|gemini|claude` の明示。構成に無い道具・知らない名前は exit 2（今回の `.done` に残す）。
+2. 同じ系列（label の末尾 `-r<N>` を外した名前）の前回のレビュー役。r2 以降も同じ役で続けるので、同じ head の結果の再利用と delta がそのまま効きます。
+   前回の役は `logs/.<系列>.review-state` の `last_reviewer`（無い旧記録は、その記録の label の証跡の見出し `## Codex|Gemini|Claude レビュー証跡`、記録が無ければ `logs/<系列>-r<N>.evidence.md` の N が最大のものの見出し）から読みます。
+   前回の役が今の構成に無いときは使いません。構成や割合を途中で変えた系列も、前回の役が今の構成にあればその役で続けます（変えるなら `--engine` か、新しい系列の label で）。
+3. `LANES_REVIEW_GEMINI_PCT`（`0`〜`100`。既定 `0`）の割合で Gemini（構成に `gemini` があるときだけ）。`100` なら毎回 Gemini。
+   `1`〜`99` は `${XDG_STATE_HOME:-~/.local/state}/lanewright/review-split.state` に誤差を積み上げて決めます（毎回 `acc` に割合を足し、100 以上になったら 100 を引いて Gemini）。
+   `50` なら「既定の役・Gemini・既定の役・Gemini …」と厳密に交互です。記録は排他を取ってから書き、読めない・書けないときは既定の役に倒します。`--dry-run` は記録を進めません（次に選ぶ役を見せるだけ）。
+4. 構成の既定のレビュー役（`LANES_ROLE_REVIEW`。① Codex / ③ Claude）。
+
+**同じ道具でのレビューの禁止**: Gemini で実装したものは Gemini でレビューしません。`--impl-engine gemini` か、`logs/` の `.pid` に Gemini の実装レーン（`lane=gemini`）が 1 つでもあれば Gemini で実装したとみなします
+（どちらかに当たれば。`--impl-engine claude` でも `logs/` の記録は打ち消しません。迷ったら Gemini に回さない側に倒します）。
+そのとき `--engine gemini` は exit 2、2 と 3 では Gemini を選ばず構成の既定の役へ逃がします。ほかの組み合わせ（③④ で Claude の実装を Claude がレビューする、など）は今までどおりです。
+
+Gemini のレビュー（`run-gemini-review.sh`）は、Codex・Claude のレビューと同じ入口・同じ判定・同じ終了コードの決まりで動き、読み取り専用を次のように担保します:
+
+- agy に `--sandbox`（端末サンドボックス）・`--settings`（起動ごとの設定）・`--mode plan` を必ず付け、`ANTIGRAVITY_HEADLESS=true` で起動します（`agy --help` にこの 3 つが無ければ起動しません）。
+  設定の `permissions.deny` で MCP・ファイルを書く道具・サブエージェント・ブラウザ・Web の検索と取得・予約・ワークフローを拒否します（固定の一覧。`GEMINI_REVIEW_DENY` で足せますが外せません）。
+- 実行の記録（stream-json）を監査し、禁止の道具か質問の道具（`ask_*`）が 1 回でも呼ばれていれば、本文に関係なく不合格（`EXIT:4`・`VERDICT: NEEDS_FIX`）にします。名前から書き込みと分かる道具（`write`・`edit`・`delete` などを含む名前）も禁止として数えます。
+- agy は時間切れや失敗でも終了コード 0 で `status: "ERROR"` の結果を出すことがあるので、結果がちょうど 1 つで最後にあり、`status` が `SUCCESS`、本文が空でないときだけ判定します。それ以外（`ERROR`・空の応答・結果が無い・JSON の破損）は `VERDICT: NONE`（`EXIT:3`）で、エラーの本文からは `VERDICT` を拾いません。
+- 子の前後で作業ツリー・git の管理フォルダ（設定・hooks・タグ・stash）・再利用の記録を比べ、変わっていれば不合格（`EXIT:4`）。git の制御ファイル（`.git`・`config`・hooks など）が変わったら、git を 1 回も呼ばずに止めます。本体の checkout（`.git` がフォルダ）では起動しません（`run-gemini.sh` と同じく専用の worktree が前提）。
+- 子の git は通信（push・fetch）を止め（`GIT_ALLOW_PROTOCOL`）、任意のロックを取らない設定（`GIT_OPTIONAL_LOCKS=0`）で動かします。書けるのは scratch（`--add-dir`）だけです。
+- 見張りは `run-gemini.sh` と同じです（出力が `GEMINI_NOOUTPUT_SEC` 秒止まれば `EXIT:8`。全体の上限は `GEMINI_REVIEW_PRINT_TIMEOUT`、無ければ `GEMINI_PRINT_TIMEOUT`、既定 `75m`）。作業ツリーの変わらない一時エラー（503 など）だけ 1 回やり直します。
+
+限界: 監査は「呼ばれた道具の名前」を後から見るもので、拒否された呼び出しも違反として数えます（読み取り専用の約束を指示書に書いているので、普通は呼ばれません）。
+端末のコマンドはサンドボックスの中で動き、worktree と scratch に書けてしまいます。worktree への書き込みは前後の比較で見つけますが、scratch の中は比べません。
 
 ### Claude と Gemini の分け方（①③）
 
@@ -83,5 +119,7 @@ zsh <kit>/lanes/run-review.sh <worktree> <prompt.md> [label] [--mode auto|full|d
 1. **人のレビューを厚くする**: PR を自動で取り込まず、人が差分を読んでからマージする（少なくとも認証・課金・データ削除に触る PR は必ず）。
 2. **CI を厚くする**: 型チェック・lint（書き方の機械検査）・単体テスト・E2E（画面を通した通しのテスト）を必須チェックにし、ブランチ保護で緑以外はマージできないようにする。
 3. **できれば Codex を足す**: ChatGPT のサブスクがあれば `LANES_TOOLS` に `codex` を足すだけで ②（または ①）になり、レビューが自動で Codex に切り替わります。
+4. **③ なら一部を Gemini に回す**: `LANES_REVIEW_GEMINI_PCT` を 1 以上にすると、その割合のレビューは Claude と別系統の Gemini が読み取り専用で見ます（上の「レビュー役の振り分け」。Gemini で実装したものは Claude のまま）。
+   `lanes-roles.sh --print` は割合が 1 以上のとき「うち N% を Gemini レビューへ振り分け」と補足します（`LANES_REVIEW_INDEPENDENT` の値は変わりません）。
 
 `lanes-roles.sh --print` は、③④のときに「レビューの独立性: 弱い」と注意を表示します（`lanes-roles.sh --env` では `LANES_REVIEW_INDEPENDENT=0`）。PR の本文にも「レビューは実装と同じ道具（独立性弱）」と書いておくと、あとから見た人に分かります。

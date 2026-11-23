@@ -71,6 +71,8 @@ GEMINI_EFFORT="${GEMINI_EFFORT-high}"
 # CLAUDE_REVIEW_TOOLS="${CLAUDE_REVIEW_TOOLS:-Bash,Read,Glob,Grep}"
 # Claude のレビュー・QA で拒否するものに足すもの（カンマ区切り。例: Bash(npm publish*)）。キット固定の拒否一覧は外せない（docs/config.md）
 # CLAUDE_REVIEW_DENY="${CLAUDE_REVIEW_DENY:-}"
+# Gemini のレビュー（run-gemini-review.sh）で拒否する道具に足すもの（カンマ区切りの道具の名前）。キット固定の拒否一覧（MCP・書く道具など）は外せない
+# GEMINI_REVIEW_DENY="${GEMINI_REVIEW_DENY:-}"
 
 # ---- 確認コマンド ----
 # chk-run.sh が回す確認（lint = 書き方の検査 / typecheck = 型の検査 / build = 本番用の組み立て）。
@@ -96,6 +98,10 @@ LANES_VERCEL_SCOPE="${LANES_VERCEL_SCOPE:-}"
 # 0（既定）なら今までどおり、レビューの中で必須検証を回させる。レビューを読み取り専用で回す構成（既定）では回せないことが多いので、
 # chk-run.sh を必ず通す運用なら 1 を勧める
 # LANES_REVIEW_REQUIRE_CHECKS="${LANES_REVIEW_REQUIRE_CHECKS:-0}"
+# レビューを Gemini（読み取り専用の run-gemini-review.sh）へ回す割合（0〜100）。構成に gemini があるとき（① full / ③ claude-gemini）だけ効く。
+#   0 = 従来どおり（構成の既定のレビュー役だけ）/ 50 = 新しい系列の半分を Gemini に回す（既定の役・Gemini・既定の役・Gemini … と交互）/ 100 = 毎回 Gemini
+# 同じ系列の r2 以降は前回と同じレビュー役で続ける。Gemini で実装したもの（run-impl.sh --engine gemini）は Gemini に回さない（docs/roles.md）
+# LANES_REVIEW_GEMINI_PCT="${LANES_REVIEW_GEMINI_PCT:-0}"
 
 # ---- そのほか ----
 # 1 なら後片付けのとき ~/Downloads に置き忘れたレビュー出力を警告する
