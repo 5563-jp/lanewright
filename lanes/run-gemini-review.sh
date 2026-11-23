@@ -322,19 +322,21 @@ gem_author_note() {   # <比較起点> → 指示書に足す文
   fi
 }
 author_note="$(gem_author_note "$base")"
-# レビュー範囲（比較起点..HEAD）の commit の一覧（短い SHA と件名だけ）と変更統計（git diff --stat。作者を含まない）は親が作って
-# 指示書に埋め込む（子には git log / git show などの履歴・作者を表示し得るコマンドを使わせない）。字下げのコードとして載せ、
+# レビュー範囲（比較起点..HEAD）の commit の一覧（短い SHA と件名だけ）と変更統計（git diff --stat。作者を含まない）、
+# および各 commit の変更パス（内容・作者なし。途中で追加して消したファイルも含む）の点検結果は親が作って指示書に埋め込む
+# （子には git log / git show などの履歴・作者を表示し得るコマンドを使わせない）。字下げのコードとして載せ、
 # 長いときは先頭だけ（変更統計の全体は子が git diff --stat で見られる）
 gem_history_note() {   # <比較起点> → 指示書に足す文
-  local from="$1" commits="" stat="" max=200
-  local -a rows srows
+  local from="$1" commits="" stat="" paths="" inspect="" max=200
+  local -a rows srows prows irows
   print -r -- "# レビュー範囲の commit と変更統計（ランチャが作った。作者は含まない）"
   if ! commits="$(git -C "$wt" log --no-color --no-show-signature --abbrev=12 --format='%h %s' "$from..HEAD" 2>/dev/null)" \
-     || ! stat="$(git -C "$wt" -c core.quotePath=false diff --no-color --no-ext-diff --no-textconv --stat=160 "$from...HEAD" 2>/dev/null)"; then
-    print -r -- "- 範囲（${from:0:12}..HEAD）の commit の一覧・変更統計をランチャが読めなかった。読めなかったことを指摘に書き、中身は \`git diff ${from:0:12}...HEAD\` で確かめる。"
+     || ! stat="$(git -C "$wt" -c core.quotePath=false diff --no-color --no-ext-diff --no-textconv --stat=160 "$from...HEAD" 2>/dev/null)" \
+     || ! paths="$(git -C "$wt" -c core.quotePath=false log --no-color --no-show-signature --no-renames --abbrev=12 --format='%h' --name-status "$from..HEAD" 2>/dev/null)"; then
+    print -r -- "- 範囲（${from:0:12}..HEAD）の commit の一覧・変更統計・各 commit の変更パスをランチャが読めなかった。読めなかったことを指摘に書き、中身は \`git diff ${from:0:12}...HEAD\` で確かめる。"
     return 0
   fi
-  rows=(${(f)commits}); srows=(${(f)stat})
+  rows=(${(f)commits}); srows=(${(f)stat}); prows=(${(f)paths})
   print -r -- "- 範囲（${from:0:12}..HEAD）の commit ${#rows} 件（短い SHA と件名。新しい順）:"
   print -r -- ""
   if (( ${#rows} )); then print -rl -- "    "${^rows[1,max]}; else print -r -- "    （commit なし）"; fi
@@ -344,7 +346,86 @@ gem_history_note() {   # <比較起点> → 指示書に足す文
   print -r -- ""
   if (( ${#srows} )); then print -rl -- "    "${^srows[1,max]}; else print -r -- "    （変更なし）"; fi
   (( ${#srows} <= max )) || print -r -- "    （ほか $(( ${#srows} - max )) 行。全体は git diff --stat で見る）"
+  print -r -- ""
+  print -r -- "- 各 commit の変更パス（内容・作者なし。途中で追加して消したファイルも含む）:"
+  print -r -- ""
+  if (( ${#prows} )); then print -rl -- "    "${^prows[1,max]}; else print -r -- "    （変更なし）"; fi
+  (( ${#prows} <= max )) || print -r -- "    （ほか $(( ${#prows} - max )) 行）"
+  print -r -- ""
+  inspect="$("$LANES_PY" -I -c '
+import os, re, subprocess, sys
+wt, start = sys.argv[1], sys.argv[2]
+secret = re.compile(
+    r"(?:^|/)(?:\.env(?:\..+)?|id_(?:rsa|dsa|ecdsa|ed25519)|.+\.(?:pem|p12|pfx|keystore)|(?:credentials|service-account.*)\.json)$",
+    re.I,
+)
+runsh = re.compile(r"(?:^|/)run-[^/]+\.sh$")
+logs_re = re.compile(r"(?:^|/)logs/")
+huge = 1048576
+env = {**os.environ, "LC_ALL": "C"}
+
+def git(*args):
+    return subprocess.run(["git", "-C", wt, *args], capture_output=True, text=True, errors="replace", env=env)
+
+log = git("-c", "core.quotePath=false", "log", "--no-color", "--no-show-signature", "--no-renames",
+          "--abbrev=12", "--format=%h", "--name-status", f"{start}..HEAD")
+if log.returncode != 0:
+    print("    - 各 commit の変更パスを点検できなかった。点検できないことを指摘に書く。")
+    raise SystemExit(0)
+hits, sha, seen = [], None, set()
+for raw in log.stdout.splitlines():
+    line = raw.rstrip("\n")
+    if not line:
+        continue
+    if "\t" not in line and " " not in line:
+        sha = line
+        continue
+    if sha is None:
+        continue
+    status, path = line.split("\t", 1)
+    status, path = status.strip(), path.strip()
+    if not path or path in (".", "..") or any(c in path for c in "\0\r"):
+        continue
+    reasons = []
+    if secret.search(path):
+        reasons.append("秘密の名前")
+    if runsh.search(path):
+        reasons.append("run-*.sh")
+    if logs_re.search(path):
+        reasons.append("logs/")
+    ig = git("check-ignore", "-q", "--no-index", "--", path)
+    if ig.returncode == 0:
+        reasons.append(".gitignore の対象")
+    size = None
+    if status.startswith("D"):
+        blob = git("rev-parse", "--verify", "-q", f"{sha}^:{path}")
+    else:
+        blob = git("rev-parse", "--verify", "-q", f"{sha}:{path}")
+    if blob.returncode == 0 and blob.stdout.strip():
+        sz = git("cat-file", "-s", blob.stdout.strip())
+        if sz.returncode == 0 and sz.stdout.strip().isdigit():
+            size = int(sz.stdout.strip())
+            if size >= huge:
+                reasons.append(f"巨大ファイル（{size} バイト）")
+    if not reasons:
+        continue
+    key = (sha, status, path, tuple(reasons))
+    if key in seen:
+        continue
+    seen.add(key)
+    gone = "（あとの commit で削除されても公開履歴に残る）" if status.startswith("A") else ""
+    hits.append(f"    - commit {sha} の {status} {path}（{"・".join(reasons)}{gone}）。指摘に書く。")
+if hits:
+    print("\n".join(hits))
+else:
+    print("    - 禁止・無視対象・巨大ファイルに当たるパスは見つからなかった（途中で追加して消したファイルも含む）。")
+' "$wt" "$from")" || inspect="    - 各 commit の変更パスを点検できなかった。点検できないことを指摘に書く。"
+  print -r -- "- 混入の点検（ランチャが各 commit の変更パスだけを見た。内容・作者は見ていない）:"
+  print -r -- ""
+  irows=(${(f)inspect})
+  if (( ${#irows} )); then print -rl -- "${irows[@]}"; else print -r -- "    - 禁止・無視対象・巨大ファイルに当たるパスは見つからなかった（途中で追加して消したファイルも含む）。"; fi
 }
+
 history_note="$(gem_history_note "$base")"
 
 # テンプレ（役名だけ Gemini に読み替え）+ 置き場所 + 読み取り専用の約束 + 案件固有の指示 + レビューの出し方（Codex と同じ観点）
@@ -365,7 +446,7 @@ REPLACE = [
     ("`git log --format='%an <%ae> %s' {{BASE}}..HEAD` で、", ""),
     ("commit author が対象リポの `git config user.name` / `user.email` と同じ（偽のアドレスで commit していない）こと、commit 件名が日本語（prefix は英語）であること",
      "commit の作者は下の「commit の作者の照合」（ランチャが元の git の設定で確かめた結果）だけで確かめ、commit 件名が日本語（prefix は英語）であることは下の「レビュー範囲の commit と変更統計」の一覧で確かめる"),
-    ("`git show --stat {{BASE}}..HEAD`", "下の「レビュー範囲の commit と変更統計」と `git diff --stat {{BASE}}...HEAD`"),
+    ("`git show --stat {{BASE}}..HEAD`", "下の「レビュー範囲の commit と変更統計」（ランチャが各 commit の変更パスを内容・作者なしで点検した結果）"),
 ]
 for old, new in REPLACE:
     t = t.replace(old, new)

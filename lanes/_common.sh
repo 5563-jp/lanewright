@@ -177,7 +177,7 @@ typeset -g +x LANES_PY=""
 typeset -g +x LANES_PY_GIVEN="${LANES_PY_FIXED:-}"
 unset LANES_PY_FIXED
 lanes_python_pin() {   # [worktree] → 0 = LANES_PY を固定した / 1 = 使える python3 が無い（LANES_PY は空）
-  local root="" dir py exe
+  local root="" dir py exe probe
   local -a outside
   [[ -z "${1:-}" ]] || root="${1:A}"
   LANES_PY=""
@@ -194,7 +194,14 @@ lanes_python_pin() {   # [worktree] → 0 = LANES_PY を固定した / 1 = 使�
   # 選ばせない）。実体（sys.executable の実パス）が作業ツリーの外の実行ファイルでなければ、その候補は使わない
   if [[ -n "$root" ]]; then
     for dir in "${path[@]}"; do
-      [[ "$dir" == /* && "${dir:A}/" != "$root/"* ]] && outside+=("$dir")
+      [[ "$dir" == /* && "${dir:A}/" != "$root/"* ]] || continue
+      # 探索先の python3 が作業ツリー内の実行ファイルへのリンクなら、このフォルダも使わない
+      # （pyenv の振り分けプログラムが、実体を確かめる前にそのプログラムを動かさない）
+      probe="$dir/python3"
+      if [[ -e "$probe" && "${probe:A}/" == "$root/"* ]]; then
+        continue
+      fi
+      outside+=("$dir")
     done
   fi
   for dir in "${path[@]}"; do
@@ -510,8 +517,10 @@ try:
     raw = raw_bytes.decode("utf-8")
 except (OSError, UnicodeError):
     raw_bytes, raw = b"", ""
-lines, validation_lines, fence, width = [], [], None, 0
-for line in raw.splitlines():
+raw_lines = raw.splitlines()
+lines, validation_lines, accepted_at, fence, width = [], [], [], None, 0
+last_raw_i = next((i for i in range(len(raw_lines) - 1, -1, -1) if raw_lines[i].strip()), None)
+for i, line in enumerate(raw_lines):
     stripped = line.strip()
     marker = re.match(r"^(`{3,}|~{3,})(.*)$", stripped)
     if marker:
@@ -532,6 +541,7 @@ for line in raw.splitlines():
     if stripped:
         lines.append(stripped)
         validation_lines.append(stripped)
+        accepted_at.append(i)
 findings = [0, 0, 0, 0]
 verdicts = []
 blocks = []
@@ -653,9 +663,12 @@ success = re.search(
     r"(?:確認できなかった|見つかりませんでした|見つからなかった)", text, re.I)
 explicit = bool(verdicts) and verdicts[-1][0] == lines[-1]
 # レビュー役（Claude・Gemini）の最終判断は、整形前の元の本文の最後の空でない行（前後の空白を除く）が
-# `VERDICT: CLEAN` か `VERDICT: NEEDS_FIX` そのものであるときだけ（表・引用・コードを除いた後の行では見ない。判定はここ 1 か所）
-raw_last = next((l.strip() for l in reversed(raw.splitlines()) if l.strip()), "")
-final_line = re.fullmatch(r"VERDICT: (CLEAN|NEEDS_FIX)", raw_last)
+# `VERDICT: CLEAN` か `VERDICT: NEEDS_FIX` そのものであるときだけ（表・引用・コードを除いた後の行では見ない。判定はここ 1 か所）。
+# 最後の空でない行が、本文解析でコード例・引用・表・閉じていない領域として除外される行なら採用しない
+# （字下げを除いてから判定すると、コード例の `VERDICT: CLEAN` で合格してしまう）
+raw_last = raw_lines[last_raw_i].strip() if last_raw_i is not None else ""
+same_line = last_raw_i is not None and accepted_at and accepted_at[-1] == last_raw_i
+final_line = re.fullmatch(r"VERDICT: (CLEAN|NEEDS_FIX)", raw_last) if same_line else None
 if unavailable or fence is not None:
     verdict = "NONE"
 elif mode == "codex" and sys.argv[3] and not completed:

@@ -36,12 +36,14 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 - 読み取り専用の制限の設定（`CODEX_REVIEW_SANDBOX`・`CLAUDE_REVIEW_TOOLS`・`CLAUDE_REVIEW_DENY`・`GEMINI_REVIEW_DENY`）を再利用の条件に入れた。
 - commit の作者の照合に使う有効な作者の設定（`user.name` / `user.email`）の指紋を再利用の条件に入れた（値は入れない）。設定を変えたら同じ HEAD でもレビューし直す。
   Gemini のレビューでは、作者の照合を親で行い、件数と一致しない commit の番号だけを指示書に入れる（名前・メールは渡さない）。
-  レビュー範囲の commit の一覧（短い SHA と件名）と変更統計（`git diff --stat`）も親が作って指示書に埋め込み、子には `git log`・`git show`・`git blame`・
+  レビュー範囲の commit の一覧（短い SHA と件名）と変更統計（`git diff --stat`）、各 commit の変更パス（内容・作者なし。途中で追加して消したファイルも含む）の
+  混入点検も親が作って指示書に埋め込み、子には `git log`・`git show`・`git blame`・
   `git shortlog` などの履歴・作者を表示し得るコマンドを使わないよう書く（中身は `git diff` と作業ツリーのファイルの読み取りで確かめる）。
   テンプレの履歴・作者の確認の項目は固定の文言のまま埋め込みを参照する文に差し替える（指示書の全文をコマンドの形で書き換えることはしない）。
 - Claude・Gemini のレビューは、整形前の元の本文の最後の空でない行（前後の空白を除く）が `VERDICT: CLEAN` / `VERDICT: NEEDS_FIX` そのものであるときだけ
-  それを最終判断とし、そうでなければ（判定行の後ろに表・引用・補足が続く、飾りが付いている、判定行が無い）指摘があっても重大度から推定せず
+  それを最終判断とし、そうでなければ（判定行の後ろに表・引用・補足が続く、飾りが付いている、判定行が無い、最後の行が字下げされたコード例）指摘があっても重大度から推定せず
   `VERDICT: NONE`（`EXIT:3`）にする（round 3 以降の後回し・合格への昇格・前回の指摘の後回し・再利用の記録の保存をしない）。
+  最後の空でない行が、本文解析でコード例として除外される行（4 字下げやタブ）なら、空白を除いた結果が判定行に見えても採用しない。
   Claude レビューのテンプレにも、最後の行は飾りを付けずその後ろに何も書かないことを書いた。Codex のレビューは完了証明が最終判断の代わりなので今までどおり。
 - レビューのランチャ・`review-dedup.zsh`・`_common.sh`・`chk-run.sh` が呼ぶ Python は、起動時に作業ツリーの外から選んで固定した `python3` を `-I` で動かすようにした
   （作業ツリーの中の仮想環境を有効にしたシェルから起動しても、その環境の起動時の処理や対象リポにある同じ名前のモジュールを読み込まない。
@@ -49,6 +51,7 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   `chk-run.sh --query` へ渡し、渡された側は選び直さない（作業ツリーの外の実行ファイルであることだけ確かめ、作業ツリーの中なら止める）。
   固定するのは `PATH` の `python3` そのものではなく実体（作業ツリーの外のフォルダだけの `PATH`・`cd /`・`PYENV_VERSION` / `PYENV_DIR` なしで一度呼んで得た
   `sys.executable` の実パス）なので、pyenv の shim のように呼ばれるたびに元の `PATH` から作業ツリーの中の `python3` を選び直すことはない。
+  実体を確かめる探索先からも、`python3` が作業ツリー内の実行ファイルへのリンクであるフォルダは外す（振り分けプログラムが、確かめる前にそのプログラムを動かさない）。
 - 数値の設定キーは、`lanes.env` が先頭の 0 を外して整数に揃える（`LANES_REVIEW_GEMINI_PCT=0050` は `50`）。
 - 既定（`LANES_REVIEW_GEMINI_PCT=0`）のまま `--engine` を使わなければ、新しい系列のレビュー役は今までと同じ（構成の既定の役）。
   同じ系列の途中で構成（`LANES_TOOLS`）を変えたときは、前回の役が今の構成にあればその役で続ける（変えるなら `--engine` か新しい系列の label で）。
