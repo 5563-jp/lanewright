@@ -681,7 +681,9 @@ explicit = bool(verdicts) and verdicts[-1][0] == lines[-1]
 # その行は、本文解析で採用した行そのもの（行番号で照合する）でなければならない。コード例（字下げ幅 4 以上）・引用・表・
 # コードの囲みの中の行が最後なら、空白を除いた中身が判定行に見えても採用しない。
 # 加えて、本文解析で採用できる判定行が末尾にあること（explicit）も求める（v0.1.8 と同じ強さ。弱めない）。
-last_raw_i = next((i for i in range(len(raw_lines) - 1, -1, -1) if raw_lines[i].strip()), None)
+# 空行として飛ばすのは、空白とタブだけの行に限る（全角空白・ノーブレークスペース・改ページなどだけの行が判定行の後ろにあれば、
+# それが最後の行になり、判定行ではないので NONE。判定行の後ろには何も書かない約束）。
+last_raw_i = next((i for i in range(len(raw_lines) - 1, -1, -1) if raw_lines[i].strip(" \t")), None)
 same_line = last_raw_i is not None and bool(accepted_at) and accepted_at[-1] == last_raw_i
 final_line = re.fullmatch(r"[ \t]*VERDICT: (CLEAN|NEEDS_FIX)[ \t]*", raw_lines[last_raw_i]) if same_line else None
 if unavailable or fence is not None:

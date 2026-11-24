@@ -259,6 +259,11 @@ LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: NONE' "問題なし${nl
 # 末尾の側も同じ（判定行の直後のノーブレークスペース・全角空白は許さない。本文の末尾が改行でも同じ）
 LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: NONE' "問題なし${nl}VERDICT: CLEAN"$' '
 LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: NONE' "問題なし${nl}VERDICT: CLEAN"$'　\n'
+# 判定行の後ろの行も同じ（空白・タブ以外が残る行は空行ではない。全角空白・ノーブレークスペース・改ページだけの行が最後なら NONE）
+LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: NONE' "問題なし${nl}VERDICT: CLEAN${nl}"$'　\n'
+LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: NONE' "問題なし${nl}VERDICT: CLEAN${nl}"$' '
+LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: NONE' "問題なし${nl}VERDICT: CLEAN${nl}"$'\f\n'
+LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: CLEAN' "問題なし${nl}VERDICT: CLEAN${nl}"$' \t\n\n'
 parse_case review  'VERDICT: CLEAN'     "問題なし"$'\r\n'"${skip_line}"$'\r\n'"VERDICT: CLEAN"$'\r\n'
 parse_case extract 'VERDICT: NEEDS_FIX' "- [P2] 判定行の無い残件${nl}${skip_line}"
 parse_case extract 'VERDICT: CLEAN'     "問題なし${nl}VERDICT: CLEAN${nl}| 検証 | 結果 |"
