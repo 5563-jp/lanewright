@@ -7,17 +7,42 @@
 # 起動ログに使えるのは、普通のファイル（無ければ作る。ハードリンクでないもの）と /dev/null のような文字デバイスだけ。
 # symlink・ハードリンク・FIFO（名前付きパイプ）などは、その先へ書かず・待たずに exit 2 で止め、コマンドを起動しない。
 # 起動するコマンドには、呼び出し元の環境変数をそのまま渡す（このスクリプトを挟んでも、挟まずに起動したときと同じ環境で動く）。
-# 切り離しに使う python3 は、Mac では本物の前に入口を通ることが多く（Xcode の /usr/bin/python3・pyenv の shims など）、
-# その入口が環境変数を書き換える（MANPATH の先頭へ通るたびに足す・SDKROOT・PYENV_DIR に通った場所を入れる・PATH に足す など）。
-# python3 から見えた環境変数をそのまま子へ渡すと、起動したランチャだけが呼び出し元と違う環境で動き、chk-run.sh の入力の指紋
-# （環境変数が入る）が、親が chk-run.sh を回したときと合わなくなる（レビューが確認済みの記録を使い回せない）。
-# そこで、python3 を呼ぶ前のこのシェルの環境変数を fd 3 のパイプで渡し、子にはそれを渡す。値はファイルにも引数にも書かない。
+# 切り離しに使う python3（以下「補助」）へ乗り換える前のこのシェルの環境変数を fd 3 のパイプで渡し、子にはそれだけを渡す
+# （補助や、その入口が足す環境変数は渡さない。渡すと chk-run.sh の入力の指紋が親と合わなくなる）。値はファイルにも引数にも書かない。
+#
+# 守る線:
+#   このスクリプトの 1 行目から子を起動するまでの間に、ランチャの立場（呼び出し元の環境変数を読める立場）で動くのは、zsh の組み込みと、
+#   下に書いた 2 つの絶対パスのどちらかの python3（とその標準ライブラリ）だけ。それが何になるか・起動時に何を読むかは、呼び出し元の
+#   PATH・環境変数・作業場所・設定ファイル・起動ログの場所で変わらない（起動する対象のリポジトリの仮想環境を有効にしたシェルから
+#   呼んでも、その python3・mkdir や、作業場所・PYTHONPATH にある同じ名前のファイルは動かない）。
+#   - 補助は名前で探さない（PATH・環境変数・引数・設定からは決めない）。
+#   - 補助は環境変数を 1 つも持たずに動く（exec -c）。-I で作業場所と PYTHON* を見ず、-S で site（起動時に自動で読む仕組み）を読まない。
+#   - 補助が動き出すまで、このシェルは組み込みと決め打ちの値だけを使う。対象のリポジトリの場所は知らない（場所で動きを変えない）。
+# 守らない:
+#   - スクリプトの 1 行目より前（zsh <このファイル> と -f なしで呼んだときの利用者の .zshenv・zsh 自体の選び方）。
+#   - 利用者の権限で OS 側の置き場や一時フォルダを細工された場合（Command Line Tools の無い Mac の /usr/bin/python3 は入口で、
+#     行き先を利用者ごとの一時フォルダの控えから引く）。入口そのものが失敗したときの終了コードは、入口のもの。
+#   - 起動するコマンド（子）自身の選び方（名前だけで書けば、今までどおり呼び出し元の PATH から探す）。
+#   - ランチャ（run-*.sh・chk-run.sh）の中の python3 の選び方。
+# 書き方の決まり（補助へ乗り換える exec の行まで）:
+#   - 候補を足さない。補助の場所を、環境変数・設定キー・引数で受け取らない。3 つ目が欲しくなったら、設計を見直す合図とする。
+#   - 補助の前に外部コマンドを呼ばない（mkdir・env・sh も）。ファイルを source しない。cd しない。パスを解決しない。
+#   - ( … ) や $( … ) で包まない（包むと、呼び出し元が無視していたシグナルが子で既定に戻る）。
+#   - ここ文書（<<）を使わない（一時ファイルを通り、その置き場 TMPPREFIX は環境から受け継ぐ）。
+#   - 補助の本文を -c の引数にしない（標準入力で渡す）。コマンドを書かないリダイレクトを書かない（zsh が PATH の cat を起動する）。
+#   - 名前の付いた変数を使わない（位置引数と関数 2 つだけ）。呼び出し元に同じ名前の環境変数があると、代入でその値を書き換えたり、
+#     local で隠して下の一覧から落としたりして、子へそのまま渡せなくなるため。
+#   - 補助の本文に一重引用符を書かない（一重引用符の中に置くため）。読み込むのは標準ライブラリだけ。
+#   - -I と -S を外さない（-I を外すと作業場所の同じ名前のファイルを読み、Apple の python3 はホームの下のバイトコードの控えも使い始める）。
+#   - 将来、補助が外部の道具（tmux など）を呼ぶなら、実行ファイルは絶対パス、渡す環境変数は名前を挙げたものだけにする。
 set -euo pipefail
-# このスクリプトのシェルの部分では、名前の付いた変数を使わない（位置引数だけを使う）。呼び出し元に同じ名前の環境変数があると、
-# 代入でその値を書き換えたり、local で隠して下の一覧から落としたりして、子へそのまま渡せなくなるため
 : "${1:?launch.log}"
 (( $# >= 2 )) || { print -u2 -- "usage: detach-run.sh <launch.log> <cmd> [args...]"; exit 2; }
-mkdir -p "${1:h}"
+# 補助の python3 を位置引数の先頭に置く（この先は $1 = 補助、$2 = 起動ログ、$3 以降 = コマンド）。
+# 候補はこの 2 つだけで、前から順に、最初にある「普通のファイルで実行できる」ものを使う（Mac の Command Line Tools の実体 → OS の入口）
+set -- /Library/Developer/CommandLineTools/usr/bin/python3 "$@"
+[[ -f "$1" && -x "$1" ]] || set -- /usr/bin/python3 "${@:2}"
+[[ -f "$1" && -x "$1" ]] || { print -u2 -- "ERROR: 切り離しに使う python3 が決まった場所（/Library/Developer/CommandLineTools/usr/bin/python3・/usr/bin/python3）に無いので起動しない。PATH の python3 は使わない（Mac は xcode-select --install、Linux は OS の python3 を入れる）"; exit 2; }
 # このシェルが export している変数（= ここから直に起動したコマンドへ渡る環境変数）を「名前=値」の NUL 区切りで出す。
 # 最後に空の 1 件（NUL だけ）を置く。受け取る側は、終わりが NUL 2 つなら最後まで読めたと分かる
 detach_env_dump() {
@@ -25,17 +50,27 @@ detach_env_dump() {
   while (( $# )); do print -rn -- "$1=${(P)1}"$'\0'; shift; done
   print -n -- $'\0'
 }
-python3 - "$@" 3< <(detach_env_dump) <<'PY'
-import fcntl, os, re, stat, sys, subprocess
+# 補助の本文（Python）。標準入力のパイプで渡す
+detach_py_source() { print -r -- '
+import fcntl, os, stat, sys, subprocess
 from pathlib import Path
 log, cmd = Path(sys.argv[1]), sys.argv[2:]
-log.parent.mkdir(parents=True, exist_ok=True)
+
+def say(text):
+    """文言を標準エラーへ出す。この python3 は空の環境で動き、ロケールが C になるので、UTF-8 のバイト列で直に書く。"""
+    os.write(2, (text + "\n").encode("utf-8"))
+
+# 起動ログのフォルダは、ここで作る（シェルの側では作らない。補助の前に外部コマンドを呼ばないため）。パスと例外の本文は出さない
+try:
+    log.parent.mkdir(parents=True, exist_ok=True)
+except OSError:
+    say("ERROR: 起動ログのフォルダを作れないので起動しない。書けるフォルダの下のパスを指定する")
+    sys.exit(1)
 
 def caller_environ():
     """呼び出し元のシェルの環境変数（detach-run.sh が fd 3 のパイプで渡す「名前=値」の NUL 区切り）を読む。
-    読めない・途中で切れている・形が違うときは None（呼び出し側は今の環境変数で起動する）。
-    渡された一覧に無い変数（python3 の入口や python3 自身が足したもの）は、子に渡さない。ただし、シェルが変数として持てない名前
-    （英数字と _ 以外を含む名前）は一覧に出ないことがあるので、今の環境変数から引き継ぐ。"""
+    読めない・途中で切れている・形が違うときは None（呼び出し側は起動しない）。
+    子に渡すのは、この一覧だけ（この python3 自身の環境変数は、空から python3 と入口が足したものなので渡さない）。"""
     try:
         with os.fdopen(3, "rb") as stream:
             data = stream.read()
@@ -49,10 +84,6 @@ def caller_environ():
         if not sep or not name:
             return None
         env[name] = value
-    plain_name = re.compile(rb"[A-Za-z_][A-Za-z0-9_]*")
-    for name, value in os.environb.items():
-        if name not in env and not plain_name.fullmatch(name):
-            env[name] = value
     return env
 
 def claim_launch_log(log):
@@ -107,16 +138,16 @@ try:
     # fd 3 は最初に読んで閉じる（下で開くファイルの番号と取り違えない）
     child_env = caller_environ()
     if child_env is None:
-        print("NOTE: 呼び出し元の環境変数を受け取れなかったので、python3 から見える環境変数のまま起動する"
-              "（python3 の入口が環境変数を書き換える Mac では、chk-run.sh の確認済みの記録を使い回せないことがある）", file=sys.stderr)
-        child_env = os.environ.copy()
+        # この python3 の環境は空なので、受け取れないまま進むと子が空の環境で動く。起動しない
+        say("ERROR: 呼び出し元の環境変数を受け取れないので起動しない")
+        sys.exit(2)
     claim_launch_log(log)
     try:
         fd = open_launch_log(log)
     except OSError:
         # パスと例外の本文は出さない（下の「引数・例外本文は非表示」と同じ）
-        print("ERROR: 起動ログを開けない、または起動ログに使えない種類（symlink・ハードリンク・FIFO など）なので起動しない。"
-              "普通のファイルのパスを指定する", file=sys.stderr)
+        say("ERROR: 起動ログを開けない、または起動ログに使えない種類（symlink・ハードリンク・FIFO など）なので起動しない。"
+            "普通のファイルのパスを指定する")
         sys.exit(2)
     with os.fdopen(fd, "ab", buffering=0) as f:
         # 引数にはプロンプトや認証情報が入りうるため、起動した事実だけを残す。
@@ -130,7 +161,10 @@ try:
             env=child_env,
         )
 except Exception:
-    print("ERROR: 分離起動に失敗（引数・例外本文は非表示）", file=sys.stderr)
+    say("ERROR: 分離起動に失敗（引数・例外本文は非表示）")
     sys.exit(2)
 print(p.pid)
-PY
+' }
+# 環境の写しは fd 3 へ、補助の本文は標準入力へ、どちらもプロセス置換（コマンドの出力をパイプでつなぐ書き方）で渡す。
+# exec -c は、環境変数を全部外して補助へ乗り換える（このシェルは残らない。終了コードと出力は補助のもの）
+exec -c "$1" -I -S - "${@:2}" 3< <(detach_env_dump) < <(detach_py_source)
