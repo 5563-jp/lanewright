@@ -23,8 +23,8 @@
 #   7. 端の入力（消した作業場所・相対パスや - 始まりや空白と = と日本語を含む起動ログ・末尾が / や途中に // のある起動ログ・
 #      PATH が無い場所だけ・TMPPREFIX が書けない場所・名前だけのコマンド）でも起動できる
 #      （補助の前に外部コマンドを呼ばないこと / コマンドの名前の解決を足さないこと）
-#   8. 書き方の決まり（静的）: 補助へ乗り換える行までに、禁じた書き方が無い。候補はちょうど 2 つ。補助の本文に一重引用符が無く、
-#      読み込むのは決まった標準ライブラリだけで、Python として読める
+#   8. 書き方の決まり（静的）: 補助へ乗り換える行までのシェルの部分が、許した命令の並びそのもの（1 行でも増えた・変わったら赤）。
+#      候補はちょうど 2 つ。補助の本文に一重引用符が無く、読み込むのは決まった標準ライブラリだけで、Python として読める
 #   5〜7 は、呼び出し元のロケールなしと UTF-8 の 2 通りで回す。
 # 使い方: test-detach-run-helper.sh [<detach-run.sh>]
 #   引数を省くと、キットの lanes/detach-run.sh を確かめる。引数は、安全策を外した写しや直す前の版で赤になることを確かめるときに渡す。
@@ -377,37 +377,43 @@ done
 pass "端の入力でも起動できる（消した作業場所・相対パスや - 始まりや空白と = と日本語を含む起動ログ・末尾が / や途中に // のある起動ログ・PATH や TMPPREFIX が無い場所・名前だけのコマンド）"
 
 # ---- 8. 書き方の決まり（静的）----
+# 補助が動き出すまでのシェルの部分は、許した命令の並びそのものと比べる（禁じた書き方を並べて探すのでは、並べていない書き方を見逃す。
+# 絶対パスの外部コマンドを 1 行足しても、1 の偽の PATH では見つからない）。比べるのは、1 行目（#! の行）と、2 行目からの
+# 注記だけの行・空行・補助の本文（Python）を除いた残りの全部。字下げも含めて 1 字でも違えば赤にする
 lines=("${(@f)SRC}")
 open_line="detach_py_source() { print -r -- '"; close_line="' }"
-exec_line='exec -c "$1" -I -S - "${@:2}" 3< <(detach_env_dump) < <(detach_py_source)'
 s=${lines[(ie)$open_line]}; e=${lines[(ie)$close_line]}
 (( s < e && e <= ${#lines} )) || fail "補助の本文の始まりと終わりの行が見つからない（本文は一重引用符の中に置く決まり）"
 body=("${(@)lines[s+1,e-1]}")
-# シェルの部分の行（注記と空行を除く）。code は元のまま、bare は二重引用符の中身を除いたもの
-code=(); bare=()
-for l in "${(@)lines[1,s]}" "${(@)lines[e,-1]}"; do
-  l="${l##[[:space:]]#}"
-  [[ -n "$l" && "$l" != '#'* ]] || continue
-  code+=("$l"); bare+=("${l//\"[^\"]#\"/}")
+code=("${lines[1]}")
+for l in "${(@)lines[2,s]}" "${(@)lines[e,-1]}"; do
+  [[ "$l" == [[:space:]]#(|\#*) ]] || code+=("$l")
 done
-[[ "${code[-1]}" == "$exec_line" ]] || fail "最後の行が、決まった形の乗り換え（exec -c・-I -S・本文は標準入力・環境は fd 3）でない"
-words=(${(s: :)${(j: :)bare[1,-2]}})      # 乗り換える行より前の、シェルの語
+# 乗り換える行より前の、シェルの語（二重引用符の中身は除く。文言の中の場所の表記を数えない）
+words=(${(s: :)${(j: :)${(@)code[2,-2]//\"[^\"]#\"/}}})
 found=(${(M)words:#*python3*})
 [[ "${(j: :)found}" == "$C1 $C2" ]] || fail "補助の候補が、決まった 2 つの絶対パス（この順）だけになっていない"
-for w in source . cd pushd eval mkdir env sh cat command typeset local export declare readonly integer float read for; do
-  (( ! ${words[(Ie)$w]} )) || fail "乗り換える行より前に、禁じた書き方がある: $w"
-done
-for l in "${(@)code[1,-2]}"; do      # 二重引用符の中でも働く書き方は、元の行で見る
-  [[ "$l" != *'<<'* && "$l" != *'$('* && "$l" != *'`'* ]] || fail "乗り換える行より前に、ここ文書か \$( ) がある"
-done
-for l in "${(@)bare[1,-2]}"; do
-  [[ "$l" != [\<\>]* && "$l" != '('[^\(]* ]] || fail "乗り換える行より前に、コマンドの無いリダイレクトか ( ) がある"
-done
-found=(${(M)words:#([A-Za-z_][A-Za-z0-9_]#=*|\([^\(]*)})
-(( ! ${#found} )) || fail "乗り換える行より前に、名前の付いた変数への代入か ( ) がある"
-msg1_line='[[ -f "$1" && -x "$1" ]] || { print -u2 -- "ERROR: 切り離しに使う python3 が決まった場所（'"$C1・$C2）$MSG1_TAIL"'"; exit 2; }'
-(( ${code[(Ie)$msg1_line]} )) \
-  || fail "候補がどちらも無いときの行（文言と exit 2）が決まった形でない"
+cat > "$T/shell.want" <<'EOF_SHELL'
+#!/bin/zsh -f
+set -euo pipefail
+: "${1:?launch.log}"
+(( $# >= 2 )) || { print -u2 -- "usage: detach-run.sh <launch.log> <cmd> [args...]"; exit 2; }
+set -- /Library/Developer/CommandLineTools/usr/bin/python3 "$@"
+[[ -f "$1" && -x "$1" ]] || set -- /usr/bin/python3 "${@:2}"
+[[ -f "$1" && -x "$1" ]] || { print -u2 -- "ERROR: 切り離しに使う python3 が決まった場所（/Library/Developer/CommandLineTools/usr/bin/python3・/usr/bin/python3）に無いので起動しない。PATH の python3 は使わない（Mac は xcode-select --install、Linux は OS の python3 を入れる）"; exit 2; }
+detach_env_dump() {
+  set -- "${(@k)parameters[(R)*export*]}"
+  while (( $# )); do print -rn -- "$1=${(P)1}"$'\0'; shift; done
+  print -n -- $'\0'
+}
+detach_py_source() { print -r -- '
+' }
+exec -c "$1" -I -S - "${@:2}" 3< <(detach_env_dump) < <(detach_py_source)
+EOF_SHELL
+print -r -- "${(F)code}" > "$T/shell.got"
+cmp -s "$T/shell.want" "$T/shell.got" \
+  || { diff "$T/shell.want" "$T/shell.got" >&2 || true
+       fail "補助が動き出すまでのシェルの部分が、許した命令の並びと違う（上の差分の < が決まった行、> が検査対象の行）"; }
 [[ "${(F)body}" != *"'"* ]] || fail "補助の本文に一重引用符がある"
 found=(${(M)body:#[[:space:]]#(import|from) *})      # 字下げした読み込みも拾う
 [[ "${(F)found}" == $'import fcntl, os, stat, sys, subprocess\nfrom pathlib import Path' ]] \
@@ -415,6 +421,6 @@ found=(${(M)body:#[[:space:]]#(import|from) *})      # 字下げした読み込�
 print -r -- "${(F)body}" > "$T/body.py"
 /usr/bin/env -i "$REAL" -I -S -c 'import sys; compile(open(sys.argv[1], "rb").read(), "body", "exec", dont_inherit=True)' "$T/body.py" 2> "$T/err" \
   || { cat "$T/err" >&2; fail "補助の本文が Python として読めない"; }
-pass "書き方の決まり（静的）: 乗り換える行までに禁じた書き方が無い・候補はちょうど 2 つ・本文に一重引用符が無く、決まった標準ライブラリだけを読み、Python として読める"
+pass "書き方の決まり（静的）: 乗り換える行までのシェルの部分が、許した命令の並びそのもの・候補はちょうど 2 つ・本文に一重引用符が無く、決まった標準ライブラリだけを読み、Python として読める"
 
 print -r -- "合格 $count 件"
