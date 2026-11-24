@@ -433,7 +433,21 @@ zsh lanes/prepare-screen-qa.sh <checkout> [label] [--url <preview-url>] [--viewp
 
 外の Bot のシェルの中には、ツールの実行が終わるとプロセスグループごと `TERM` / `KILL` するものがあります。`nohup` や `&!` だけでは同じグループに残った子が巻き込まれます。
 `detach-run.sh <launch.log> <コマンド> [引数...]` は新しいセッション（`setsid` 相当）でコマンドを起動し、呼び出し元から切り離します。出力は `<launch.log>` へ追記し、引数や例外の本文はログに書きません。
-起動するコマンドには、呼び出し元のシェルの環境変数をそのまま渡します（挟まずに起動したときと同じ環境で動きます）。切り離しに使う `python3` は、Mac では本物の前に入口を通ることが多く（Xcode の `/usr/bin/python3`・pyenv の shims など）、その入口が環境変数を書き換えます（`MANPATH` の先頭へ通るたびに足す・`SDKROOT` を足す・`PYENV_DIR` に通った場所を入れる・`PATH` に足す など）。書き換えた分を子に渡すと、起動したランチャだけが違う環境で動き、`chk-run.sh` の入力の指紋（環境変数が入る）が親と合わなくなるので、渡しません。環境変数の値は、ファイルにも引数にも書きません（パイプで渡します）。
+起動するコマンドには、呼び出し元のシェルの環境変数をそのまま渡します（挟まずに起動したときと同じ環境で動きます）。切り離しに使う `python3` と、その入口（Mac の `/usr/bin/python3` は、本物の前に通る入口です）は、動くときに環境変数を足します（`MANPATH`・`SDKROOT`・`LC_CTYPE` など）。足した分を子に渡すと、起動したランチャだけが違う環境で動き、`chk-run.sh` の入力の指紋（環境変数が入る）が親と合わなくなるので、渡しません。環境変数の値は、ファイルにも引数にも書きません（パイプで渡します）。
+
+切り離しに使う `python3` は、次の 2 つの場所だけから選びます（前から順に、最初にあるもの）: `/Library/Developer/CommandLineTools/usr/bin/python3`（Mac の Command Line Tools）、`/usr/bin/python3`。`PATH` の `python3`（pyenv・Homebrew・仮想環境のもの）は使いません。環境変数を 1 つも渡さず、`-I`（作業場所と `PYTHON*` を見ない）と `-S`（site（Python が起動時に自動で読む仕組み）を読まない）で動かします。
+
+**守られること**
+- 起動する対象のリポジトリの仮想環境を有効にしたシェルから起動しても、その `python3`・`mkdir` や、作業場所・`PYTHONPATH` にある同じ名前のファイルは、ランチャの中では動きません。どこから起動しても、起動ログをどこに置いても同じです。
+- 起動するコマンドへ渡す環境変数・作業場所は、今までどおりです。
+
+**守られないこと**
+- `zsh <kit>/lanes/detach-run.sh …` と呼ぶと、スクリプトより先に利用者の `.zshenv` が動きます（`zsh -f` か、直に実行すれば動きません）。
+- Command Line Tools が無く Xcode だけの Mac では、`/usr/bin/python3`（入口）を使います。入口は行き先を利用者ごとの一時フォルダの控えから引き、Xcode の状態（使用許諾・更新）で失敗することがあります。そのときの終了コードは入口のものです。`xcode-select --install` で Command Line Tools を入れると、入口を通りません。
+- 2 つの場所のどちらにも `python3` が無いと、exit 2 で止まります。
+- 起動するコマンド自身（名前だけで書いたもの）は、今までどおり呼び出し元の `PATH` から探します。
+- ランチャ（`run-*.sh`・`chk-run.sh`）の中の `python3` の選び方は、この章の対象外です。
+
 起動ログに使えるのは、普通のファイル（無ければ作ります）と `/dev/null` のような文字デバイスだけです。symlink・ハードリンク・FIFO（名前付きパイプ）のときは、その先へ書かず・待たずに exit 2 で止め、コマンドを起動しません。
 起動ログを worktree の `logs/` の直下（`<worktree>/logs/<名前>`）に置くと、書く前にその名前をランチャの記録の台帳（`logs/.lanes-records`）へ載せるので、`chk-run.sh` の入力には数えません（7 章）。それ以外の場所（ほかのフォルダ・`logs/` の下のフォルダ・worktree の下の階層の `logs/`）に置いたときは、台帳を作りません。
 `after-develop-merge.sh` は設定キー `LANES_DETACH_QA=1` のとき、QA をこれで起動します（既定 `0` は QA へそのまま exec）。Bot のシェルから呼ぶときは、設定ファイルか環境変数で `LANES_DETACH_QA=1` にします。
@@ -453,7 +467,7 @@ zsh lanes/prepare-screen-qa.sh <checkout> [label] [--url <preview-url>] [--viewp
 | 8 | `run-gemini.sh`: 無出力で停止（差分は `wip.patch`） / cleanup: scratch だけ保全（`after-develop-merge.sh` は QA へ進む） |
 | 10〜14 | `lanes-status.sh`: RUNNING 10 / STALLED 11 / DEAD 12 / FAILED 13 / NONE 14（DONE は 0） |
 | 129 / 130 / 143 | ランチャ・ウォッチが HUP / INT / TERM で終了（`.done` の補足に理由） |
-| その他 | CLI（claude / codex）の終了コードをそのまま返す（非 0 なら VERDICT は NONE） |
+| その他 | CLI（claude / codex）の終了コードをそのまま返す（非 0 なら VERDICT は NONE） / `detach-run.sh`: 切り離しに使う `python3` の入口そのものが失敗したとき（12 章）は、入口の終了コード |
 
 `run-impl.sh` / `run-review.sh` は振り分け先のランチャの終了コードに従います。`lanes-doctor.sh` は揃っていれば 0、足りなければ 2 です。
 
@@ -527,6 +541,7 @@ LANES_LINT_STRICT=1 zsh selftest.sh --test tests/test-lint.sh   # shellcheck が
 | `test-gemini-launcher.sh` | Gemini レーンのサンドボックス・監査・救済 commit |
 | `test-chk-run.sh` / `test-chk-regressions.sh` | 最終確認の省略条件と入力照合・問い合わせ（`--query`）・通ったのに記録しないときの理由の表示（`record=no reason=…`）・依存と生成物の中のリンクの扱い（作業ツリーの中を指すなら記録し、外・行き先なしなら記録しない） |
 | `test-review-reuse-launch.sh` | `chk-run.sh` の直後に `detach-run.sh` 経由で本物の起動（dry-run でない）をしたレビューが、親の記録を使い回すこと（`node_modules`・`dist` のある worktree。Codex・Claude のレビューとも）。台帳（`logs/.lanes-records`）に載っている持ち主の記録は入力に数えず、台帳に無い名前（記録に似た名前の `logs/input.json` など）・`logs/` に置いたほかの入力・リンク・依存・生成物の変化では使い回さないこと。確認コマンドが `logs/input.json` を読む構成で中身を変えたら回し直すこと。台帳の書き方（リンクの台帳を辿らない）。台帳が FIFO（名前付きパイプ）でも、`chk-run.sh`・問い合わせ・レビューの起動・台帳へ載せる側が待たずに返ること。起動ログが FIFO・ハードリンク・symlink なら、`detach-run.sh` がその先へ書かずに起動を断ること。`python3` の入口が通るたびに環境変数を書き換える Mac（Xcode・pyenv の形を、偽の入口を PATH の先頭に置いて再現する）でも使い回すこと。`detach-run.sh` が呼び出し元の環境変数をそのまま子へ渡すこと。同じ確認（`--core`）を、そのまま回しても `chk-run.sh` の確認コマンドの中から回しても同じ結果になること（回す場所で緑と赤が変わらない） |
+| `test-detach-run-helper.sh` | `detach-run.sh` が切り離しに使う `python3` の選び方と動かし方。起動する対象のリポジトリの仮想環境を有効にした形（`PATH` は印を書く偽物だけ・Python と zsh が見る環境変数は対象の中・作業場所と `PYTHONPATH` に同じ名前の偽モジュール）でも、対象のものがランチャの中で動かないこと（作業場所 4 通り × 起動ログ 2 通り・`-f` なし）。`python3` に環境変数が渡らず、旗が `-I -S` であること。呼び出し元の環境変数を受け取れなければ起動しないこと。決め打ちの 2 つの場所だけから前から順に選び、どちらも無ければ exit 2 で `PATH` へ倒さないこと。起動したコマンドの環境変数・作業場所・umask・標準入力・fd・セッション・無視にしたシグナル・引数が今までどおりであること。終了コードと固定の文言。端の入力（消した作業場所・`-` 始まりや空白を含む起動ログ・`PATH` や `TMPPREFIX` が無い場所）。書き方の決まり（静的）。`detach-run.sh` は空の環境と作り物の変数だけで回す |
 | `test-review-require-checks.sh` | `LANES_REVIEW_REQUIRE_CHECKS=1` のとき、親の記録を使えない（`no-record` / `uncommitted` / `input-changed`）レビューを子の起動の前に止め、`.done` に理由と直し方を残すこと。既定（0）・記録を使えるとき・確認コマンドが未設定の案件・`LANES_REVIEW_REUSE_CHECKS=0`・`--allow-missing-checks` では起動すること（既定では証跡の文言も変わらない）。値が入力の指紋に入らないこと（起動のときだけ環境変数で渡しても記録が合う）。止まった後に `chk-run.sh` を通せば同じ label でやり直せること。前回 CLEAN の後で記録が合わなくなったら、同じ head でも前回の結果を使わずに止まること。止める・止めないの振り分け（関数単体）。入口経由・Claude のレビューでも同じこと |
 | `test-cleanup-safety.sh` / `test-cleanup-qa.sh` / `test-scratch-cleanup.sh` / `test-cleanup-pg-failures.sh` | 後片付けの停止条件・QA worktree・scratch・一時 PostgreSQL |
 | `test-lanes-monitor.sh` / `test-lanes-watch.sh` | 巡回とウォッチ |
@@ -553,6 +568,7 @@ LANES_LINT_STRICT=1 zsh selftest.sh --test tests/test-lint.sh   # shellcheck が
 - ランチャの記録を**名前だけ**で指紋から外すと、ランチャが作っていない `logs/input.json` のような「記録に似た名前の入力」まで外れ、確認コマンドがそれを読む構成では、中身を失敗する内容に変えても古い成功の記録を使い回す → ランチャが書く前に台帳（`logs/.lanes-records`）へ持ち主を載せ、台帳に載っている持ち主の決まった名前だけを外す。ランチャが `logs/` に書く名前を足したら、`chk-run.sh` の `LANE_LABEL_SUFFIXES` に足すか、書く前に `lanes_records_claim` で載せる
 - 子が書ける場所（`logs/` など）のファイルを、種別を確かめる前に普通に開くと、FIFO（名前付きパイプ）に置き換えられていたとき相手（読むなら書き手、書くなら読み手）が現れるまで `open` が返らず、後ろの種別の検査に届かない（台帳を読む `chk-run.sh` と、問い合わせを同期で呼ぶレビューの起動が止まった。`detach-run.sh` の起動ログも同じ形だった）→ `O_NOFOLLOW` に加えて `O_NONBLOCK` で開き、開いた後に `fstat` で普通のファイル（リンク数 1）かを確かめる。子へ渡す出力先は、確かめた後で `O_NONBLOCK` を外す。git は FIFO を未追跡・無視対象の一覧に出さないので、一覧から拾う経路（指紋の走査・後片付けの退避）には来ない。パスを決め打ちで開く所だけが対象
 - Mac の `python3` は、本物の前に入口を通ることが多い（Xcode の `/usr/bin/python3`・pyenv の shims など）。入口は本物を起動する前に環境変数を書き換える（Xcode: `MANPATH` の先頭へ通るたびに足す・`SDKROOT` などを足す / pyenv: `PYENV_DIR` に最初に通った場所を入れる・`PATH` の先頭に本物の場所を足す）。`python3` から見えた環境変数（`os.environ`）をそのまま子へ渡すと、子だけが呼び出し元と違う環境で動く。`detach-run.sh` がそうだったので、起動したランチャの問い合わせの指紋（環境変数が入る）が、親が `chk-run.sh` を回したときと合わず、本物の起動のたびに「使い回さない」になった → 呼び出し元の環境変数をパイプで受け取り、子にはそれを渡す。この不具合は、入口を一度通った後の環境（レーンの中・`chk-run.sh` の確認コマンドの中）から回すと隠れる（pyenv は一度通ると `PATH` の先頭が本物になり、そこから先は入口を通らない）。そのため、テストがレーンの中では緑、普段のシェルでは赤になった → 環境変数を照合する経路のテストは、通るたびに環境変数を書き換える偽の入口を PATH の先頭に置いて回す（`test-review-reuse-launch.sh` の 9）。`selftest.sh` は、レーンの中だけでなく普段のシェルからも回す
+- `detach-run.sh` が切り離しに使う `python3` を `PATH` から選ぶと、起動する対象のリポジトリの仮想環境を有効にしたシェルから呼んだとき、対象の中の `python3`・`mkdir` や、作業場所・`PYTHONPATH` にある同じ名前のファイルが、呼び出し元の環境変数を持ったままランチャの中で動く。`PATH` から選んで「対象の中のものを除く」やり方は、場所の推量（起動ログ・作業場所・`.git` から対象を当てる）・パスの比較（リンク・`..`・末尾の `/`）・確かめる起動（候補を一度動かして実体を見る）が要り、場合分けが尽きなかった（直すたびに、足したコードに次の穴が出た）→ 決め打ちの絶対パス 2 つと空の環境（zsh の組み込み `exec -c`）・`-I -S` にした。名前で探さず、対象の場所を知らないので、場合分けが無い（12 章）。Apple の `python3` は、旗なしだとホームの下（利用者が書ける場所）にあるバイトコード（解釈済みのコード）の控えを読む（`-I` を付けると読まない）
 - `chk-run.sh` が「通ったのに記録しない」ときに何も出さないと、レビューの問い合わせが `no-record` になる理由が分からない（`.lanes/check.sh` に `exec zsh -f …` と書いただけで起きる。`exec` は引数のコマンドを起動する包みなので、仕様どおり記録しない）→ `record=no reason=…（理由）` を出す。確認コマンドの最後の行は `exec` を付けずに書く
 - zsh: スクリプトの実行中に、閉じた stderr（`2>&-` で起動されたとき）へ `print -u2` すると、`|| true` を付けていてもそのシェルごと終了コード 1 で止まる（`zsh -c` では止まらない）→ 失敗の経路ではない案内（effort の上書きの注意など）は子シェル `( print -u2 … ) || true` の中で出す
 - zsh: 関数内の `trap ... EXIT` は関数の終わりで発火する / 関数形式の `TRAPEXIT` は `$(...)` の子シェルの終了でも走る（`ZSH_SUBSHELL` で弾く）/ 関数内で `set -e` が発火すると `TRAPEXIT` は走らない（`TRAPZERR` も定義する）。ランチャは `TRAPZERR` と `TRAPEXIT` の 2 段で `.done` を書く
