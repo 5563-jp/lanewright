@@ -636,6 +636,17 @@ GIT_CONFIG_GLOBAL="$T/global.gitconfig" STUB_AGY_RESPONSE="$CLEAN" grv 0 au2 --m
 [[ "$(calls)" == 1 ]] || fail "作者の設定を変えたのに、同じ HEAD の前回の結果を使った"
 argcheck "設定を変えた後の照合で不一致を数えない" '"commit 2 件のうち 2 件の作者が" in a[-1] and "changed@example.com" not in a[-1]'
 pass "作者の設定（user.name / user.email）を変えたら、同じ HEAD でも前回の結果を使わずに照合し直す"
+# 混入の点検が合わせる大文字・小文字の設定（対象リポの core.ignoreCase）を変えたら、同じ HEAD でも前回の結果を使わない
+# （新しい系列で見る。round 3 からは後回しの方針が変わり、それだけで条件が変わるため）
+GIT_CONFIG_GLOBAL="$T/global.gitconfig" STUB_AGY_RESPONSE="$CLEAN" grv 0 aic --mode full
+[[ "$(calls)" == 1 ]] || fail "新しい系列の 1 回目で agy を起動しなかった"
+GIT_CONFIG_GLOBAL="$T/global.gitconfig" STUB_AGY_RESPONSE="$CLEAN" grv 0 aic --mode full
+[[ "$(calls)" == 0 ]] || fail "同じ HEAD・同じ core.ignoreCase なのに agy を起動した"
+[[ "$(git -C "$wt" config --bool --get core.ignoreCase 2>/dev/null)" == true ]] && ic_next=false || ic_next=true
+git -C "$wt" config core.ignoreCase "$ic_next"
+GIT_CONFIG_GLOBAL="$T/global.gitconfig" STUB_AGY_RESPONSE="$CLEAN" grv 0 aic --mode full
+[[ "$(calls)" == 1 ]] || fail "core.ignoreCase を変えたのに、同じ HEAD の前回の結果を使った"
+pass "混入の点検が合わせる core.ignoreCase を変えたら、同じ HEAD でも前回の結果を使わずに点検し直す"
 # 指示書はコマンドの形で書き換えない。親がレビュー範囲の commit の一覧（短い SHA と件名）と変更統計（git diff --stat）を埋め込み、
 # 子には履歴・作者を表示し得るコマンドを使わないよう書く。テンプレの履歴・作者の確認の項目は、固定の文言のまま埋め込みを参照する
 # 文に差し替える（full・delta とも）。案件固有の指示・前回の指摘本文にある git の呼び出し（git blame を含む）はそのまま渡して起動する

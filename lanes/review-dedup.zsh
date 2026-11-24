@@ -188,6 +188,7 @@ PY_GUARD
 # 読み取り専用の制限の設定（Gemini の拒否の一覧・Claude の使えるツールと拒否・Codex の sandbox）も [制限の設定] で入れる。
 # 制限を強めたら、前の制限の下で出た CLEAN を同じ HEAD でも使わない。
 # commit の作者の照合に使う有効な作者の設定（git config user.name / user.email）の指紋も入れる（値は入れない）。
+# 混入の点検が合わせる大文字・小文字の設定（対象リポジトリで有効な core.ignoreCase）も入れる。
 # <root> <prompt> <base> <mode> <policy> <model> <effort> [worktree] [使い回しの鍵] [レビュー役] [制限の設定]
 rvd_context() {
   "$LANES_PY" -I - "$@" <<'PY_CONTEXT'
@@ -236,6 +237,15 @@ if wt:
         except (OSError, subprocess.SubprocessError):
             value = b'error'
         h.update(b'author-' + key.encode() + b':' + value + b'\0')
+    # 混入の点検（review-history-inspect.py）が合わせる、対象リポジトリで有効な core.ignoreCase（同じ読み方）。
+    # 設定を変えたら無視の判定が変わり得るので、同じ HEAD でも前回の結果を使わない
+    try:
+        p = subprocess.run(['git', '-C', wt, 'config', '--bool', '--get', 'core.ignoreCase'], stdin=subprocess.DEVNULL,
+                           capture_output=True, timeout=30)
+        value = b'rc:%d:' % p.returncode + p.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        value = b'error'
+    h.update(b'core.ignoreCase:' + value + b'\0')
 print(h.hexdigest())
 PY_CONTEXT
 }
