@@ -355,7 +355,7 @@ gem_history_note() {   # <比較起点> → 指示書に足す文
   if inspect="$("$LANES_PY" -I "$LANES_DIR/review-history-inspect.py" "$wt" "$from" "$scratch" 2>/dev/null)" && [[ -n "$inspect" ]]; then
     print -r -- "$inspect"
   else
-    print -r -- "- 各 commit の変更パスと混入の点検を、ランチャが行えなかった（変更一覧を読めない）。点検できなかったことを指摘に書き、中身は \`git diff ${from:0:12}...HEAD\` で確かめる。"
+    print -r -- "- 各 commit の変更パスと混入の点検を、ランチャが行えなかった（変更一覧を読めない、または点検の処理が失敗した）。点検できなかったことを指摘に書き、中身は \`git diff ${from:0:12}...HEAD\` で確かめる。"
   fi
 }
 history_note="$(gem_history_note "$base")"

@@ -349,12 +349,12 @@ def main():
         size_r = []
         if ch.mode != GITLINK:
             if ch.oid not in sizes:
-                unknown.append((["大きさ"], where + "（大きさを確かめられない）"))
+                unknown.append((["大きさが分からない"], where + "（大きさを確かめられない）"))
             elif sizes[ch.oid] >= HUGE:
                 size_r = [("巨大ファイル", "巨大ファイル（変更後 " + str(sizes[ch.oid]) + " バイト）")]
         names = name_reasons(ch.name) if ch.new else []
         if ch.new and ch.ignore is None:
-            unknown.append((["無視の規則"], where + "（" + (ch.why_unknown or "その commit の時点の .gitignore と照合できなかった") + "）"))
+            unknown.append((["規則と照合できない"], where + "（" + (ch.why_unknown or "その commit の時点の .gitignore と照合できなかった") + "）"))
         if ch.new and ch.ignore is not None and ch.ignore[0] == "x":
             rule = ("規則で無視", "その commit の .gitignore の規則 " + show(ch.ignore[1]) + "（" + ch.ignore[2] + "）で無視される")
             reasons = [rule] + names + size_r

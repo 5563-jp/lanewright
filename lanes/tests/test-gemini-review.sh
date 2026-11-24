@@ -762,9 +762,18 @@ inspcheck "$T/insp.prompt.md"
 pass "混入の点検は、変更時点の規則と生のパスで照合し、規則に反する混入・名前による要確認候補・判定できなかったものを分ける（マージ自体の変更も含む。正規の run-*.sh・許可した見本・削除は数えない）"
 # 動作前提の python3（macOS 付属の 3.9 など、3.11 以前）でも、点検処理そのものが動いて同じ結果になる。
 # 3.11 以前の python3 があれば、ランチャ全体（親の補助処理）もその python3 に固定して dry-run する
-old_py=""
-for c in /usr/bin/python3 python3.11 python3.10 python3.9 python3.8; do
-  p="$(command -v "$c" 2>/dev/null)" || continue
+# macOS の /usr/bin/python3 は開発ツールへの仮の入口で、開発ツールが無いと導入の画面を出すので呼ばない
+# （開発ツールの場所（xcode-select -p）にある python3 を直接使う）。macOS 以外は /usr/bin/python3 も候補にする
+old_py=""; py_cands=()
+if [[ "$(uname -s)" == Darwin ]]; then
+  dev="$(xcode-select -p 2>/dev/null)" || dev=""
+  [[ -n "$dev" && -x "$dev/usr/bin/python3" ]] && py_cands+=("$dev/usr/bin/python3")
+else
+  py_cands+=(/usr/bin/python3)
+fi
+for c in python3.11 python3.10 python3.9 python3.8; do p="$(command -v "$c" 2>/dev/null)" && py_cands+=("$p"); done
+for p in "${py_cands[@]}"; do
+  [[ -x "$p" ]] || continue
   exe="$(cd / && "$p" -I -c 'import sys; print(sys.executable if (3, 8) <= sys.version_info[:2] < (3, 12) else "")' 2>/dev/null)" || continue
   [[ -n "$exe" && -x "$exe" ]] && { old_py="$exe"; break; }
 done
