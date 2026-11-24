@@ -560,7 +560,7 @@ findings = [0, 0, 0, 0]
 verdicts = []
 blocks = []
 block = None
-for line in lines:
+for line, at in zip(lines, accepted_at):
     content = re.sub(r"^(?:[-*+]|[0-9]+[.)])\s+", "", line)
     finding = re.match(r"^(?:\*\*)?\[P([0-3])\](?:\*\*)?(?:\s|$)", content)
     if finding:
@@ -573,11 +573,13 @@ for line in lines:
         else:
             block[1].append(line)
     # 番号付きリストの判定例は採用しない。従来の箇条書き・太字・行内コードは許可する。
-    candidate = re.sub(r"^[-*+]\s+", "", line)
+    # 判定行の候補は、元の行から空白とタブだけを除いて作る（最後の行と同じ制限。全角空白・ノーブレークスペースなどで
+    # 囲んだ途中の行は判定行ではないので、後ろの正規の判定行より優先しない）
+    candidate = re.sub(r"^[-*+][ \t]+", "", raw_lines[at].strip(" \t"))
     for wrapper in ("**", "`"):
         if candidate.startswith(wrapper) and candidate.endswith(wrapper):
-            candidate = candidate[len(wrapper):-len(wrapper)].strip()
-    match = re.fullmatch(r"VERDICT:\s*(CLEAN|NEEDS_FIX|PASS)", candidate)
+            candidate = candidate[len(wrapper):-len(wrapper)].strip(" \t")
+    match = re.fullmatch(r"VERDICT:[ \t]*(CLEAN|NEEDS_FIX|PASS)", candidate)
     if match:
         verdicts.append((line, "CLEAN" if match[1] == "PASS" else match[1]))
 if re.fullmatch(r"P[0-3]", mode):

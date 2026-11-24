@@ -264,6 +264,13 @@ LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: NONE' "問題なし${nl
 LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: NONE' "問題なし${nl}VERDICT: CLEAN${nl}"$' '
 LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: NONE' "問題なし${nl}VERDICT: CLEAN${nl}"$'\f\n'
 LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: CLEAN' "問題なし${nl}VERDICT: CLEAN${nl}"$' \t\n\n'
+# 途中の判定候補も同じ（元の行から空白とタブだけを除いて作る）。全角空白・ノーブレークスペースで囲んだ途中の行は判定行ではなく、
+# 最後の正規の判定行より優先しない。空白とタブだけで囲んだ途中の NEEDS_FIX は今までどおり優先する
+parse_case review  'VERDICT: CLEAN'     "問題なし${nl}${skip_line}${nl}"$'　VERDICT: NEEDS_FIX　\n'"VERDICT: CLEAN"
+parse_case review  'VERDICT: CLEAN'     "問題なし${nl}${skip_line}${nl}"$'-  VERDICT: NEEDS_FIX\n'"VERDICT: CLEAN"
+parse_case review  'VERDICT: CLEAN'     "問題なし${nl}${skip_line}${nl}"$'**VERDICT:　NEEDS_FIX**\n'"VERDICT: CLEAN"
+parse_case review  'VERDICT: NEEDS_FIX' "問題なし${nl}${skip_line}${nl}"$' VERDICT: NEEDS_FIX \t\n'"VERDICT: CLEAN"
+parse_case review  'VERDICT: NEEDS_FIX' "問題なし${nl}${skip_line}${nl}"$'- **VERDICT: NEEDS_FIX**\n'"VERDICT: CLEAN"
 parse_case review  'VERDICT: CLEAN'     "問題なし"$'\r\n'"${skip_line}"$'\r\n'"VERDICT: CLEAN"$'\r\n'
 parse_case extract 'VERDICT: NEEDS_FIX' "- [P2] 判定行の無い残件${nl}${skip_line}"
 parse_case extract 'VERDICT: CLEAN'     "問題なし${nl}VERDICT: CLEAN${nl}| 検証 | 結果 |"
