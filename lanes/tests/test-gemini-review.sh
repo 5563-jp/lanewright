@@ -26,7 +26,7 @@
 #      git archive HEAD を mktemp -d の新しいフォルダへ展開して git init する）。logs/ 以外に未 commit の変更・未追跡のファイル、
 #      サブモジュールがあれば起動しない（logs/ だけの変更なら起動する）。
 #      作者名・メールが利用者の共通設定にあっても、親が照合して件数と一致しない commit の番号だけを渡す（作者の設定を変えたら照合し直す）。
-#      範囲の commit の一覧・変更統計・各 commit の変更パスの点検は親が埋め込み、テンプレの履歴・作者の確認の項目はそれを参照する文に差し替える（full・delta とも。
+#      範囲の commit の一覧と変更統計は親が埋め込み、テンプレの履歴・作者の確認の項目はそれを参照する文に差し替える（full・delta とも。
 #      案件固有の指示は書き換えない）
 set -euo pipefail
 # git の環境変数を外し、一時リポの外へ git が上っていかないようにする（本物のリポを書き換えない）
@@ -617,7 +617,7 @@ GIT_CONFIG_GLOBAL="$T/global.gitconfig" STUB_AGY_RESPONSE="$CLEAN" grv 0 au2 --m
 [[ "$(calls)" == 1 ]] || fail "作者の設定を変えたのに、同じ HEAD の前回の結果を使った"
 argcheck "設定を変えた後の照合で不一致を数えない" '"commit 2 件のうち 2 件の作者が" in a[-1] and "changed@example.com" not in a[-1]'
 pass "作者の設定（user.name / user.email）を変えたら、同じ HEAD でも前回の結果を使わずに照合し直す"
-# 指示書はコマンドの形で書き換えない。親がレビュー範囲の commit の一覧（短い SHA と件名）と変更統計、各 commit の変更パスの点検を埋め込み、
+# 指示書はコマンドの形で書き換えない。親がレビュー範囲の commit の一覧（短い SHA と件名）と変更統計（git diff --stat）を埋め込み、
 # 子には履歴・作者を表示し得るコマンドを使わないよう書く。テンプレの履歴・作者の確認の項目は、固定の文言のまま埋め込みを参照する
 # 文に差し替える（full・delta とも）。案件固有の指示・前回の指摘本文にある git の呼び出し（git blame を含む）はそのまま渡して起動する
 tplcheck() {   # <指示書のファイル> <範囲に入るはずの commit の件名>
@@ -667,27 +667,5 @@ assert "test: 枝の変更" in hist and "a.txt" in hist, hist
 assert "dev-only.txt" not in hist and "統合先だけの変更" not in hist, hist
 PY
 pass "比較起点が先に進んでいても、埋め込む commit の一覧と変更統計はこの枝の変更だけ（変更統計は分岐点からの差分）"
-# 分岐点と HEAD だけの変更統計では消える、途中で追加して消した禁止ファイルも、各 commit の変更パスと混入の点検に載る（内容は埋めない）
-newrepo dropped; L="$wt/logs"
-token='GRV_SECRET_TOKEN_NOT_FOR_PROMPT'
-print -r -- "$token" > "$wt/.env"
-git -C "$wt" add -f -- .env
-git -C "$wt" -c user.name="Test User" -c user.email=you@example.com -c commit.gpgSign=false commit -qm 'test: 途中の秘密ファイル'
-added="$(git -C "$wt" rev-parse --short=12 HEAD)"
-git -C "$wt" rm -q .env
-change '秘密ファイルを消す'
-STUB_AGY_RESPONSE="$CLEAN" grv 0 drop --dry-run
-python3 -I - "$L/drop.dry-run.prompt.md" "$added" "$token" <<'ENDDROP' || fail "途中で追加して消した禁止ファイルの点検が指示書に無い、または内容が漏れている"
-import sys
-t, sha, token = open(sys.argv[1], encoding="utf-8").read(), sys.argv[2], sys.argv[3]
-hist = t.split("# レビュー範囲の commit と変更統計（ランチャが作った。作者は含まない）")[1].split("\n# ")[0]
-assert ".env" in hist and sha in hist, hist
-assert "各 commit の変更パス" in hist and "混入の点検" in hist, hist
-assert "秘密の名前" in hist and "指摘に書く" in hist, hist
-assert token not in t, "秘密ファイルの内容が指示書に漏れている"
-stat = hist.split("- 変更統計")[1].split("- 各 commit の変更パス")[0]
-assert ".env" not in stat, stat
-ENDDROP
-pass "途中で追加して消した禁止ファイルも、各 commit の変更パスと混入の点検に載る（内容は埋め込まない）"
 
 print -r -- "PASS: $count 件 / EXIT:0"
