@@ -5,9 +5,10 @@
 ファイルの内容と作者は見ない（.gitignore の規則だけは、照合のために一時フォルダへ写す）。
 - マージ commit は、すべての親と違うパス（マージ自体で生じた変更。git log -c）を載せて点検する。表示と点検は同じ一覧を使う。
 - パスは NUL 区切りで得た実名のまま照合する（前後の空白を削らない。Git の表示用の引用・変換を通さない）。表示するときだけ引用する。
-- 混入は 2 つに分ける: 規則に反する混入（その commit の時点の .gitignore で無視されるパスを新しく持ち込んだ）と、
-  名前・大きさによる要確認候補（規則には反しない）。.gitignore の例外（! の規則）で許可されたパスは、名前では候補にしない。
-- 削除だけの変更は混入に数えない。新しく持ち込んだパス（すべての親に無い）と、変更後の大きさだけを見る。
+- 結果は 3 つに分ける: 規則に反する混入（その commit の時点の .gitignore で無視されるパスを新しく持ち込んだ）と、
+  要確認候補（名前・大きさで選んだもの、前から追跡している無視対象・秘密らしい名前のファイルの変更）と、判定できなかったもの。
+  .gitignore の例外（! の規則）で許可されたパスは、名前では候補にしない。
+- 削除だけの変更は混入に数えない（新しく持ち込んだパス＝すべての親に無いパスと、削除以外の変更の中身だけを見る）。
 - 照合に失敗したもの（.gitignore を読めない・大きさが分からない など）は「判定できなかったもの」に分け、「該当なし」にしない。
 - git の呼び出しは、パスの数によらず 5 回まで（変更一覧・大きさ・.gitignore の中身・一時リポの作成・無視の判定）。
 macOS 付属の python3（3.9）でも動く書き方にする（文字列の埋め込み式の中で外側と同じ引用符を使わない など）。
@@ -167,9 +168,9 @@ def fold(d):
 
 
 def check_ignores(wt, commits, tmp_parent, env):
-    """新しく持ち込んだパスを、その commit の時点の .gitignore（最上位と、パスの親フォルダのもの）で照合する。
+    """削除以外の変更のパスを、その commit の時点の .gitignore（最上位と、パスの親フォルダのもの）で照合する。
     規則の組ごとに一時フォルダの r<番号>/ の下へ .gitignore だけを写し、1 回の git check-ignore で全部を問い合わせる。"""
-    targets = [ch for _, _, changes in commits for ch in changes if ch.new]
+    targets = [ch for _, _, changes in commits for ch in changes if not ch.deleted]
     if not targets:
         return
     per_commit, queries = {}, []
@@ -352,16 +353,22 @@ def main():
                 unknown.append((["大きさが分からない"], where + "（大きさを確かめられない）"))
             elif sizes[ch.oid] >= HUGE:
                 size_r = [("巨大ファイル", "巨大ファイル（変更後 " + str(sizes[ch.oid]) + " バイト）")]
-        names = name_reasons(ch.name) if ch.new else []
-        if ch.new and ch.ignore is None:
+        if ch.ignore is None:
             unknown.append((["規則と照合できない"], where + "（" + (ch.why_unknown or "その commit の時点の .gitignore と照合できなかった") + "）"))
-        if ch.new and ch.ignore is not None and ch.ignore[0] == "x":
-            rule = ("規則で無視", "その commit の .gitignore の規則 " + show(ch.ignore[1]) + "（" + ch.ignore[2] + "）で無視される")
-            reasons = [rule] + names + size_r
+        state = ch.ignore[0] if ch.ignore else None
+        rule = "その commit の .gitignore の規則 " + show(ch.ignore[1]) + "（" + ch.ignore[2] + "）で無視される" if state == "x" else ""
+        # .gitignore の例外（! の規則）で明示的に許可された名前は、名前では候補にしない
+        names = [] if state == "!" else name_reasons(ch.name)
+        if ch.new and state == "x":
+            reasons = [("規則で無視", rule)] + names + size_r
             bad.append(([k for k, _ in reasons], where + "（" + "・".join(t for _, t in reasons) + gone + "）"))
             continue
-        if ch.new and ch.ignore is not None and ch.ignore[0] == "!":
-            names = []   # .gitignore の例外（! の規則）で明示的に許可された名前は、名前では候補にしない
+        if not ch.new:
+            # それより前から追跡しているファイルの変更は、規則に反する混入には数えない。ただし無視されるファイル・秘密らしい名前の
+            # ファイルの変更は、新しい中身が履歴に入るので要確認候補にする（run-*.sh・logs/ の名前だけでは候補にしない）
+            names = [("秘密らしい名前", "秘密らしい名前のファイルを変更した") for k, _ in names if k == "秘密らしい名前"]
+            if state == "x":
+                names.insert(0, ("無視されるファイルの変更", rule + "ファイルを変更した（それより前の commit から追跡している）"))
         reasons = names + size_r
         if reasons:
             maybe.append(([k for k, _ in reasons], where + "（" + "・".join(t for _, t in reasons) + gone + "）"))
@@ -385,7 +392,7 @@ def main():
     out += section("規則に反する混入（その commit の時点の .gitignore で無視されるパスを、新しく持ち込んだ）", bad,
                    "1 件ずつ指摘に書く:")
     out.append("")
-    out += section("名前・大きさによる要確認候補（リポジトリの規則には反しない。名前と大きさだけで選んだ）", maybe,
+    out += section("要確認候補（規則に反する新しい持ち込みではない。名前・大きさ、または前から追跡している無視対象・秘密らしい名前のファイルの変更で選んだ）", maybe,
                    "正規のファイル・意図した見本なら指摘にしない。`.env*` や鍵の候補は中身を開かず、名前と変更の目的から判断し、"
                    "意図しない混入なら指摘に書く:")
     out.append("")

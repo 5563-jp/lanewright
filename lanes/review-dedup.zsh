@@ -201,7 +201,7 @@ h = hashlib.sha256()
 for value in [base, mode, policy, model, effort, 'checks-reuse:' + reuse, 'reviewer:' + kind, 'restrict:' + restrict]: h.update(value.encode() + b'\0')
 h.update(pathlib.Path(prompt).read_bytes() + b'\0')
 for f in ['review-dedup.zsh', 'run-codex-review.sh', 'run-claude-review.sh', 'run-gemini-review.sh', '_common.sh',
-          'codex-review-output.py', 'templates/claude-review-full.md', 'templates/claude-review-delta.md',
+          'codex-review-output.py', 'review-history-inspect.py', 'templates/claude-review-full.md', 'templates/claude-review-delta.md',
           'templates/codex-review-focus.md']:
     try:
         h.update((pathlib.Path(root) / f).read_bytes() + b'\0')

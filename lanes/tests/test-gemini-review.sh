@@ -28,7 +28,7 @@
 #      作者名・メールが利用者の共通設定にあっても、親が照合して件数と一致しない commit の番号だけを渡す（作者の設定を変えたら照合し直す）。
 #      範囲の commit の一覧・変更統計・各 commit の変更パスと混入の点検は親が埋め込み、テンプレの履歴・作者の確認の項目はそれを参照する文に
 #      差し替える（full・delta とも。案件固有の指示は書き換えない）
-#   9. 混入の点検（review-history-inspect.py）は、変更時点の .gitignore と生のパスで照合し、規則に反する混入・名前と大きさによる要確認候補・
+#   9. 混入の点検（review-history-inspect.py）は、変更時点の .gitignore と生のパスで照合し、規則に反する混入・要確認候補（名前・大きさ・前から追跡している無視対象の変更）・
 #      判定できなかったものを分ける（マージ自体の変更も含む。正規の run-*.sh・例外で許可した見本・削除は数えない）。
 #      3.11 以前の python3 でも同じ結果で動く（無ければ LANES_PARTIAL）
 set -euo pipefail
@@ -695,7 +695,7 @@ assert ".env" not in stat, stat
 ENDDROP
 pass "途中で追加して消した禁止ファイルも、各 commit の変更パスと混入の点検に載る（内容は埋め込まない）"
 # 混入の点検（review-history-inspect.py）: 比較起点の後の各 commit を、その commit の時点の .gitignore と生のパスで照合する。
-# - 規則に反する混入（無視されるパスを新しく持ち込んだ）と、名前・大きさによる要確認候補と、判定できなかったものを分ける
+# - 規則に反する混入（無視されるパスを新しく持ち込んだ）と、要確認候補（名前・大きさ・前から追跡している無視対象の変更）と、判定できなかったものを分ける
 # - 正規の run-*.sh の変更・.gitignore の例外（!.env.example）で許可した見本・比較起点からあったファイルの削除は数えない
 # - マージ commit 自体で生じた変更も点検し、表示と点検で同じ一覧を使う
 # - 引用符・タブ・前後の空白を含む名前も実名で照合し（Git の表示用の引用を通さない・前後の空白を削らない）、表示だけ引用する
@@ -704,11 +704,14 @@ newrepo insp; L="$wt/logs"
 print -r -- $'logs/\n.env*\n!.env.example\n*.log' > "$wt/.gitignore"
 mkdir -p "$wt/tools"; print -r -- '#!/bin/sh' > "$wt/tools/run-tool.sh"
 python3 -I -c 'import sys; open(sys.argv[1], "wb").write(b"\0" * 1100000)' "$wt/old-big.bin"
-git -C "$wt" add -A; git -C "$wt" commit -qm 'test: 比較起点までの準備'
+print -r -- 'x' > "$wt/keep.log"; mkdir -p "$wt/cfg"; print -r -- 'x' > "$wt/cfg/site.pem"
+git -C "$wt" add -A; git -C "$wt" add -f keep.log; git -C "$wt" commit -qm 'test: 比較起点までの準備'
 git -C "$wt" update-ref refs/remotes/origin/develop HEAD
 from="$(git -C "$wt" rev-parse HEAD)"
 print -r -- 'echo ok' >> "$wt/tools/run-tool.sh"; print -r -- 'EXAMPLE_ONLY=' > "$wt/.env.example"; git -C "$wt" rm -q old-big.bin
-git -C "$wt" add -A; git -C "$wt" commit -qm 'test: 正規のファイルの変更・見本・削除'
+print -r -- 'y' >> "$wt/keep.log"; print -r -- 'y' >> "$wt/cfg/site.pem"
+git -C "$wt" add -A; git -C "$wt" commit -qm 'test: 正規のファイルの変更・見本・削除・前から追跡しているファイルの変更'
+c2="$(git -C "$wt" rev-parse --short=12 HEAD)"
 mkdir -p "$wt/q\"uo" "$wt/ta"$'\t'"b"
 for f in "q\"uo/.env" "ta"$'\t'"b/.env" " .env" ".env "; do print -r -- "$token" > "$wt/$f"; done
 print -r -- '#!/bin/sh' > "$wt/run-new.sh"
@@ -728,13 +731,13 @@ merge="$(git -C "$wt" rev-parse --short=12 HEAD)"
 STUB_AGY_RESPONSE="$CLEAN" grv 0 insp --dry-run
 cp -- "$L/insp.dry-run.prompt.md" "$T/insp.prompt.md"
 inspcheck() {   # <指示書のファイル>
-  python3 -I - "$1" "$weird" "$logsha" "$merge" "$token" <<'ENDINSP' || fail "混入の点検の分類・表示が違う: $1"
+  python3 -I - "$1" "$weird" "$logsha" "$merge" "$token" "$c2" <<'ENDINSP' || fail "混入の点検の分類・表示が違う: $1"
 import sys
-t, weird, logsha, merge, token = open(sys.argv[1], encoding="utf-8").read(), *sys.argv[2:6]
+t, weird, logsha, merge, token, c2 = open(sys.argv[1], encoding="utf-8").read(), *sys.argv[2:7]
 hist = t.split("# レビュー範囲の commit と変更統計（ランチャが作った。作者は含まない）")[1].split("\n# ")[0]
 listing = hist.split("- 各 commit の変更パス")[1].split("- 混入の点検")[0]
-bad = hist.split("- 規則に反する混入")[1].split("- 名前・大きさによる要確認候補")[0]
-maybe = hist.split("- 名前・大きさによる要確認候補")[1].split("- 判定できなかったもの")[0]
+bad = hist.split("- 規則に反する混入")[1].split("- 要確認候補")[0]
+maybe = hist.split("- 要確認候補")[1].split("- 判定できなかったもの")[0]
 unknown = hist.split("- 判定できなかったもの")[1]
 # マージ commit 自体で足したパスも、一覧と点検の両方に同じ commit で載る
 assert merge + " AA .env.local" in listing, listing
@@ -749,6 +752,10 @@ assert "run-new.sh（名前が run-*.sh" in maybe and "run-new.sh" not in bad, (
 for name in ("tools/run-tool.sh", ".env.example", "old-big.bin", "later.cfg", "side.txt"):
     assert name not in bad and name not in maybe, (name, bad, maybe)
 assert " M tools/run-tool.sh" in listing and " A .env.example" in listing and " D old-big.bin" in listing, listing
+# 前から追跡しているファイルの変更は混入に数えない。ただし無視されるファイル・秘密らしい名前のファイルの変更は要確認候補にする
+assert "commit " + c2 + " の M keep.log（その commit の .gitignore の規則 *.log（.gitignore 4 行目）で無視されるファイルを変更した" in maybe, maybe
+assert "commit " + c2 + " の M cfg/site.pem（秘密らしい名前のファイルを変更した）" in maybe, maybe
+assert "keep.log" not in bad and "site.pem" not in bad, bad
 # 変更時点の規則: あとで規則から外したログは、持ち込んだ時点で無視されていたので混入
 assert "commit " + logsha + " の A tmp.log（その commit の .gitignore の規則 *.log（.gitignore 4 行目）で無視される" in bad, bad
 # 照合できないもの（改行を含むフォルダ）は「判定できなかったもの」に分け、「見つからなかった」と書かない
@@ -759,7 +766,7 @@ assert token not in t, "秘密らしいファイルの内容が指示書に漏�
 ENDINSP
 }
 inspcheck "$T/insp.prompt.md"
-pass "混入の点検は、変更時点の規則と生のパスで照合し、規則に反する混入・名前による要確認候補・判定できなかったものを分ける（マージ自体の変更も含む。正規の run-*.sh・許可した見本・削除は数えない）"
+pass "混入の点検は、変更時点の規則と生のパスで照合し、規則に反する混入・要確認候補・判定できなかったものを分ける（マージ自体の変更も含む。正規の run-*.sh・許可した見本・削除は数えない。前から追跡している無視対象・秘密らしい名前の変更は候補）"
 # 動作前提の python3（macOS 付属の 3.9 など、3.11 以前）でも、点検処理そのものが動いて同じ結果になる。
 # 3.11 以前の python3 があれば、ランチャ全体（親の補助処理）もその python3 に固定して dry-run する
 # macOS の /usr/bin/python3 は開発ツールへの仮の入口で、開発ツールが無いと導入の画面を出すので呼ばない
