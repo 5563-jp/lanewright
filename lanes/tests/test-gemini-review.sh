@@ -701,7 +701,7 @@ import sys
 t, sha, token = open(sys.argv[1], encoding="utf-8").read(), sys.argv[2], sys.argv[3]
 hist = t.split("# レビュー範囲の commit と変更統計（ランチャが作った。作者は含まない）")[1].split("\n# ")[0]
 assert "各 commit の変更パス" in hist and "混入の点検" in hist, hist
-assert "commit " + sha + " の A .env（" in hist and "秘密らしい名前" in hist and "あとの commit で消したが、公開履歴に残る" in hist, hist
+assert "commit " + sha + " の A .env（" in hist and "秘密らしい名前" in hist and "HEAD には無い（途中で消したが、公開履歴に残る）" in hist, hist
 assert token not in t, "秘密ファイルの内容が指示書に漏れている"
 stat = hist.split("- 変更統計")[1].split("- 各 commit の変更パス")[0]
 assert ".env" not in stat, stat
@@ -813,5 +813,74 @@ rc=0; out="$(python3 -I "$LANES_DIR/review-history-inspect.py" "$wt" "--all" 2>&
 rc=0; out="$(python3 -I "$LANES_DIR/review-history-inspect.py" "$wt" "0123456789abcdef0123456789abcdef01234567" 2>&1)" || rc=$?
 (( rc == 1 )) && [[ -z "$out" ]] || fail "読めない比較起点で点検処理が止まらない（rc=$rc）"
 pass "比較起点を読めない・16 進でないときは、点検処理は何も出さずに終了コード 1"
+# 点検の細かい規則（点検処理を直接呼ぶ）:
+# - .gitignore の有無と種類は木で確かめる（リンクの .gitignore はリンク先の名前を規則にしない。部分 clone で中身が無ければ判定できない）
+# - 秘密鍵の拡張子（.key・.p8）は規則に無くても名前で要確認候補（途中で足して消した鍵も載る）
+# - 大文字・小文字の扱いは対象リポの core.ignoreCase に合わせる・フォルダの規則の出典も引用して表示する
+# - 「HEAD には無い」は HEAD の木で確かめる（別の枝で同じ名前を足して消しても、HEAD に残っていれば書かない）
+hi="$T/hist2"; git init -q -b main "$hi"; lanes_test_assert_repo "$hi"
+git -C "$hi" config user.name "Test User"; git -C "$hi" config user.email you@example.com; git -C "$hi" config commit.gpgSign false
+hic() { git -C "$hi" add -A 2>/dev/null; git -C "$hi" commit -qm "test: $1" 2>/dev/null; }
+print -r -- '*.tmp' > "$hi/.gitignore"; print -r -- 'x' > "$hi/a.txt"; hic '起点'
+hfrom="$(git -C "$hi" rev-parse HEAD)"
+mkdir -p "$hi/ln"; print -r -- 'x' > "$hi/ln/rules.txt"; ln -s rules.txt "$hi/ln/.gitignore"; hic 'リンクの .gitignore'
+mkdir -p "$hi/certs"; print -r -- 'dummy' > "$hi/certs/server.key"; print -r -- 'dummy' > "$hi/AuthKey_TEST0000.p8"; hic '鍵を足す'
+git -C "$hi" rm -q certs/server.key; hic '鍵を消す'
+mkdir -p "$hi/ta"$'\t'"b"; print -r -- '*.secret' > "$hi/ta"$'\t'"b/.gitignore"; hic 'フォルダの規則'
+print -r -- 'x' > "$hi/ta"$'\t'"b/x.secret"; git -C "$hi" add -f -- "ta"$'\t'"b/x.secret"; git -C "$hi" commit -qm 'test: 規則に当たる'
+print -r -- 'x' > "$hi/UP.TMP"; git -C "$hi" add -f -- UP.TMP; git -C "$hi" commit -qm 'test: 大文字の名前'
+git -C "$hi" checkout -q -b side "$hfrom" 2>/dev/null
+print -r -- 'side' > "$hi/keep.pem"; hic '横で足す'; git -C "$hi" rm -q keep.pem; hic '横で消す'
+git -C "$hi" checkout -q main 2>/dev/null
+print -r -- 'main' > "$hi/keep.pem"; hic '本線で足す'
+git -C "$hi" merge -q --no-ff -m 'test: 横を取り込む' side 2>/dev/null
+[[ -f "$hi/keep.pem" && -L "$hi/ln/.gitignore" ]] || fail "点検の細かい規則の一時リポを作れない"
+hist2check() {   # <出力> <core.ignoreCase>
+  python3 -I - "$1" "$2" <<'ENDH2' || fail "点検の細かい規則が違う（core.ignoreCase=$2）: $1"
+import sys
+t, ic = open(sys.argv[1], encoding="utf-8").read(), sys.argv[2]
+bad = t.split("- 規則に反する混入")[1].split("- 要確認候補")[0]
+maybe = t.split("- 要確認候補")[1].split("- 判定できなかったもの")[0]
+unknown = t.split("- 判定できなかったもの")[1]
+assert "- 判定できなかったもの（照合に失敗した。「該当なし」ではない）: 0 件。" in t, unknown
+# リンクの .gitignore は規則として読まない（リンク先の名前 rules.txt を規則にしない）
+assert "ln/rules.txt" not in bad and "ln/rules.txt" not in maybe, (bad, maybe)
+# フォルダの規則の出典も引用して表示する（生のタブを入れない）
+assert '"ta\\tb/x.secret"（その commit の .gitignore の規則 *.secret（"ta\\tb/.gitignore" 1 行目）で無視される' in bad, bad
+assert "\t" not in t, "生のタブが出力に入った"
+# 対象リポの core.ignoreCase に合わせる（false なら UP.TMP は *.tmp に当たらない）
+if ic == "true":
+    assert "UP.TMP（その commit の .gitignore の規則 *.tmp（.gitignore 1 行目）で無視される" in bad, bad
+else:
+    assert "UP.TMP" not in bad and "UP.TMP" not in maybe, (bad, maybe)
+# 秘密鍵の拡張子は、規則に無くても名前で要確認候補（規則に反する混入にはしない）。途中で消した鍵には HEAD に無いことを添える
+assert " の A certs/server.key（秘密らしい名前。HEAD には無い（途中で消したが、公開履歴に残る））" in maybe, maybe
+assert " の A AuthKey_TEST0000.p8（秘密らしい名前）" in maybe, maybe
+assert "server.key" not in bad and "AuthKey" not in bad, bad
+# 別の枝で同じ名前を足して消しても、HEAD に残っているものには「HEAD には無い」と書かない
+keep = [l for l in maybe.splitlines() if "keep.pem" in l]
+assert len(keep) == 2 and all("（秘密らしい名前）" in l and "HEAD には無い" not in l for l in keep), keep
+ENDH2
+}
+for ic in false true; do
+  git -C "$hi" config core.ignoreCase "$ic"
+  python3 -I "$LANES_DIR/review-history-inspect.py" "$hi" "$hfrom" "$T" > "$T/hist2-$ic.out" || fail "点検処理が動かない（core.ignoreCase=$ic）"
+  hist2check "$T/hist2-$ic.out" "$ic"
+done
+pass "点検は、リンクの .gitignore を規則にせず、秘密鍵の拡張子を要確認候補にし、対象リポの core.ignoreCase に合わせ、規則の出典も引用し、HEAD に残っているかを HEAD の木で確かめる"
+# 部分 clone（中身を取っていない）では、.gitignore の中身を取得できないので「判定できなかったもの」に分ける（「規則なし」にしない）。
+# 変更 1 件につき 1 回だけ数える（大きさと規則の両方を確かめられなくても、件数は変更の数）
+git -C "$hi" config uploadpack.allowFilter true
+git clone -q --no-local --filter=blob:none --no-checkout "file://$hi" "$T/hist2-pc" 2>/dev/null || fail "部分 clone を作れない"
+python3 -I "$LANES_DIR/review-history-inspect.py" "$T/hist2-pc" "$hfrom" "$T" > "$T/hist2-pc.out" || fail "部分 clone で点検処理が動かない"
+python3 -I - "$T/hist2-pc.out" <<'ENDPC' || fail "部分 clone で .gitignore の中身を取得できないのに、判定できなかったものに分けていない: $T/hist2-pc.out"
+import sys
+t = open(sys.argv[1], encoding="utf-8").read()
+unknown = t.split("- 判定できなかったもの")[1]
+assert "- 判定できなかったもの（照合に失敗した。「該当なし」ではない）: 9 件（理由別: 大きさが分からない 9・規則と照合できない 9）" in t, unknown
+assert "UP.TMP（大きさを確かめられない・その commit の時点の .gitignore の中身を取得できない（部分 clone など））" in unknown, unknown
+assert "見つからなかった" not in t, t
+ENDPC
+pass "部分 clone で .gitignore の中身を取得できないときは「判定できなかったもの」に分ける（規則なしにしない。変更 1 件につき 1 回数える）"
 
 print -r -- "PASS: $count 件 / EXIT:0"

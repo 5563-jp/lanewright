@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """レビュー範囲（<比較起点>..HEAD）の各 commit の変更パスを並べ、混入を点検する（Gemini レビューの指示書に埋め込む）。
 
-見るのは、各 commit の変更パス（git log -z の生のパス）・変更後の大きさ・その commit の時点の .gitignore だけ。
-ファイルの内容と作者は見ない（.gitignore の規則だけは、照合のために一時フォルダへ写す）。
+見るのは、各 commit の変更パス（git log -z の生のパス）・変更後の大きさ・変更パスの親フォルダの一覧（木）・その commit の時点の
+.gitignore・HEAD の木だけ。ファイルの内容と作者は見ない（.gitignore の規則だけは、照合のために一時フォルダへ写す）。
 - マージ commit は、すべての親と違うパス（マージ自体で生じた変更。git log -c）を載せて点検する。表示と点検は同じ一覧を使う。
 - パスは NUL 区切りで得た実名のまま照合する（前後の空白を削らない。Git の表示用の引用・変換を通さない）。表示するときだけ引用する。
 - 結果は 3 つに分ける: 規則に反する混入（その commit の時点の .gitignore で無視されるパスを新しく持ち込んだ）と、
   要確認候補（名前・大きさで選んだもの、前から追跡している無視対象・秘密らしい名前のファイルの変更）と、判定できなかったもの。
-  .gitignore の例外（! の規則）で許可されたパスは、名前では候補にしない。
+  .gitignore の例外（! の規則）で許可されたパスは、名前では候補にしない。秘密らしい名前（.env*・鍵の拡張子など）は内容を開かない。
 - 削除だけの変更は混入に数えない（新しく持ち込んだパス＝すべての親に無いパスと、削除以外の変更の中身だけを見る）。
+- .gitignore の有無と種類は、その commit の親フォルダの木で確かめる（無い・フォルダ・リンクは規則なし。Git はリンクの .gitignore を
+  読まない）。通常ファイルの .gitignore の中身を取得できない（部分 clone など）ときは「判定できなかったもの」に分ける。
+- 大文字・小文字の扱いは、対象リポジトリで有効な core.ignoreCase に合わせる（照合用の一時リポの値を使わない）。
+- 新しく持ち込んだパスが HEAD に無ければ、その事実を添える（HEAD の木で確かめる。範囲の中の削除の有無からは推定しない）。
 - 照合に失敗したもの（.gitignore を読めない・大きさが分からない など）は「判定できなかったもの」に分け、「該当なし」にしない。
-- git の呼び出しは、パスの数によらず 5 回まで（変更一覧・大きさ・.gitignore の中身・一時リポの作成・無視の判定）。
+- git の呼び出しは、パスの数によらず 6 回まで（変更一覧・大きさ・木と .gitignore の中身・core.ignoreCase・一時リポの作成・無視の判定）。
 macOS 付属の python3（3.9）でも動く書き方にする（文字列の埋め込み式の中で外側と同じ引用符を使わない など）。
 
 使い方: review-history-inspect.py <worktree> <比較起点の commit（16 進）> [一時フォルダの置き場所]
@@ -29,7 +33,7 @@ MAX_LIST = 200  # 変更パスの一覧に載せる行数（点検は全件で�
 MAX_SHOW = 20   # 点検結果の分類ごとに載せる代表箇所の数
 HUGE = 1048576  # 巨大ファイルとみなす大きさ（バイト）
 SECRET = re.compile(
-    r"(?:^|/)(?:\.env(?:\..+)?|id_(?:rsa|dsa|ecdsa|ed25519)|.+\.(?:pem|p12|pfx|keystore)|(?:credentials|service-account.*)\.json)$",
+    r"(?:^|/)(?:\.env(?:\..+)?|id_(?:rsa|dsa|ecdsa|ed25519)|.+\.(?:pem|key|p8|p12|pfx|keystore)|(?:credentials|service-account.*)\.json)$",
     re.I,
 )
 RUNSH = re.compile(r"(?:^|/)run-[^/]+\.sh$", re.I)
@@ -37,6 +41,7 @@ LOGS = re.compile(r"(?:^|/)logs/", re.I)
 HEX = re.compile(rb"[0-9a-f]{40,64}")
 MODE = re.compile(rb"[0-7]{6}")
 STATUS = re.compile(rb"[ACDMTUX]+")
+TREE_MODE = re.compile(rb"[0-7]{5,6}")
 GITLINK = "160000"
 
 
@@ -48,7 +53,7 @@ class Change:
         self.name = path.decode("utf-8", "surrogateescape")
         self.new = all(ch == "A" for ch in status)   # すべての親に無かったパス（新しく持ち込んだ）
         self.deleted = mode == "000000"
-        self.gone = False      # あとの commit で消した
+        self.gone = False      # HEAD の時点で、このパスが無い（途中で消した）
         self.ignore = None     # 無視の判定: None = 判定できない / ("", ...) = 規則なし / ("!", ...) = 例外で許可 / ("x", 規則, 場所)
         self.why_unknown = ""  # 無視の判定ができなかった理由
 
@@ -77,14 +82,16 @@ def parse_meta(tok, parents):
 
 
 def read_changes(wt, start, env):
-    """範囲の commit（新しい順）と変更を 1 回の git log で読む。読めない・形が違うときは None。"""
+    """範囲の commit（新しい順）と変更を 1 回の git log で読む。(commit の並び, HEAD の commit) を返す。
+    HEAD は、範囲の中でどの commit の親でもない唯一の commit（範囲の commit はすべて HEAD の祖先なので 1 つに決まる）。
+    読めない・形が違うときは None。"""
     r = run(["git", "-C", wt, "log", "-z", "--no-color", "--no-show-signature", "--no-notes", "--no-renames",
              "--no-ext-diff", "--root", "-c", "--raw", "--no-abbrev", "--format=%x01%H %P", start + "..HEAD", "--"],
             env=env)
     if r is None or r.returncode != 0:
         return None
     toks = r.stdout.split(b"\0")
-    commits, cur, i = [], None, 0
+    commits, parents, cur, i = [], set(), None, 0
     while i < len(toks):
         tok = toks[i].lstrip(b"\n")
         i += 1
@@ -96,6 +103,7 @@ def read_changes(wt, start, env):
                 return None
             cur = (f[0].decode(), len(f) - 1, [])
             commits.append(cur)
+            parents.update(x.decode() for x in f[1:])
             continue
         if cur is None or not tok.startswith(b":") or i >= len(toks) or not toks[i]:
             return None
@@ -104,7 +112,8 @@ def read_changes(wt, start, env):
             return None
         cur[2].append(Change(cur[0], meta[0], meta[1], meta[2], toks[i]))
         i += 1
-    return commits
+    tips = [c[0] for c in commits if c[0] not in parents]
+    return commits, (tips[0] if len(tips) == 1 else None)
 
 
 def blob_sizes(wt, oids, env):
@@ -135,16 +144,16 @@ def dirs_of(path):
     return out
 
 
-def read_gitignores(wt, queries, env):
-    """[(commit, フォルダ)] → {(commit, フォルダ): その commit の <フォルダ>.gitignore の中身}。読めないときは None。"""
-    if not queries:
-        return {}
-    data = b"".join(c.encode() + b":" + d + b".gitignore\n" for c, d in queries)
-    r = run(["git", "-C", wt, "cat-file", "--batch"], data, env)
+def cat_batch(wt, names, env):
+    """名前（<commit>:<パス>）ごとの (oid, 種類, 中身) の並び。見つからない・取得できないものは None。
+    git が失敗した・出力の形が違うときは全体が None。"""
+    if not names:
+        return []
+    r = run(["git", "-C", wt, "cat-file", "--batch"], b"".join(n + b"\n" for n in names), env)
     if r is None or r.returncode != 0:
         return None
-    found, pos, buf = {}, 0, r.stdout
-    for c, d in queries:
+    out, pos, buf = [], 0, r.stdout
+    for _ in names:
         end = buf.find(b"\n", pos)
         if end < 0:
             return None
@@ -154,12 +163,91 @@ def read_gitignores(wt, queries, env):
             size = int(f[2])
             if buf[pos + size:pos + size + 1] != b"\n":
                 return None
-            if f[1] == b"blob":
-                found[(c, d)] = buf[pos:pos + size]
+            out.append((f[0].decode(), f[1], buf[pos:pos + size]))
             pos += size + 1
-        elif head != c.encode() + b":" + d + b".gitignore missing":
+        elif head.endswith((b" missing", b" ambiguous")):
+            out.append(None)
+        else:
             return None
-    return found
+    return out if pos == len(buf) else None
+
+
+def tree_entries(obj):
+    """木の応答 → {名前: (mode（数値）, oid（16 進））}。木でない・取得できない・形が違えば None。"""
+    if obj is None or obj[1] != b"tree":
+        return None
+    oid, _, body = obj
+    n, out, pos = len(oid) // 2, {}, 0
+    while pos < len(body):
+        sp = body.find(b" ", pos)
+        nul = body.find(b"\0", sp + 1) if sp > pos else -1
+        if nul < 0 or nul + 1 + n > len(body) or not TREE_MODE.fullmatch(body[pos:sp]):
+            return None
+        out[body[sp + 1:nul]] = (int(body[pos:sp], 8), body[nul + 1:nul + 1 + n].hex())
+        pos = nul + 1 + n
+    return out
+
+
+class Trees:
+    """各 commit の木（変更パスの親フォルダ）と、そこにある .gitignore の中身を 1 回の git cat-file --batch で読む。
+    項目の有無と種類は、親フォルダの木で確かめる（名前で引いた「missing」は、項目が無い場合と、部分 clone で中身を
+    取得できない場合を区別できないため）。dirs: 木を読む (commit, フォルダ)、ignores: .gitignore を読む (commit, フォルダ)。"""
+
+    def __init__(self, wt, dirs, ignores, env):
+        tq, gq = sorted(set(dirs) | set(ignores)), sorted(set(ignores))
+        got = cat_batch(wt, [c.encode() + b":" + d[:-1] for c, d in tq]
+                        + [c.encode() + b":" + d + b".gitignore" for c, d in gq], env)
+        self.read = got is not None
+        got = got or []
+        self.trees, self.blobs = dict(zip(tq, got[:len(tq)])), dict(zip(gq, got[len(tq):]))
+        self.cache = {}
+
+    def entries(self, c, d):
+        if (c, d) not in self.cache:
+            self.cache[(c, d)] = tree_entries(self.trees.get((c, d)))
+        return self.cache[(c, d)]
+
+    def gitignore(self, c, d):
+        """c の時点の <d>.gitignore の規則: (中身, "")。規則なし（無い・フォルダ・リンク・サブモジュール）は (b"", "")。
+        読めなければ (None, 理由)。Git はリンクの .gitignore を読まない（リンク先の名前を規則として扱わない）。"""
+        if not self.read:
+            return None, "その commit の時点の .gitignore を読めない（git cat-file が失敗）"
+        ents = self.entries(c, d)
+        if ents is None:
+            return None, "その commit の時点のフォルダの一覧を読めない（部分 clone など）"
+        e = ents.get(b".gitignore")
+        if e is None or e[0] in (0o40000, 0o120000, 0o160000):
+            return b"", ""
+        obj = self.blobs.get((c, d))
+        if e[0] not in (0o100644, 0o100755, 0o100664) or obj is None or obj[1] != b"blob" or obj[0] != e[1]:
+            return None, "その commit の時点の .gitignore の中身を取得できない（部分 clone など）"
+        return obj[2], ""
+
+    def exists(self, c, path):
+        """c の時点で path があるか: True / False / None（木を読めず分からない・照合に使えない形）。"""
+        dirs = dirs_of(path)
+        if dirs is None or not self.read:
+            return None
+        for i, d in enumerate(dirs):
+            ents = self.entries(c, d)
+            if ents is None:
+                return None
+            last = i == len(dirs) - 1
+            e = ents.get(path[len(d):] if last else dirs[i + 1][len(d):-1])
+            if e is None or (not last and e[0] != 0o40000):
+                return False
+        return True
+
+
+def read_ignore_case(wt, env):
+    """対象リポジトリで有効な core.ignoreCase（"true" / "false"。設定が無ければ Git の既定の "false"）。読めなければ None。"""
+    r = run(["git", "-C", wt, "config", "--bool", "--get", "core.ignoreCase"], env=env)
+    if r is None:
+        return None
+    if r.returncode == 1 and not r.stdout:
+        return "false"
+    v = r.stdout.strip()
+    return v.decode() if r.returncode == 0 and v in (b"true", b"false") else None
 
 
 def fold(d):
@@ -167,32 +255,33 @@ def fold(d):
     return unicodedata.normalize("NFC", d.decode("utf-8", "surrogateescape")).casefold()
 
 
-def check_ignores(wt, commits, tmp_parent, env):
+def check_ignores(wt, targets, trees, tmp_parent, env):
     """削除以外の変更のパスを、その commit の時点の .gitignore（最上位と、パスの親フォルダのもの）で照合する。
-    規則の組ごとに一時フォルダの r<番号>/ の下へ .gitignore だけを写し、1 回の git check-ignore で全部を問い合わせる。"""
-    targets = [ch for _, _, changes in commits for ch in changes if not ch.deleted]
+    規則の組ごとに一時フォルダの r<番号>/ の下へ .gitignore だけを写し、1 回の git check-ignore で全部を問い合わせる。
+    大文字・小文字の扱いは、一時リポではなく対象リポジトリで有効な core.ignoreCase に合わせる。"""
     if not targets:
         return
-    per_commit, queries = {}, []
+    ignore_case = read_ignore_case(wt, env)
+    per_commit = {}   # commit → {フォルダ: .gitignore の中身}（規則のあるフォルダだけ）
     for ch in targets:
         dirs = dirs_of(ch.path)
         if dirs is None:
             ch.why_unknown = "パスの形を照合に使えない（空・.・..・.git・改行を含むフォルダ）"
             continue
-        want = per_commit.setdefault(ch.sha, set())
+        if ignore_case is None:
+            ch.why_unknown = "対象リポジトリの core.ignoreCase を読めない"
+            continue
+        rules = per_commit.setdefault(ch.sha, {})
         for d in dirs:
-            if d not in want:
-                want.add(d)
-                queries.append((ch.sha, d))
-    contents = read_gitignores(wt, queries, env)
-    if contents is None:
-        for ch in targets:
-            ch.why_unknown = ch.why_unknown or "その commit の時点の .gitignore を読めない"
-        return
+            body, why = trees.gitignore(ch.sha, d)
+            if body is None:
+                ch.why_unknown = why
+                break
+            if body:
+                rules[d] = body
     rulesets, which = {}, {}
-    for sha, dirs in per_commit.items():
-        key = tuple(sorted((d, contents[(sha, d)]) for d in dirs if (sha, d) in contents))
-        which[sha] = rulesets.setdefault(key, len(rulesets))
+    for sha, rules in per_commit.items():
+        which[sha] = rulesets.setdefault(tuple(sorted(rules.items())), len(rulesets))
     tmp = None
     try:
         tmp = tempfile.mkdtemp(prefix="history-inspect.", dir=tmp_parent)
@@ -218,7 +307,8 @@ def check_ignores(wt, commits, tmp_parent, env):
         r = None
         if init is not None and init.returncode == 0:
             r = run(["git", "-C", tmp, "-c", "core.excludesFile=" + os.devnull, "-c", "core.precomposeUnicode=false",
-                     "check-ignore", "--no-index", "-v", "-n", "-z", "--stdin"], b"\0".join(qs) + b"\0", genv)
+                     "-c", "core.ignoreCase=" + ignore_case, "check-ignore", "--no-index", "-v", "-n", "-z", "--stdin"],
+                    b"\0".join(qs) + b"\0", genv)
         toks = r.stdout.split(b"\0") if r is not None and r.returncode in (0, 1) else []
         if len(toks) != 4 * len(qs) + 1 or any(toks[4 * k + 3] != qs[k] for k in range(len(qs))):
             for ch in asked:
@@ -231,11 +321,12 @@ def check_ignores(wt, commits, tmp_parent, env):
             elif pattern.startswith(b"!"):
                 ch.ignore = ("!",)
             else:
-                place = src.split(b"/", 1)[-1].decode("utf-8", "surrogateescape") + " " + line.decode("ascii", "replace") + " 行目"
+                place = show(src.split(b"/", 1)[-1].decode("utf-8", "surrogateescape")) + " " + line.decode("ascii", "replace") + " 行目"
                 ch.ignore = ("x", pattern.decode("utf-8", "surrogateescape"), place)
     except OSError:
         for ch in targets:
-            ch.why_unknown = ch.why_unknown or "照合用の一時フォルダを作れない"
+            if ch.ignore is None:
+                ch.why_unknown = ch.why_unknown or "照合用の一時フォルダを作れない"
     finally:
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -326,35 +417,44 @@ def main():
         tmp_parent = None
     # 部分 clone でも、点検のために外から取りに行かない（取れないものは「判定できなかった」に分ける）
     env = dict(os.environ, LC_ALL="C", GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="lanes-no-transport")
-    commits = read_changes(wt, start, env)
-    if commits is None:
+    got = read_changes(wt, start, env)
+    if got is None:
         return 1
-    # あとの commit（git log の新しい順で先に出る）で消したパスに印を付ける
-    removed = set()
-    for _, _, changes in commits:
-        for ch in changes:
-            if ch.new and ch.path in removed:
-                ch.gone = True
-        removed.update(ch.path for ch in changes if ch.deleted)
+    commits, head = got
     changes = [ch for _, _, cs in commits for ch in cs]
-    oids = sorted({ch.oid for ch in changes if not ch.deleted and ch.mode != GITLINK})
+    targets = [ch for ch in changes if not ch.deleted]
+    # 木を読む (commit, フォルダ): 規則の照合には各変更の commit の親フォルダ、残っているかの確認には HEAD の親フォルダ
+    ignores, dirs = set(), set()
+    for ch in targets:
+        ds = dirs_of(ch.path) or []
+        ignores.update((ch.sha, d) for d in ds)
+        if ch.new and head:
+            dirs.update((head, d) for d in ds)
+    trees = Trees(wt, dirs, ignores, env)
+    # 新しく持ち込んだパスが HEAD に無いかは HEAD の木で確かめる（別の枝で同じ名前を足して消しても、HEAD に残っていれば印を付けない）
+    for ch in targets:
+        ch.gone = bool(ch.new and head) and trees.exists(head, ch.path) is False
+    oids = sorted({ch.oid for ch in targets if ch.mode != GITLINK})
     sizes = blob_sizes(wt, oids, env)
-    check_ignores(wt, commits, tmp_parent, env)
+    check_ignores(wt, targets, trees, tmp_parent, env)
 
     bad, maybe, unknown = [], [], []
     for ch in changes:
         if ch.deleted:
             continue   # 削除だけの変更は混入に数えない
         where = "commit " + ch.sha[:12] + " の " + ch.status + " " + show(ch.name)
-        gone = "。あとの commit で消したが、公開履歴に残る" if ch.gone else ""
-        size_r = []
+        gone = "。HEAD には無い（途中で消したが、公開履歴に残る）" if ch.gone else ""
+        size_r, why = [], []
         if ch.mode != GITLINK:
             if ch.oid not in sizes:
-                unknown.append((["大きさが分からない"], where + "（大きさを確かめられない）"))
+                why.append(("大きさが分からない", "大きさを確かめられない"))
             elif sizes[ch.oid] >= HUGE:
                 size_r = [("巨大ファイル", "巨大ファイル（変更後 " + str(sizes[ch.oid]) + " バイト）")]
         if ch.ignore is None:
-            unknown.append((["規則と照合できない"], where + "（" + (ch.why_unknown or "その commit の時点の .gitignore と照合できなかった") + "）"))
+            why.append(("規則と照合できない", ch.why_unknown or "その commit の時点の .gitignore と照合できなかった"))
+        if why:
+            # 判定できなかった理由は、変更 1 件につき 1 回だけ数える（理由別の件数は理由ごとに 1）
+            unknown.append(([k for k, _ in why], where + "（" + "・".join(t for _, t in why) + "）"))
         state = ch.ignore[0] if ch.ignore else None
         rule = "その commit の .gitignore の規則 " + show(ch.ignore[1]) + "（" + ch.ignore[2] + "）で無視される" if state == "x" else ""
         # .gitignore の例外（! の規則）で明示的に許可された名前は、名前では候補にしない
@@ -385,7 +485,8 @@ def main():
         out.append("    （変更なし）")
     out.append("")
     n_new = sum(1 for ch in changes if ch.new)
-    out.append("- 混入の点検（ランチャが、上の一覧と同じ変更・変更後の大きさ・その commit の時点の .gitignore だけを見た。内容・作者は見ていない。"
+    out.append("- 混入の点検（ランチャが、上の一覧と同じ変更・変更後の大きさ・親フォルダの一覧・その commit の時点の .gitignore・HEAD の木だけを見た。"
+               "内容・作者は見ていない。"
                "点検は全件で行い、ここには分類ごとの件数・理由別の件数・代表箇所（各 " + str(MAX_SHOW) + " 件まで）を載せる）: commit "
                + str(len(commits)) + " 件・変更 " + str(len(changes)) + " 件（うち新しく持ち込んだパス " + str(n_new) + " 件）を点検した。")
     out.append("")
