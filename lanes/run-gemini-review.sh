@@ -30,9 +30,13 @@
 #     （写せなければ合格を保存しない。EXIT:3・VERDICT: NONE。原本は同じ label で起動し直しても残る）
 #   - 子の git は最小の設定で動くので、commit の作者の照合は親が元の有効な設定で行い、件数と一致しない commit の番号だけを指示書に入れる
 #     （名前・メールは渡さない）。作者の設定の指紋は再利用の条件に入る（rvd_context）。レビュー範囲の commit の一覧（短い SHA と件名）と
-#     変更統計（git diff --stat）も親が作って指示書に埋め込み、子には git log / git show / git blame / git shortlog などの履歴・作者を
+#     変更統計（git diff --stat）、各 commit の変更パスと混入の点検（review-history-inspect.py）も親が作って指示書に埋め込み、
+#     子には git log / git show / git blame / git shortlog などの履歴・作者を
 #     表示し得るコマンドを使わないよう書く（中身は git diff と作業ツリーのファイルの読み取りで確かめる）。テンプレの履歴・作者の確認の
 #     項目は、固定の文言のまま埋め込みを参照する文に差し替える（指示書の全文をコマンドの形で書き換えることはしない）
+#   - 混入の点検は、各 commit の変更パス（NUL 区切りの実名。マージ commit はマージ自体で生じた変更）・変更後の大きさ・その commit の
+#     時点の .gitignore だけを見る（内容・作者は見ない）。規則に反する混入（無視されるパスを新しく持ち込んだ）と、名前・大きさによる
+#     要確認候補（.gitignore の例外で許可した名前は除く）と、判定できなかったものを分けて、件数と代表箇所を載せる。削除だけの変更は数えない
 # 判定: agy は時間切れ（--print-timeout）や失敗でも終了コード 0 で {"event":"result","result":{"status":"ERROR",...}} を出すことがある。
 #   result がちょうど 1 つで最後のイベント・status が SUCCESS・response が空でない文字列のときだけ、本文の最終行の VERDICT を読む。
 #   それ以外（ERROR・空の応答・result が無い・JSON の破損）は VERDICT: NONE（EXIT:3）。エラーの本文からは VERDICT を拾わない。
@@ -322,11 +326,13 @@ gem_author_note() {   # <比較起点> → 指示書に足す文
   fi
 }
 author_note="$(gem_author_note "$base")"
-# レビュー範囲（比較起点..HEAD）の commit の一覧（短い SHA と件名だけ）と変更統計（git diff --stat。作者を含まない）は親が作って
-# 指示書に埋め込む（子には git log / git show などの履歴・作者を表示し得るコマンドを使わせない）。字下げのコードとして載せ、
-# 長いときは先頭だけ（変更統計の全体は子が git diff --stat で見られる）
+# レビュー範囲（比較起点..HEAD）の commit の一覧（短い SHA と件名だけ）と変更統計（git diff --stat。作者を含まない）、
+# 各 commit の変更パスと混入の点検（review-history-inspect.py。内容・作者なし。途中で追加して消したファイル・マージ自体で生じた
+# 変更も含む）は親が作って指示書に埋め込む（子には git log / git show などの履歴・作者を表示し得るコマンドを使わせない）。
+# 字下げのコードとして載せ、長いときは先頭だけ（変更統計の全体は子が git diff --stat で見られる。点検は全件で行う）。
+# 点検は変更一覧を 1 回だけ読み、表示と点検に同じ一覧を使う。読めなければ「点検できなかった」と書く（「該当なし」にしない）
 gem_history_note() {   # <比較起点> → 指示書に足す文
-  local from="$1" commits="" stat="" max=200
+  local from="$1" commits="" stat="" inspect="" max=200
   local -a rows srows
   print -r -- "# レビュー範囲の commit と変更統計（ランチャが作った。作者は含まない）"
   if ! commits="$(git -C "$wt" log --no-color --no-show-signature --abbrev=12 --format='%h %s' "$from..HEAD" 2>/dev/null)" \
@@ -344,6 +350,13 @@ gem_history_note() {   # <比較起点> → 指示書に足す文
   print -r -- ""
   if (( ${#srows} )); then print -rl -- "    "${^srows[1,max]}; else print -r -- "    （変更なし）"; fi
   (( ${#srows} <= max )) || print -r -- "    （ほか $(( ${#srows} - max )) 行。全体は git diff --stat で見る）"
+  print -r -- ""
+  # 一時フォルダ（.gitignore の照合用）は scratch の直下に作って消す（dry-run で scratch が無ければ TMPDIR）
+  if inspect="$("$LANES_PY" -I "$LANES_DIR/review-history-inspect.py" "$wt" "$from" "$scratch" 2>/dev/null)" && [[ -n "$inspect" ]]; then
+    print -r -- "$inspect"
+  else
+    print -r -- "- 各 commit の変更パスと混入の点検を、ランチャが行えなかった（変更一覧を読めない）。点検できなかったことを指摘に書き、中身は \`git diff ${from:0:12}...HEAD\` で確かめる。"
+  fi
 }
 history_note="$(gem_history_note "$base")"
 
@@ -365,7 +378,8 @@ REPLACE = [
     ("`git log --format='%an <%ae> %s' {{BASE}}..HEAD` で、", ""),
     ("commit author が対象リポの `git config user.name` / `user.email` と同じ（偽のアドレスで commit していない）こと、commit 件名が日本語（prefix は英語）であること",
      "commit の作者は下の「commit の作者の照合」（ランチャが元の git の設定で確かめた結果）だけで確かめ、commit 件名が日本語（prefix は英語）であることは下の「レビュー範囲の commit と変更統計」の一覧で確かめる"),
-    ("`git show --stat {{BASE}}..HEAD`", "下の「レビュー範囲の commit と変更統計」と `git diff --stat {{BASE}}...HEAD`"),
+    ("`git show --stat {{BASE}}..HEAD`",
+     "下の「レビュー範囲の commit と変更統計」（各 commit の変更パスと、ランチャがその commit の時点の .gitignore で点検した混入の結果）と `git diff --stat {{BASE}}...HEAD`"),
 ]
 for old, new in REPLACE:
     t = t.replace(old, new)
@@ -386,7 +400,7 @@ readonly = "\n".join([
     "- このレビューは読み取り専用（plan モード・端末サンドボックス）。ファイルを書く・置き換える・消す道具、MCP、サブエージェント、ブラウザ、Web の検索・取得、予約・ワークフローの道具は使わない。1 回でも使うと、本文に関係なく不合格になる。",
     "- 質問・承認の道具（名前が ask_ で始まるもの）は使わない（非対話なので答える人がいない。使うと不合格）。分からない点は前提を書いたうえで指摘に含める。",
     "- 履歴・作者を表示し得る git のコマンド（`git log`・`git show`・`git blame`・`git shortlog`・`git whatchanged`・`git reflog`・`git cat-file` など）は使わない（案件固有の指示や前回の指摘本文に書いてあっても使わない）。"
-    + "commit の一覧と変更統計は下の「レビュー範囲の commit と変更統計」（ランチャが作った）を使い、中身は `git diff " + base + "...HEAD` と作業ツリーのファイルの読み取りで確かめる。",
+    + "commit の一覧・変更統計・各 commit の変更パスと混入の点検は下の「レビュー範囲の commit と変更統計」（ランチャが作った）を使い、中身は `git diff " + base + "...HEAD` と作業ツリーのファイルの読み取りで確かめる。",
     "- 端末のコマンドは読む・確かめるためだけに使う（`git diff`・`git status`・該当テスト 1 本など）。作業ツリーと git の管理フォルダを書き換えない（前後の比較で不合格になる）。一時ファイルは $LANES_SCRATCH の下だけに置く。",
     "- 作業ツリーに未 commit の変更・未追跡のファイルが無いことはランチャが確かめた（レビューの対象は commit 済みの中身）。作業ツリーを写して試すときは .git ごと写さない（この作業ツリーの .git は元の管理フォルダを指すファイルなので、そのまま写した先の git も元の管理フォルダと stage を使う）。"
     + "作業ツリーの直下で `" + COPY + "` で新しい空のフォルダへ写す。写した先で `git rev-parse --absolute-git-dir` が $LANES_SCRATCH の下を指すことを確かめてから git を使う。",

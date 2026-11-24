@@ -670,5 +670,116 @@ assert "test: 枝の変更" in hist and "a.txt" in hist, hist
 assert "dev-only.txt" not in hist and "統合先だけの変更" not in hist, hist
 PY
 pass "比較起点が先に進んでいても、埋め込む commit の一覧と変更統計はこの枝の変更だけ（変更統計は分岐点からの差分）"
+# 分岐点と HEAD だけの変更統計では消える、途中で追加して消した禁止ファイルも、各 commit の変更パスと混入の点検に載る（内容は埋めない）
+newrepo dropped; L="$wt/logs"
+token='GRV_SECRET_TOKEN_NOT_FOR_PROMPT'
+print -r -- "$token" > "$wt/.env"
+git -C "$wt" add -f -- .env
+git -C "$wt" commit -qm 'test: 途中の秘密ファイル'
+added="$(git -C "$wt" rev-parse --short=12 HEAD)"
+git -C "$wt" rm -q .env
+change '秘密ファイルを消す'
+STUB_AGY_RESPONSE="$CLEAN" grv 0 drop --dry-run
+python3 -I - "$L/drop.dry-run.prompt.md" "$added" "$token" <<'ENDDROP' || fail "途中で追加して消した禁止ファイルの点検が指示書に無い、または内容が漏れている"
+import sys
+t, sha, token = open(sys.argv[1], encoding="utf-8").read(), sys.argv[2], sys.argv[3]
+hist = t.split("# レビュー範囲の commit と変更統計（ランチャが作った。作者は含まない）")[1].split("\n# ")[0]
+assert "各 commit の変更パス" in hist and "混入の点検" in hist, hist
+assert "commit " + sha + " の A .env（" in hist and "秘密らしい名前" in hist and "あとの commit で消したが、公開履歴に残る" in hist, hist
+assert token not in t, "秘密ファイルの内容が指示書に漏れている"
+stat = hist.split("- 変更統計")[1].split("- 各 commit の変更パス")[0]
+assert ".env" not in stat, stat
+ENDDROP
+pass "途中で追加して消した禁止ファイルも、各 commit の変更パスと混入の点検に載る（内容は埋め込まない）"
+# 混入の点検（review-history-inspect.py）: 比較起点の後の各 commit を、その commit の時点の .gitignore と生のパスで照合する。
+# - 規則に反する混入（無視されるパスを新しく持ち込んだ）と、名前・大きさによる要確認候補と、判定できなかったものを分ける
+# - 正規の run-*.sh の変更・.gitignore の例外（!.env.example）で許可した見本・比較起点からあったファイルの削除は数えない
+# - マージ commit 自体で生じた変更も点検し、表示と点検で同じ一覧を使う
+# - 引用符・タブ・前後の空白を含む名前も実名で照合し（Git の表示用の引用を通さない・前後の空白を削らない）、表示だけ引用する
+# - 変更時点の規則で見る（あとで規則から外した .log は混入、あとで規則に足した .cfg は混入ではない）
+newrepo insp; L="$wt/logs"
+print -r -- $'logs/\n.env*\n!.env.example\n*.log' > "$wt/.gitignore"
+mkdir -p "$wt/tools"; print -r -- '#!/bin/sh' > "$wt/tools/run-tool.sh"
+python3 -I -c 'import sys; open(sys.argv[1], "wb").write(b"\0" * 1100000)' "$wt/old-big.bin"
+git -C "$wt" add -A; git -C "$wt" commit -qm 'test: 比較起点までの準備'
+git -C "$wt" update-ref refs/remotes/origin/develop HEAD
+from="$(git -C "$wt" rev-parse HEAD)"
+print -r -- 'echo ok' >> "$wt/tools/run-tool.sh"; print -r -- 'EXAMPLE_ONLY=' > "$wt/.env.example"; git -C "$wt" rm -q old-big.bin
+git -C "$wt" add -A; git -C "$wt" commit -qm 'test: 正規のファイルの変更・見本・削除'
+mkdir -p "$wt/q\"uo" "$wt/ta"$'\t'"b"
+for f in "q\"uo/.env" "ta"$'\t'"b/.env" " .env" ".env "; do print -r -- "$token" > "$wt/$f"; done
+print -r -- '#!/bin/sh' > "$wt/run-new.sh"
+git -C "$wt" add -f -A; git -C "$wt" commit -qm 'test: 紛らわしい名前'
+weird="$(git -C "$wt" rev-parse --short=12 HEAD)"
+print -r -- 'x' > "$wt/tmp.log"; git -C "$wt" add -f tmp.log; git -C "$wt" commit -qm 'test: 当時は無視されるログ'
+logsha="$(git -C "$wt" rev-parse --short=12 HEAD)"
+print -r -- $'logs/\n.env*\n!.env.example' > "$wt/.gitignore"; git -C "$wt" add -A; git -C "$wt" commit -qm 'test: ログを規則から外す'
+print -r -- 'x' > "$wt/later.cfg"; git -C "$wt" add -A; git -C "$wt" commit -qm 'test: 当時は無視されない設定'
+print -r -- 'later.cfg' >> "$wt/.gitignore"; git -C "$wt" add -A; git -C "$wt" commit -qm 'test: あとで規則に足す'
+mkdir -p "$wt/we"$'\n'"ird"; print -r -- 'x' > "$wt/we"$'\n'"ird/f.txt"; git -C "$wt" add -A; git -C "$wt" commit -qm 'test: 改行を含むフォルダ'
+git -C "$base" checkout -q -b side; print -r -- 'side' > "$base/side.txt"; git -C "$base" add -A
+git -C "$base" -c user.name="Test User" -c user.email=you@example.com -c commit.gpgSign=false commit -qm 'test: 横の変更'
+git -C "$wt" merge -q --no-ff --no-commit side
+print -r -- "$token" > "$wt/.env.local"; git -C "$wt" add -f .env.local; git -C "$wt" commit -qm 'test: マージで足す'
+merge="$(git -C "$wt" rev-parse --short=12 HEAD)"
+STUB_AGY_RESPONSE="$CLEAN" grv 0 insp --dry-run
+cp -- "$L/insp.dry-run.prompt.md" "$T/insp.prompt.md"
+inspcheck() {   # <指示書のファイル>
+  python3 -I - "$1" "$weird" "$logsha" "$merge" "$token" <<'ENDINSP' || fail "混入の点検の分類・表示が違う: $1"
+import sys
+t, weird, logsha, merge, token = open(sys.argv[1], encoding="utf-8").read(), *sys.argv[2:6]
+hist = t.split("# レビュー範囲の commit と変更統計（ランチャが作った。作者は含まない）")[1].split("\n# ")[0]
+listing = hist.split("- 各 commit の変更パス")[1].split("- 混入の点検")[0]
+bad = hist.split("- 規則に反する混入")[1].split("- 名前・大きさによる要確認候補")[0]
+maybe = hist.split("- 名前・大きさによる要確認候補")[1].split("- 判定できなかったもの")[0]
+unknown = hist.split("- 判定できなかったもの")[1]
+# マージ commit 自体で足したパスも、一覧と点検の両方に同じ commit で載る
+assert merge + " AA .env.local" in listing, listing
+assert "commit " + merge + " の AA .env.local（" in bad, bad
+# 引用符・タブ・前後の空白を含む名前は実名で照合し、表示だけ引用する（生のタブ・改行は指示書に入れない）
+for shown in ('"q\\"uo/.env"', '"ta\\tb/.env"', '".env "'):
+    assert "commit " + weird + " の A " + shown + "（" in bad, (shown, bad)
+assert "commit " + weird + " の A \" .env\"（秘密らしい名前）" in maybe, maybe
+assert "ta\tb" not in t and "we\nird" not in t, "生のタブ・改行が指示書に入った"
+# 名前だけで候補にしたもの（規則には反しない）は候補に分け、正規のファイルの変更・許可した見本・削除は数えない
+assert "run-new.sh（名前が run-*.sh" in maybe and "run-new.sh" not in bad, (bad, maybe)
+for name in ("tools/run-tool.sh", ".env.example", "old-big.bin", "later.cfg", "side.txt"):
+    assert name not in bad and name not in maybe, (name, bad, maybe)
+assert " M tools/run-tool.sh" in listing and " A .env.example" in listing and " D old-big.bin" in listing, listing
+# 変更時点の規則: あとで規則から外したログは、持ち込んだ時点で無視されていたので混入
+assert "commit " + logsha + " の A tmp.log（その commit の .gitignore の規則 *.log（.gitignore 4 行目）で無視される" in bad, bad
+# 照合できないもの（改行を含むフォルダ）は「判定できなかったもの」に分け、「見つからなかった」と書かない
+assert '"we\\nird/f.txt"（パスの形を照合に使えない' in unknown, unknown
+assert "見つからなかった" not in hist, hist
+assert "規則に反する混入（その commit の時点の .gitignore で無視されるパスを、新しく持ち込んだ）: 5 件" in hist, bad
+assert token not in t, "秘密らしいファイルの内容が指示書に漏れている"
+ENDINSP
+}
+inspcheck "$T/insp.prompt.md"
+pass "混入の点検は、変更時点の規則と生のパスで照合し、規則に反する混入・名前による要確認候補・判定できなかったものを分ける（マージ自体の変更も含む。正規の run-*.sh・許可した見本・削除は数えない）"
+# 動作前提の python3（macOS 付属の 3.9 など、3.11 以前）でも、点検処理そのものが動いて同じ結果になる。
+# 3.11 以前の python3 があれば、ランチャ全体（親の補助処理）もその python3 に固定して dry-run する
+old_py=""
+for c in /usr/bin/python3 python3.11 python3.10 python3.9 python3.8; do
+  p="$(command -v "$c" 2>/dev/null)" || continue
+  exe="$(cd / && "$p" -I -c 'import sys; print(sys.executable if (3, 8) <= sys.version_info[:2] < (3, 12) else "")' 2>/dev/null)" || continue
+  [[ -n "$exe" && -x "$exe" ]] && { old_py="$exe"; break; }
+done
+if [[ -n "$old_py" ]]; then
+  "$old_py" -I "$LANES_DIR/review-history-inspect.py" "$wt" "$from" > "$T/insp-old.out" || fail "3.11 以前の python3（$old_py）で点検処理が動かない"
+  python3 -I "$LANES_DIR/review-history-inspect.py" "$wt" "$from" > "$T/insp-new.out" || fail "点検処理が動かない"
+  cmp -s "$T/insp-old.out" "$T/insp-new.out" || { diff "$T/insp-old.out" "$T/insp-new.out" >&2; fail "3.11 以前の python3 と今の python3 で点検の結果が違う"; }
+  LANES_PY_FIXED="$old_py" STUB_AGY_RESPONSE="$CLEAN" grv 0 insp-old --dry-run
+  inspcheck "$L/insp-old.dry-run.prompt.md"
+  pass "3.11 以前の python3（$("$old_py" -I -c 'import platform; print(platform.python_version())')）でも点検処理が動き、今の python3 と同じ結果になる（ランチャ全体をその python3 に固定しても同じ）"
+else
+  print -r -- "LANES_PARTIAL: 3.11 以前の python3 が無いので、古い Python で点検処理を動かす確かめを省いた"
+fi
+# 比較起点を読めない・16 進でないときは、点検処理は何も出さずに終了コード 1（呼び出し側が「点検できなかった」と書く）
+rc=0; out="$(python3 -I "$LANES_DIR/review-history-inspect.py" "$wt" "--all" 2>&1)" || rc=$?
+(( rc == 1 )) && [[ -z "$out" ]] || fail "16 進でない比較起点で点検処理が止まらない（rc=$rc）"
+rc=0; out="$(python3 -I "$LANES_DIR/review-history-inspect.py" "$wt" "0123456789abcdef0123456789abcdef01234567" 2>&1)" || rc=$?
+(( rc == 1 )) && [[ -z "$out" ]] || fail "読めない比較起点で点検処理が止まらない（rc=$rc）"
+pass "比較起点を読めない・16 進でないときは、点検処理は何も出さずに終了コード 1"
 
 print -r -- "PASS: $count 件 / EXIT:0"
