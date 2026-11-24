@@ -89,6 +89,20 @@ def check(body, expected, *, tail=True, error=False, mutate=False):
 for fixture in sorted(fixtures.glob('clean-*.log')):
     expected='NONE' if fixture.name=='clean-p3-only.log' else 'CLEAN'
     check(fixture.read_text(),expected)
+# 成功を述べる文があっても、最後の判定行が NEEDS_FIX なら合格にしない（判定行の後ろに全角空白・ノーブレークスペースが付いていても）。
+# 完了証明つきのこの経路では、判定行の候補が空になると、前半の成功文だけで CLEAN と推定してしまう
+# （0.1.10 の作業中に、判定行の候補を空白とタブだけで作る制限を足して一度入った誤合格。0.1.8・0.1.9 は NEEDS_FIX）
+check('単体テストに問題は見つからなかったが、結合時の修正が必要\nVERDICT: NEEDS_FIX\u3000','NEEDS_FIX')
+check('単体テストに問題は見つからなかったが、結合時の修正が必要\nVERDICT: NEEDS_FIX\u00a0\n','NEEDS_FIX')
+check('問題は見つからなかった\n**VERDICT: NEEDS_FIX**\u3000\n','NEEDS_FIX')
+# 行区切りの文字（U+2028・U+2029・改ページなど）をまたいだ合格の判定行は採用しない（成功文も無いので NONE）。NEEDS_FIX は拾う
+check('確認した。\nVERDICT:\u2028CLEAN','NONE')
+check('確認した。\n\u2028    VERDICT: CLEAN','NONE')
+check('確認した。\nVERDICT:\u2029PASS','NONE')
+check('確認した。\nVERDICT:\x0cCLEAN','NONE')
+check('確認した。\nVERDICT:\u2028NEEDS_FIX','NEEDS_FIX')
+# 普通の合格の判定行は今までどおり
+check('確認した。\nVERDICT: CLEAN','CLEAN')
 check('No issues found.','NONE',tail=False)
 check('No issues found.','NONE',error=True)
 check('No issues found.','NONE',mutate=True)
@@ -191,12 +205,11 @@ LANES_CHECKS_PRESENT=lint parse_case codex 'VERDICT: NEEDS_FIX' "| lint | 未導
 LANES_CHECKS_PRESENT=lint parse_case codex 'VERDICT: NEEDS_FIX' "**lint**: 該当なし（未導入）${nl}VERDICT: CLEAN"
 LANES_CHECKS_PRESENT=lint parse_case codex 'VERDICT: NEEDS_FIX' "\`lint\`: 該当なし${nl}VERDICT: CLEAN"
 LANES_CHECKS_PRESENT=unit parse_case codex 'VERDICT: NEEDS_FIX' "- 単体テスト: 仕組みが無い${nl}VERDICT: CLEAN"
-# Codex の本文: 成功を述べる文があっても、最後の判定行が NEEDS_FIX なら合格にしない。判定行の後ろに全角空白・ノーブレークスペースが付いていても同じ
-# （判定行の候補を空白とタブだけで作る制限を Codex の読み取りにも効かせると、候補が空になって前半の成功文だけで CLEAN になる。
-#   0.1.8・0.1.9 は NEEDS_FIX。途中の候補の制限を足した直しでこの誤合格が出たので、その直しは取り消した）
-parse_case codex 'VERDICT: NEEDS_FIX' "単体テストに問題は見つからなかったが、結合時の修正が必要${nl}VERDICT: NEEDS_FIX　"
-parse_case codex 'VERDICT: NEEDS_FIX' "単体テストに問題は見つからなかったが、結合時の修正が必要${nl}VERDICT: NEEDS_FIX ${nl}"
-parse_case codex 'VERDICT: NEEDS_FIX' "問題は見つからなかった${nl}**VERDICT: NEEDS_FIX**　${nl}"
+# 行区切りの文字（ここでは U+2028。0.1.9 までの行分けでは、ここで行が切れて判定にならなかった）をまたいだ合格の判定行は採用しない。
+# 下の 2 行は、「VERDICT:」と「CLEAN」の間・行頭（そのあとに空白 4 個の字下げ）に U+2028 を置いたもの（文字そのものを書いている）
+parse_case extract 'VERDICT: NONE'      "確認した${nl}VERDICT: CLEAN"
+parse_case extract 'VERDICT: NONE'      "確認した${nl}     VERDICT: CLEAN"
+parse_case extract 'VERDICT: NEEDS_FIX' "確認した${nl}VERDICT: NEEDS_FIX"
 parse_case codex 'VERDICT: NEEDS_FIX' "**lint**: 未実施${nl}VERDICT: CLEAN"
 parse_case codex 'VERDICT: NEEDS_FIX' "- \`unit\`: 未実施${nl}VERDICT: CLEAN"
 parse_case checks INCOMPLETE "**lint**: 未実施${nl}${na_line}"

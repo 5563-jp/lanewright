@@ -560,7 +560,12 @@ findings = [0, 0, 0, 0]
 verdicts = []
 blocks = []
 block = None
-for line in lines:
+# splitlines が区切りにする文字のうち、上の行分けでは区切りにしないもの（\v・\f・FS・GS・RS・NEL・U+2028・U+2029）。
+# 0.1.9 までは splitlines で分けていたので、これらを含む行は判定行の途中で切れて、判定にならなかった。
+# 合格の候補（CLEAN・PASS）は、元の行にこれらがあれば採用しない（「VERDICT:」と「CLEAN」の間に挟まれた場合も、
+# 行頭に置いて字下げの数え方をすり抜けたコード例の場合も、同じ 1 つの条件で外す）。NEEDS_FIX は今までどおり拾う（厳しい側）。
+LINE_BREAK_CHARS = "\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+for line, at in zip(lines, accepted_at):
     content = re.sub(r"^(?:[-*+]|[0-9]+[.)])\s+", "", line)
     finding = re.match(r"^(?:\*\*)?\[P([0-3])\](?:\*\*)?(?:\s|$)", content)
     if finding:
@@ -578,6 +583,8 @@ for line in lines:
         if candidate.startswith(wrapper) and candidate.endswith(wrapper):
             candidate = candidate[len(wrapper):-len(wrapper)].strip()
     match = re.fullmatch(r"VERDICT:\s*(CLEAN|NEEDS_FIX|PASS)", candidate)
+    if match and match[1] != "NEEDS_FIX" and any(ch in raw_lines[at] for ch in LINE_BREAK_CHARS):
+        match = None
     if match:
         verdicts.append((line, "CLEAN" if match[1] == "PASS" else match[1]))
 if re.fullmatch(r"P[0-3]", mode):

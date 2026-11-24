@@ -33,6 +33,9 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   それが最後の行になるので採用しない）。
 - Gemini のレビューで、テンプレの「`git show --stat`」の項目は、埋め込みの変更パスと混入の点検の結果と `git diff --stat` を参照する文に差し替える。
 - 再利用の条件（`rvd_context`）に `review-history-inspect.py` の中身と、対象リポジトリで有効な `core.ignoreCase` を足した（設定で無視の判定が変わるので、変えたら同じ HEAD でもレビューし直す）。上げた後の最初のレビューは、前回 `CLEAN` の系列でも 1 回 full になる。
+- 合格の判定行（`VERDICT: CLEAN`・`VERDICT: PASS`）の候補は、元の行に行区切りの文字（`\v`・`\f`・U+2028・U+2029 など）があれば採用しない。
+  本文の行分けを `\n`・`\r\n`・`\r` だけにしたので、これらの文字は行の中に残る。「VERDICT:」と「CLEAN」の間に挟まれた行や、行頭に置いて字下げの数え方を
+  すり抜けたコード例の行を、合格の判定にしない（0.1.9 までは、ここで行が切れて判定にならなかった。同じ結果に保つ）。`VERDICT: NEEDS_FIX` は今までどおり拾う。
 
 ### 直したこと / Fixed（v0.1.9 の作業枝で先送りした点検の穴を、戻す前に塞いだもの）
 - 点検は macOS 付属の `python3`（3.9）でも動く（文字列の埋め込み式の中で外側と同じ引用符を使わない。3.11 以前の `python3` で動くことをテストで確かめる）。
