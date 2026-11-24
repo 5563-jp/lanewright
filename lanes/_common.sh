@@ -517,8 +517,24 @@ try:
     raw = raw_bytes.decode("utf-8")
 except (OSError, UnicodeError):
     raw_bytes, raw = b"", ""
-lines, validation_lines, fence, width = [], [], None, 0
-for line in raw.splitlines():
+# 本文の入口の規約（判定・指摘数・解消宣言・検証結果のすべてに効く。決めるのはここ 1 か所）:
+# - 行は \n・\r\n・\r だけで分ける（Markdown と同じ。splitlines は \v・\f・U+2028 なども区切りにするので、
+#   字下げしたコード例の行の途中から、判定行が始まったように見えてしまう）
+# - 字下げの幅は、空白を 1 桁、タブを次の 4 の倍数の桁までとして数え、幅 4 以上の行はコード例として解析しない
+#   （「空白 2 個＋タブ」も 4 桁。空白を除いた中身が判定行に見えても採用しない。前後 1〜3 個の空白なら今までどおり読む）
+raw_lines = re.split(r"\r\n|\r|\n", raw)
+def indent_width(line):
+    w = 0
+    for ch in line:
+        if ch == " ":
+            w += 1
+        elif ch == "\t":
+            w += 4 - w % 4
+        else:
+            break
+    return w
+lines, validation_lines, accepted_at, fence, width = [], [], [], None, 0
+for i, line in enumerate(raw_lines):
     stripped = line.strip()
     marker = re.match(r"^(`{3,}|~{3,})(.*)$", stripped)
     if marker:
@@ -528,7 +544,7 @@ for line in raw.splitlines():
         elif token[0] == fence and len(token) >= width and not suffix.strip():
             fence = None
         continue
-    if fence is not None or line.startswith(("    ", "\t")) or stripped.startswith(">"):
+    if fence is not None or indent_width(line) >= 4 or stripped.startswith(">"):
         continue
     if stripped.startswith("|"):
         # 表の判定文字列は採用しないが、テンプレ指定の検証結果表は不足の判定に使う。
@@ -539,6 +555,7 @@ for line in raw.splitlines():
     if stripped:
         lines.append(stripped)
         validation_lines.append(stripped)
+        accepted_at.append(i)
 findings = [0, 0, 0, 0]
 verdicts = []
 blocks = []
@@ -660,11 +677,13 @@ success = re.search(
     r"(?:確認できなかった|見つかりませんでした|見つからなかった)", text, re.I)
 explicit = bool(verdicts) and verdicts[-1][0] == lines[-1]
 # レビュー役（Claude・Gemini）の最終判断は、整形前の元の本文の最後の空でない行（前後の空白を除く）が
-# `VERDICT: CLEAN` か `VERDICT: NEEDS_FIX` そのものであるときだけ（表・引用・コードを除いた後の行では見ない。判定はここ 1 か所）。
-# 加えて、本文解析で採用できる判定行が末尾にあること（explicit）も求める。字下げしたコード例だけが最後にある応答を、
-# 空白を除いたあとの完全一致だけで合格にしない（v0.1.8 と同じ強さ）。
-raw_last = next((l.strip() for l in reversed(raw.splitlines()) if l.strip()), "")
-final_line = re.fullmatch(r"VERDICT: (CLEAN|NEEDS_FIX)", raw_last)
+# `VERDICT: CLEAN` か `VERDICT: NEEDS_FIX` そのもの（前後に付けてよいのは空白とタブだけ）であるときだけ（判定はここ 1 か所）。
+# その行は、本文解析で採用した行そのもの（行番号で照合する）でなければならない。コード例（字下げ幅 4 以上）・引用・表・
+# コードの囲みの中の行が最後なら、空白を除いた中身が判定行に見えても採用しない。
+# 加えて、本文解析で採用できる判定行が末尾にあること（explicit）も求める（v0.1.8 と同じ強さ。弱めない）。
+last_raw_i = next((i for i in range(len(raw_lines) - 1, -1, -1) if raw_lines[i].strip()), None)
+same_line = last_raw_i is not None and bool(accepted_at) and accepted_at[-1] == last_raw_i
+final_line = re.fullmatch(r"[ \t]*VERDICT: (CLEAN|NEEDS_FIX)[ \t]*", raw_lines[last_raw_i]) if same_line else None
 if unavailable or fence is not None:
     verdict = "NONE"
 elif mode == "codex" and sys.argv[3] and not completed:

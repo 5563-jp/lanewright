@@ -210,7 +210,7 @@ parse_case codex 'VERDICT: NONE'  "レビューを中断した${nl}VERDICT: CLEA
 parse_case codex 'VERDICT: NONE'  "レビューを完了できなかった点はないとは言えない${nl}VERDICT: CLEAN"
 # レビュー役（Claude・Gemini）の判定（review）: 整形前の元の本文の最後の空でない行（前後の空白を除く）が
 # `VERDICT: CLEAN` / `VERDICT: NEEDS_FIX` そのものでなければ、指摘の重大度から推定せず NONE（表・引用・飾りの付いた行が最後でも NONE）。
-# 4字下げ（またはタブ）のコード例は本文解析では除外するので、それが最後の空でない行なら NONE。前後1〜2個の空白だけなら従来どおり採用する。
+# 字下げ幅 4 以上（4 空白・タブ・空白とタブの混在）のコード例は本文解析では除外するので、それが最後の空でない行なら NONE。前後1〜2個の空白だけなら従来どおり採用する。
 # 必須検証の記録の使い回しでも、字下げのコード例だけでは合格にしない（explicit＝本文末尾に採用可能な判定行、も必要）。
 # 実装・QA の自己申告（extract）は今までどおり重大度から NEEDS_FIX を推定し、表の後ろの判定行の扱いも変えない
 parse_case review  'VERDICT: NONE'      "- [P2] 判定行の無い残件${nl}${skip_line}"
@@ -231,6 +231,32 @@ parse_case review  'VERDICT: NONE'      "書式例:${nl}${nl}    VERDICT: CLEAN"
 LANES_REVIEW_CHECKS_REUSED=1 parse_case review  'VERDICT: NONE'  "判定行の記入例:${nl}    VERDICT: CLEAN"
 LANES_REVIEW_CHECKS_REUSED=1 parse_case review  'VERDICT: NONE'  "書式例:${nl}${nl}    VERDICT: CLEAN"
 LANES_REVIEW_CHECKS_REUSED=1 parse_case review  'VERDICT: CLEAN' "問題なし${nl}${skip_line}${nl}VERDICT: CLEAN"
+# 字下げの幅は、空白を 1 桁・タブを次の 4 の倍数の桁までとして数える（本文の入口の 1 か所）。空白とタブを混ぜても幅 4 以上ならコード例で NONE。
+# 必須検証の使い回しの有無・「書式例:」の後ろでも同じ。前後 1〜3 個の空白（とタブの後ろ側）だけの判定行は今までどおり採用する
+tab=$'\t'
+for reuse in 0 1; do
+  LANES_REVIEW_CHECKS_REUSED=$reuse parse_case review 'VERDICT: NONE'  "問題なし${nl}${skip_line}${nl}${nl}  ${tab}VERDICT: CLEAN"
+  LANES_REVIEW_CHECKS_REUSED=$reuse parse_case review 'VERDICT: NONE'  "書式例:${nl}${nl}  ${tab}VERDICT: CLEAN"
+  LANES_REVIEW_CHECKS_REUSED=$reuse parse_case review 'VERDICT: NONE'  "書式例:${nl}${nl} ${tab}VERDICT: CLEAN"
+  LANES_REVIEW_CHECKS_REUSED=$reuse parse_case review 'VERDICT: NONE'  "書式例:${nl}${nl}   ${tab}VERDICT: CLEAN"
+  LANES_REVIEW_CHECKS_REUSED=$reuse parse_case review 'VERDICT: NONE'  "書式例:${nl}${nl}${tab} VERDICT: CLEAN"
+  LANES_REVIEW_CHECKS_REUSED=$reuse parse_case review 'VERDICT: NONE'  "書式例:${nl}${nl}    VERDICT: CLEAN"
+  LANES_REVIEW_CHECKS_REUSED=$reuse parse_case review 'VERDICT: NONE'  "書式例:${nl}${nl}${tab}VERDICT: CLEAN"
+  LANES_REVIEW_CHECKS_REUSED=$reuse parse_case review 'VERDICT: CLEAN' "問題なし${nl}${skip_line}${nl} VERDICT: CLEAN"
+  LANES_REVIEW_CHECKS_REUSED=$reuse parse_case review 'VERDICT: CLEAN' "問題なし${nl}${skip_line}${nl}  VERDICT: CLEAN${tab}"
+  LANES_REVIEW_CHECKS_REUSED=$reuse parse_case review 'VERDICT: CLEAN' "問題なし${nl}${skip_line}${nl}   VERDICT: CLEAN"
+  LANES_REVIEW_CHECKS_REUSED=$reuse parse_case review 'VERDICT: NEEDS_FIX' "- [P2] 残件${nl}${skip_line}${nl}  VERDICT: NEEDS_FIX  "
+done
+# 最後の空でない行は、本文解析で採用した行そのもの（行番号で照合）。前に同じ中身の判定行があっても、最後がコード例なら NONE
+parse_case review  'VERDICT: NONE'      "問題なし${nl}${skip_line}${nl}VERDICT: CLEAN${nl}${nl}  ${tab}VERDICT: CLEAN"
+LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: NONE' "VERDICT: CLEAN${nl}${nl}    VERDICT: CLEAN"
+# 行は \n・\r\n・\r だけで分ける（\v・\f・U+2028 で分けると、コード例の行の途中から判定行が始まったように見える）。
+# 判定行の前後に付けてよいのは空白とタブだけ（ノーブレークスペース・全角空白で囲んだ行は判定行そのものではない）
+LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: NONE' "書式例:${nl}${nl}    例"$'\v'"VERDICT: CLEAN"
+LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: NONE' "書式例:${nl}${nl}    例"$' '"VERDICT: CLEAN"
+LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: NONE' "問題なし${nl}"$' '"VERDICT: CLEAN"
+LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: NONE' "問題なし${nl}"$'　'"VERDICT: CLEAN"
+parse_case review  'VERDICT: CLEAN'     "問題なし"$'\r\n'"${skip_line}"$'\r\n'"VERDICT: CLEAN"$'\r\n'
 parse_case extract 'VERDICT: NEEDS_FIX' "- [P2] 判定行の無い残件${nl}${skip_line}"
 parse_case extract 'VERDICT: CLEAN'     "問題なし${nl}VERDICT: CLEAN${nl}| 検証 | 結果 |"
 print -- "---- $pass passed, $fail failed"
