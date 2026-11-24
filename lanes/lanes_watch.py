@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 
-from lanes_monitor import RUNS, watch_summary
+from lanes_monitor import RUNS, discover_worktrees, mtime, watch_summary
 
 # 監視の心拍がこれより古ければ止まったとみなす（5 分の見回りの 3 回分。定期の確認の間隔とは別）
 STALE_SECONDS = 15 * 60
@@ -29,6 +29,16 @@ def positive(value):
         return number
     except ValueError:
         raise argparse.ArgumentTypeError("正の有限数を指定する") from None
+
+
+def non_negative(value):
+    try:
+        number = float(value)
+        if not math.isfinite(number) or number < 0:
+            raise ValueError()
+        return number
+    except ValueError:
+        raise argparse.ArgumentTypeError("0 以上の有限数を指定する") from None
 
 
 def identity(pid):
@@ -81,6 +91,48 @@ def check(path):
     print(result, flush=True)
     watch_summary()
     return code
+
+
+def finished_lanes():
+    """終わったレーン（.done が .pid 以降に書かれたもの）と、その .done の更新時刻。読むだけで、何も書かない。
+    見るのはフォルダの一覧と更新時刻だけ（作業ツリー 200・レーン 700 ほどで 1 回 0.1 秒ほど）。"""
+    finished = {}
+    for worktree, labels in discover_worktrees():
+        for label in labels:
+            started, done = (mtime(os.path.join(worktree, "logs", label + suffix)) for suffix in (".pid", ".done"))
+            if done and done >= started:
+                finished[worktree, label] = done
+    return finished
+
+
+def finished_baseline(quick):
+    # 見回りの直前に取る。取った後に終わったレーンは、見回りが拾っていても次の軽い確認でもう一度見回る
+    # （見回りが 1 回増えるだけで、既読の判定は lanes-monitor がするので二重には知らせない。逆の順だと取りこぼす）
+    if not quick:
+        return None
+    try:
+        return finished_lanes()
+    except OSError:
+        return None
+
+
+def wait_next(until, baseline, quick):
+    """次の見回りの時刻まで待つ。quick が正なら、その間隔で「baseline の後に終わったレーンがあるか」だけを軽く見て、
+    あれば待ちを切り上げる（判定はしない。すぐ次の見回りを回して lanes-monitor に任せる）。
+    軽い確認が読めないときは、その回はいつもの間隔の見回りだけに戻す。"""
+    while True:
+        remaining = until - time.monotonic()
+        if remaining <= 0:
+            return
+        if not quick or baseline is None:
+            time.sleep(remaining)
+            return
+        time.sleep(min(quick, remaining))
+        try:
+            if any(done > baseline.get(lane, 0) for lane, done in finished_lanes().items()):
+                return
+        except OSError:
+            baseline = None
 
 
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
@@ -147,6 +199,7 @@ def watch(args, heartbeat, monitor):
         while time.monotonic() < deadline:
             tick = time.monotonic()
             remaining = deadline - tick
+            baseline = finished_baseline(args.quick_interval)
             try:
                 rc, output = run_monitor(monitor, min(240, remaining))
             except subprocess.TimeoutExpired:
@@ -169,7 +222,7 @@ def watch(args, heartbeat, monitor):
             if args.until_wake and first.startswith("WAKE:"):
                 print(REARM, flush=True)
                 return 0
-            time.sleep(max(0, min(deadline, tick + args.interval) - time.monotonic()))
+            wait_next(min(deadline, tick + args.interval), baseline, args.quick_interval)
         result = "打ち切り: --max-hours の監視時間を超えたため終了（親が次工程を判断）"
         write_heartbeat(heartbeat, started, result)
         print(result, flush=True)
@@ -185,9 +238,12 @@ def watch(args, heartbeat, monitor):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="5 分監視 / 定期の生存確認（既定 10 分ごと。LANES_CHECK_INTERVAL_MIN）。作業レーンは自動起動しない。")
+    parser = argparse.ArgumentParser(description="5 分監視（その間も、終わったレーンの有無だけは --quick-interval 秒ごとに軽く見て、あればすぐ見回る）/ "
+                                                 "定期の生存確認（既定 10 分ごと。LANES_CHECK_INTERVAL_MIN）。作業レーンは自動起動しない。")
     parser.add_argument("--until-wake", action="store_true")
     parser.add_argument("--interval", type=positive, default=300)
+    parser.add_argument("--quick-interval", type=non_negative, default=5,
+                        help="見回りの合間に、終わったレーン（新しい .done）の有無だけを見る間隔（秒）。0 で無効（--interval ごとの見回りだけ）")
     parser.add_argument("--max-hours", type=positive, default=12)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()

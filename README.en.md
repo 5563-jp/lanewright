@@ -53,7 +53,7 @@ A toolkit for running multiple AI coding CLIs installed on macOS—Claude Code, 
    │    GitHub auto-merge (GitHub merges once CI passes)
    │        ▼
    └─▶ cleanup-after-merge.sh cleans up the worktree and branch
- In parallel: lanes-watch.sh checks all lanes every 5 minutes and wakes the commander with WAKE: on changes
+ In parallel: lanes-watch.sh checks all lanes every 5 minutes (within seconds when a lane finishes) and wakes the commander with WAKE: on changes
 ```
 
 ## Prerequisites
@@ -303,7 +303,7 @@ Do not paste large diffs into the prompt file—instruct the lane to read `git d
 ## Daily workflow
 
 1. The commander splits a goal into small non-overlapping lanes and launches all independent lanes in parallel ([docs/commander-grok.md](docs/commander-grok.md) / [docs/commander-claude.md](docs/commander-claude.md), in Japanese).
-2. `lanes-watch.sh` checks all lanes every 5 minutes and notifies with `WAKE:` when anything changes (`DONE`, `FAILED`, `STALLED`, or PR state).
+2. `lanes-watch.sh` checks all lanes every 5 minutes and notifies with `WAKE:` when anything changes (`DONE`, `FAILED`, `STALLED`, or PR state). When a lane finishes, it notifies within seconds instead of waiting for the next 5-minute check.
 3. When a lane reaches `DONE`, the commander immediately connects it to the next step (review → PR). `FAILED` / `DEAD` / `STALLED` lanes are reported to the human right away.
 4. Do not spin up lanes just to watch CI. Hand PRs over to GitHub auto-merge and check their state on the next watcher pass.
 5. Production changes (merging to `main`, production deployments, production DB migrations) always wait for explicit human approval (`GO`).

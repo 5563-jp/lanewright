@@ -6,6 +6,16 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+### 変えたこと / Changed
+- `lanes-watch.sh` が、レーンが終わったとき（新しい `.done`）だけは 300 秒の見回りを待たずに数秒で見回るようにした（`--until-wake` も終わらない常駐も同じ）。
+  今までは、レーンが終わってから司令塔が起きて次工程をつなぐまで最大 5 分あいていた。見回りの合間に `logs/` の `.pid` と `.done` の更新時刻だけを
+  `--quick-interval` 秒ごと（既定 5 秒。`0` で無効＝今までどおり）に見て、見回りの直前より後に終わったレーンがあれば、すぐ次の見回りを回す。
+  `WAKE:` / `QUIET` の判定と既読の記録は今までどおり `lanes-monitor.sh` がする（出る行は同じで、早くなるだけ）。止まった疑い・落ちたプロセス・PR の状態は
+  今までどおり 300 秒ごとの見回りで拾う。ルーティンで `lanes-monitor.sh` を回す形は変わらない。
+  / `lanes-watch.sh` now runs its check within seconds when a lane finishes (a new `.done`) instead of waiting for the next 300-second check, in both
+  `--until-wake` and daemon mode. Between checks it only compares the modification times of `.pid` / `.done` under `logs/` every `--quick-interval` seconds
+  (default 5; `0` disables it). The `WAKE:` / `QUIET` decision still belongs to `lanes-monitor.sh`; stalled or dead lanes and PR state are still picked up by the regular check.
+
 ## [0.1.9] - 読み取り専用の Gemini レビューとレビュー役の振り分け / Read-only Gemini review and reviewer routing
 
 ### 足したこと / Added
