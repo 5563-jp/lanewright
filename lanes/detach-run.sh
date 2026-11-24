@@ -42,7 +42,7 @@ set -euo pipefail
 # 候補はこの 2 つだけで、前から順に、最初にある「普通のファイルで実行できる」ものを使う（Mac の Command Line Tools の実体 → OS の入口）
 set -- /Library/Developer/CommandLineTools/usr/bin/python3 "$@"
 [[ -f "$1" && -x "$1" ]] || set -- /usr/bin/python3 "${@:2}"
-[[ -f "$1" && -x "$1" ]] || { print -u2 -- "ERROR: 切り離しに使う python3 が決まった場所（/Library/Developer/CommandLineTools/usr/bin/python3・/usr/bin/python3）に無いので起動しない。PATH の python3 は使わない（Mac は xcode-select --install、Linux は OS の python3 を入れる）"; exit 2; }
+[[ -f "$1" && -x "$1" ]] || { print -u2 -- "ERROR: 切り離しに使う python3 が決まった場所（/Library/Developer/CommandLineTools/usr/bin/python3・/usr/bin/python3）に無いので起動しない。PATH の python3 は使わない（Mac は xcode-select --install、Linux は OS の python3 を入れる）" || :; exit 2; }
 # このシェルが export している変数（= ここから直に起動したコマンドへ渡る環境変数）を「名前=値」の NUL 区切りで出す。
 # 最後に空の 1 件（NUL だけ）を置く。受け取る側は、終わりが NUL 2 つなら最後まで読めたと分かる
 detach_env_dump() {

@@ -406,7 +406,7 @@ set -euo pipefail
 (( $# >= 2 )) || { print -u2 -- "usage: detach-run.sh <launch.log> <cmd> [args...]"; exit 2; }
 set -- /Library/Developer/CommandLineTools/usr/bin/python3 "$@"
 [[ -f "$1" && -x "$1" ]] || set -- /usr/bin/python3 "${@:2}"
-[[ -f "$1" && -x "$1" ]] || { print -u2 -- "ERROR: 切り離しに使う python3 が決まった場所（/Library/Developer/CommandLineTools/usr/bin/python3・/usr/bin/python3）に無いので起動しない。PATH の python3 は使わない（Mac は xcode-select --install、Linux は OS の python3 を入れる）"; exit 2; }
+[[ -f "$1" && -x "$1" ]] || { print -u2 -- "ERROR: 切り離しに使う python3 が決まった場所（/Library/Developer/CommandLineTools/usr/bin/python3・/usr/bin/python3）に無いので起動しない。PATH の python3 は使わない（Mac は xcode-select --install、Linux は OS の python3 を入れる）" || :; exit 2; }
 detach_env_dump() {
   set -- "${(@k)parameters[(R)*export*]}"
   while (( $# )); do print -rn -- "$1=${(P)1}"$'\0'; shift; done
