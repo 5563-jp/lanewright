@@ -94,14 +94,16 @@ def check(path):
 
 
 def finished_lanes():
-    """終わったレーン（.done が .pid 以降に書かれたもの）と、その .done の更新時刻。読むだけで、何も書かない。
-    見るのはフォルダの一覧と更新時刻だけ（作業ツリー 200・レーン 700 ほどで 1 回 0.1 秒ほど）。"""
+    """終わったレーン（.done が .pid 以降に書かれたもの）と、その実行の印（.pid の更新時刻）。読むだけで、何も書かない。
+    見るのはフォルダの一覧と更新時刻だけ（作業ツリー 200・レーン 700 ほどで 1 回 0.1 秒ほど）。
+    印に .done の時刻は使わない。同じ実行の .done が書き換わっただけでは「新しく終わった」とみなさず、
+    同じ label を回し直した実行は、.done の時刻の前後に関係なく別の実行として見分けるため。"""
     finished = {}
     for worktree, labels in discover_worktrees():
         for label in labels:
             started, done = (mtime(os.path.join(worktree, "logs", label + suffix)) for suffix in (".pid", ".done"))
             if done and done >= started:
-                finished[worktree, label] = done
+                finished[worktree, label] = started
     return finished
 
 
@@ -119,6 +121,7 @@ def finished_baseline(quick):
 def wait_next(until, baseline, quick):
     """次の見回りの時刻まで待つ。quick が正なら、その間隔で「baseline の後に終わったレーンがあるか」だけを軽く見て、
     あれば待ちを切り上げる（判定はしない。すぐ次の見回りを回して lanes-monitor に任せる）。
+    「baseline の後に終わった」は、baseline に無いレーンが終わっている（初めて終わった）か、同じ label の別の実行が終わっている、のどちらか。
     軽い確認が読めないときは、その回はいつもの間隔の見回りだけに戻す。"""
     while True:
         remaining = until - time.monotonic()
@@ -128,8 +131,10 @@ def wait_next(until, baseline, quick):
             time.sleep(remaining)
             return
         time.sleep(min(quick, remaining))
+        if until - time.monotonic() <= 0:
+            return   # 次の見回り（か打ち切り）の時刻になった。最後の軽い確認は要らない
         try:
-            if any(done > baseline.get(lane, 0) for lane, done in finished_lanes().items()):
+            if any(baseline.get(lane) != run for lane, run in finished_lanes().items()):
                 return
         except OSError:
             baseline = None
@@ -198,8 +203,11 @@ def watch(args, heartbeat, monitor):
         write_heartbeat(heartbeat, started, "RUNNING 初回監視中")
         while time.monotonic() < deadline:
             tick = time.monotonic()
-            remaining = deadline - tick
             baseline = finished_baseline(args.quick_interval)
+            # 残り時間は、基準を取った後で求める（基準を取っている間に全体の上限を越えたら、見回りを起動せずに打ち切る）
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             try:
                 rc, output = run_monitor(monitor, min(240, remaining))
             except subprocess.TimeoutExpired:
