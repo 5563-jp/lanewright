@@ -233,7 +233,7 @@ else: raise SystemExit('未定義の模擬応答')
 
         for kind in ("quiet", "deadline", "monitor-timeout"):
             clock = Clock()
-            args = SimpleNamespace(until_wake=True, interval=300, max_hours=600 / 3600)
+            args = SimpleNamespace(until_wake=True, interval=300, quick_interval=0, max_hours=600 / 3600)
             if kind == "deadline":
                 args.max_hours = .0001
             def tick(_monitor, timeout):
@@ -257,6 +257,74 @@ else: raise SystemExit('未定義の模擬応答')
                 check(clock.sleeps == [300, 300] and runner.call_count == 2, "QUIET の周期と全体上限を実時間待ちなしで検証")
             elif kind == "deadline":
                 check(runner.call_args.args[1] == args.max_hours * 3600, "monitor の待機上限を全体の残り時間に制限")
+
+        # 見回りの合間の軽い確認（--quick-interval）。固定時計で、待ち方と見回りの回数だけを確かめる。
+        # monitor_lines は見回りごとの 1 行目、finished は finished_lanes の呼び出しごとの戻り値（例外も可）。
+        # どちらも、一覧の代わりに関数を渡せる（見回りの最中にレーンが終わる・一覧を取るのに時間がかかる、を作るため）。
+        # finished_lanes の戻り値は「終わったレーン → その実行の印（.pid の更新時刻）」
+        def clock_watch(monitor_lines, finished, clock=None, **options):
+            clock = clock or Clock()
+            args = SimpleNamespace(**{"until_wake": True, "interval": 300, "quick_interval": 5, "max_hours": 1, **options})
+            handlers = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+            patrols = monitor_lines if callable(monitor_lines) else [(0, line + "\n") for line in monitor_lines]
+            try:
+                with (mock.patch.object(watcher, "time", clock),
+                      mock.patch.object(watcher, "run_monitor", side_effect=patrols) as runner,
+                      mock.patch.object(watcher, "finished_lanes", side_effect=finished) as lanes_seen,
+                      contextlib.redirect_stdout(io.StringIO()) as out):
+                    code = watcher.watch(args, heartbeat, monitor)
+            finally:
+                for signum, handler in handlers.items():
+                    signal.signal(signum, handler)
+            return SimpleNamespace(code=code, out=out.getvalue(), sleeps=clock.sleeps, runs=runner.call_count, seen=lanes_seen.call_count)
+
+        old, new = ("/w", "old"), ("/w", "new")
+        woke = "WAKE: 新規終了 1"
+        # 1 回目の見回りの直前の一覧（基準）→ 軽い確認 3 回目で新しく終わったレーン → 待ちを切り上げて 2 回目の見回り
+        result = clock_watch(["QUIET", woke], [{old: 10.0}, {old: 10.0}, {old: 10.0}, {old: 10.0, new: 20.0}, {}])
+        check(result.sleeps == [5, 5, 5] and result.runs == 2 and result.code == 0
+              and result.out == woke + "\n" + watcher.REARM + "\n",
+              "見回りの合間に終わったレーンを見つけたら、間隔を待たずに次の見回りを回す")
+        for mark, name in ((11.0, "新しい"), (5.0, "古い（時計のずれ・前回の .done が未来の時刻）")):
+            result = clock_watch(["QUIET", woke], [{old: 10.0}, {old: mark}, {}])
+            check(result.sleeps == [5] and result.runs == 2, f"同じ label を回し直した実行が終わったときも切り上げる（実行の印が{name}）")
+        # 終わったレーンが増えない・一覧から消えただけ（回り直しの最中）なら、いつもの間隔まで待つ。
+        # 次の見回りの時刻になった後は、最後の軽い確認をしない（1 回の間隔につき、基準 1 回 + 合間 2 回）
+        result = clock_watch(["QUIET", "QUIET", woke], [{old: 10.0}, {}, {old: 10.0}] * 2 + [{}], interval=12)
+        check(result.sleeps == [5, 5, 2] * 2 and result.runs == 3 and result.seen == 7,
+              "新しく終わったレーンが無ければ、軽い確認だけを繰り返して間隔どおりに見回る")
+        # 基準は見回りの「直前」に取る。見回りが状態を読んだ後・終わる前にレーンが終わっても、次の軽い確認で拾う
+        # （基準を見回りの後に取る作りだと、終わったレーンが基準に入ってしまい、次の見回りまで 300 秒待つ）
+        during = {}
+        def patrol(_monitor, _timeout):
+            patrol.calls += 1
+            if patrol.calls == 1:
+                during[new] = 20.0   # この回の見回りがレーンの状態を読んだ後に、そのレーンが終わった（この回は QUIET）
+                return 0, "QUIET\n"
+            return 0, woke + "\n"
+        patrol.calls = 0
+        result = clock_watch(patrol, lambda: dict(during))
+        check(result.sleeps == [5] and result.runs == 2 and result.code == 0 and result.out.startswith(woke),
+              "見回りの最中に終わったレーンを取りこぼさず、次の軽い確認で拾う（基準は見回りの直前に取る）")
+        # 基準を取っている間に全体の上限を越えたら、見回りを起動せずに打ち切る
+        slow = Clock()
+        def slow_scan():
+            slow.elapsed += .10
+            return {}
+        result = clock_watch(["QUIET"], slow_scan, clock=slow, max_hours=.05 / 3600)
+        check(result.runs == 0 and result.code == 0 and result.out.startswith("打ち切り:") and result.sleeps == [],
+              "基準を取っている間に --max-hours を越えたら、見回りを起動せずに打ち切る")
+        result = clock_watch(["QUIET", woke], [{old: 10.0}, OSError("模擬の読み取り失敗"), {}])
+        check(result.sleeps == [5, 295] and result.runs == 2, "軽い確認が読めないときは、その回はいつもの間隔の見回りに戻す")
+        result = clock_watch(["QUIET", woke], [OSError("模擬の読み取り失敗"), {}])
+        check(result.sleeps == [300] and result.runs == 2, "基準の一覧が読めないときも、いつもの間隔の見回りに戻す")
+        result = clock_watch(["QUIET", woke], [], quick_interval=0)
+        check(result.sleeps == [300] and result.runs == 2 and result.seen == 0, "--quick-interval 0 なら軽い確認をしない（今までどおり）")
+        # 常駐は終わらないので、3 回目の見回りを「想定外の結果」にして止める（そこまでの待ち方と回数を見る）
+        result = clock_watch(["QUIET", "QUIET", "想定外の結果"], [{}, {new: 20.0}, {new: 20.0}, {new: 21.0}, {}], until_wake=False)
+        check(result.sleeps == [5, 5] and result.runs == 3 and result.code == 2
+              and result.out == "QUIET\nQUIET\nWAKE: lanes-monitor の実行失敗（親が確認）\n",
+              "終わらない常駐（--until-wake なし）でも同じ軽い確認で見回りを早める")
 
         # 子の準備完了後に待機時間0を渡す。起動に0.36秒以上かかっても同じ回収経路を通る。
         real_popen = subprocess.Popen
@@ -387,7 +455,71 @@ else: raise SystemExit('未定義の模擬応答')
         wait_for(lambda: not child_alive(pid), "親の終了後にテスト自身が子を回収")
         finish(pending)
         check(True, "親が終了済みでも所有を確認した子を回収")
-        for option, value in (("--interval", "0"), ("--interval", "nan"), ("--max-hours", "inf"), ("--max-hours", "-1")):
+        # 本物の監視と本物の一覧で確かめる。見回りの間隔は 600 秒にして、合間の軽い確認でしか次の見回りが回らないようにする
+        lane_logs = root / "runs" / "proj" / "wt" / "logs"
+        lane_logs.mkdir(parents=True)
+        def lane_file(name, stamp):
+            path = lane_logs / name
+            path.write_text("EXIT:0\nVERDICT: CLEAN\n")
+            os.utime(path, (stamp, stamp))
+        earlier = time.time() - 100
+        lane_file("old.pid", earlier)
+        lane_file("old.done", earlier + 1)   # 監視を始める前に終わっているレーン
+        lane_file("run.pid", earlier)        # 動いているレーン（.done がまだ無い）
+        process = start("--until-wake", "--interval", "600", "--quick-interval", ".05")
+        next_monitor()
+        respond("quiet")
+        wait_for(lambda: read_json(heartbeat).get("pid") == process.pid and read_json(heartbeat).get("result") == "QUIET",
+                 "1 回目の見回りの結果を保存")
+        time.sleep(.5)
+        check(read_json(ready).get("token") == last_token and process.poll() is None,
+              "前から終わっているレーンと動いているレーンだけでは、合間に見回らない")
+        began = time.monotonic()
+        lane_file("run.done", time.time())
+        next_monitor()
+        waited = time.monotonic() - began
+        respond("wake")
+        output, error = finish(process)
+        check(process.returncode == 0 and output.startswith("WAKE: テスト完了") and not error,
+              f"レーンが終わったら、600 秒の間隔を待たずに次の見回りが回る（.done から {waited:.2f} 秒）")
+        check(run("--check", "--quick-interval", "0").returncode == 1, "--quick-interval 0 は受け付ける")
+        # 本物の一覧（finished_lanes）: 実行の印は .pid の更新時刻。同じ実行の .done が書き換わっても印は変わらず、
+        # 回し直した実行は終わるまで一覧に出ず、終わると別の印で出る（.done の時刻が前回より古くても）
+        mark_logs = root / "runs" / "proj" / "marks" / "logs"
+        mark_logs.mkdir(parents=True)
+        lane = (str(mark_logs.parent), "again")
+        def stamp(name, value):
+            path = mark_logs / name
+            path.write_text("EXIT:0\n")
+            os.utime(path, (value, value))
+        stamp("again.pid", 1000)
+        check(lane not in watcher.finished_lanes(), "動いているレーン（.done が無い）は、終わったレーンの一覧に出ない")
+        stamp("again.done", 9000)   # 前回の .done が、後の実行より未来の時刻
+        first = watcher.finished_lanes().get(lane)
+        check(first is not None and first[0] == 1000 and first[1] == (mark_logs / "again.pid").stat().st_ino,
+              "終わったレーンの実行の印は .pid の更新時刻とファイルの番号")
+        stamp("again.done", 9500)
+        check(watcher.finished_lanes().get(lane) == first, "同じ実行の .done が書き換わっても、実行の印は変わらない（合間の見回りを繰り返さない）")
+        (mark_logs / "again.done").unlink()
+        (mark_logs / "again.pid").rename(mark_logs / "again.prev-1.pid")   # ランチャと同じく、前の .pid を退避してから新しく作る
+        stamp("again.pid", 2000)
+        check(lane not in watcher.finished_lanes(), "回し直した実行は、終わるまで一覧に出ない")
+        stamp("again.done", 2500)   # 前回の .done（9500）より古い時刻で終わる
+        second = watcher.finished_lanes().get(lane)
+        check(second is not None and second[0] == 2000 and second != first, "回し直した実行が終わると、.done の時刻が前回より古くても別の印で出る")
+        # 更新時刻が同じ（秒までしか残らない保存先）でも、退避して作り直した .pid は別の実行と分かる
+        (mark_logs / "again.pid").rename(mark_logs / "again.prev-2.pid")
+        stamp("again.pid", 2000)
+        stamp("again.done", 2600)
+        third = watcher.finished_lanes().get(lane)
+        check(third is not None and third[0] == second[0] and third != second, "更新時刻が同じでも、作り直した .pid は別の実行の印になる（ファイルの番号）")
+        # 一覧を取った後に .pid が退避された（読めない）label は、前の実行の .done が残っていても、その回は数えない
+        real_mark = watcher.run_mark
+        with mock.patch.object(watcher, "run_mark", side_effect=lambda path: None if path.endswith("again.pid") else real_mark(path)):
+            check(lane not in watcher.finished_lanes(), ".pid を読めなかった label は、その回の一覧に入れない（別の実行が終わったとみなさない）")
+        check(watcher.run_mark(str(mark_logs / "no-such.pid")) is None, "無い .pid の印は None")
+        for option, value in (("--interval", "0"), ("--interval", "nan"), ("--max-hours", "inf"), ("--max-hours", "-1"),
+                              ("--quick-interval", "-1"), ("--quick-interval", "nan"), ("--quick-interval", "inf")):
             check(run(option, value).returncode == 2, f"不正値 {option}={value} を拒否")
     finally:
         # 途中の検証に失敗しても起動済みの監視を終了させ、子の回収を最後まで待つ。

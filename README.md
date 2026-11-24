@@ -54,7 +54,7 @@ Mac に入れた Claude Code・Codex・Gemini（Antigravity CLI `agy`）の CLI�
    │    GitHub の auto-merge（CI＝自動テストが緑になったら GitHub が取り込む）
    │        ▼
    └─▶ cleanup-after-merge.sh で worktree と枝を片付ける
- 並行して: lanes-watch.sh が 5 分ごとに全レーンを見回り、変化があれば WAKE: で司令塔を起こす
+ 並行して: lanes-watch.sh が 5 分ごとに全レーンを見回り（レーンが終わったときは、次の 5 分を待たずに）、変化があれば WAKE: で司令塔を起こす
 ```
 
 ## 前提
@@ -234,7 +234,7 @@ zsh "$L/cleanup-after-merge.sh" ~/dev/_runs/my-app/hello --apply
 ## 日々の流れ
 
 1. 司令塔がゴールを小レーンに分け、依存の無いものを全部同時に起動する（[docs/commander-grok.md](docs/commander-grok.md) / [docs/commander-claude.md](docs/commander-claude.md)）。
-2. `lanes-watch.sh` が 5 分ごとに見回り、変化（DONE・FAILED・STALLED・PR の状態）があると `WAKE:` で知らせる。
+2. `lanes-watch.sh` が 5 分ごとに見回り、変化（DONE・FAILED・STALLED・PR の状態）があると `WAKE:` で知らせる。レーンが終わったときは、次の 5 分を待たずに見回り、結果が出たら知らせる。
    司令塔が Claude のときは、`WAKE:` で見張りが終わる（最後の行が `RE-ARM:`）ので、次工程の前にかけ直します。Claude Code の Stop フック `lanes/hooks/claude-stop-watch-guard.sh` を登録しておくと、かけ直し忘れのまま返事を終えるのを止めます（[docs/commander-claude.md](docs/commander-claude.md)）。
 3. 司令塔は DONE を見たら待たずに次工程（レビュー → PR）へつなぐ。FAILED / DEAD / STALLED は聞かれる前に人へ報告する。
 4. CI は見張らない。PR は GitHub の auto-merge に任せ、次の見回りのついでに状態を見る。

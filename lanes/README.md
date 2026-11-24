@@ -127,7 +127,7 @@ Gemini を含む構成では、`run-gemini.sh` が必須にしている macOS �
 |---|---|---|
 | `lanes-status.sh` | `<worktree> [label] [--tail N]` | レーンの生死を 1 行で返す（4 章）。label 省略で全 label |
 | `lanes-monitor.sh` | `[--no-append] [--reset] [--allow-redeploy]` | 1 回分の巡回。`LANES_RUNS_ROOT` の下で `logs/*.pid` を持つ作業場所を探し（`_`・`.` 始まり、退避済み、シンボリックリンクは除外）、`origin` が分かる GitHub リポジトリだけ open PR を照会。前回状態と比べて 1 行目に `WAKE: <理由>` か `QUIET` を出し、新しく終わったものと要対応は省略せず全件出す。`gh`（GitHub の CLI）が無い・未ログインなら PR の照会は黙って飛ばし、直前の PR 状態をそのまま保持する |
-| `lanes-watch.sh` | `[--until-wake] [--interval 秒] [--max-hours 時間]` / `--check` | 5 分ごとのウォッチと定期の生存確認（既定 10 分ごと。`LANES_CHECK_INTERVAL_MIN`。5 章） |
+| `lanes-watch.sh` | `[--until-wake] [--interval 秒] [--quick-interval 秒] [--max-hours 時間]` / `--check` | 5 分ごとのウォッチ（レーンが終わったときは、次の 5 分を待たずに見回る）と定期の生存確認（既定 10 分ごと。`LANES_CHECK_INTERVAL_MIN`。5 章） |
 | `hooks/claude-stop-watch-guard.sh` | （Claude Code の Stop フックとして登録） | 司令塔のセッションが 5 分の見張りをかけ直さないまま返事を終えるのを止める（[docs/commander-claude.md](../docs/commander-claude.md)） |
 
 `lanes-monitor.sh` の状態は `$LANES_RUNS_ROOT/.lanes-monitor-state.json`（`.lock` で排他）、履歴は `$LANES_RUNS_ROOT/lanes-monitor-now.txt` に 1 行追記します（`--no-append` で止める）。`--reset` は既読状態を捨てて読み直します。
@@ -200,6 +200,12 @@ zsh lanes/lanes-watch.sh --until-wake          # WAKE: を見つけたら exit 0
 zsh lanes/lanes-watch.sh --interval 300 --max-hours 12
 ```
 - 既定 300 秒ごと・上限 12 時間で `lanes-monitor.sh --no-append` を回し、`$LANES_RUNS_ROOT/.lanes-watch.heartbeat`（生きている印）を更新します。
+- 見回りの合間も、レーンが終わったか（新しい `.done` ができたか）だけは `--quick-interval` 秒ごと（既定 5 秒）に見て、あれば 300 秒を待たずにすぐ見回ります。
+  **なぜ**: 見回りが 300 秒ごとだけだと、レーンが終わってから司令塔が次工程をつなぐまで最大 5 分あきます。
+  合間に見るのは `logs/` の `.pid` と `.done` の更新時刻だけで（読むだけ。何も書かない）、`WAKE:` / `QUIET` の判定と既読の記録は今までどおり `lanes-monitor.sh` がします。
+  早めるのは「見回りを始める時刻」です。知らせるまでの時間は、合間の確認の間隔に、見回りそのものの時間（PR の照会など）が足されます。
+  見回りを早めるのは、前の見回りの直前には終わっていなかったレーンが終わったときと、同じ label を回し直した実行が終わったときです（同じ実行の `.done` が書き換わっただけでは早めません）。
+  止まった疑い（STALLED）・落ちたプロセス（DEAD）・PR の状態は、今までどおり 300 秒ごとの見回りで拾います。`--quick-interval 0` で合間の確認をやめます。
 - 二重起動は `.lanes-watch.heartbeat.lock` で排他し、exit 2（ロックファイルは消さない）。
 - 司令塔が Claude（`LANES_COMMANDER=claude`）なら `--until-wake` をバックグラウンドで動かし、終了通知で起きて次工程を判断し、また監視を始めます。
 - 外の Bot が司令塔なら、`lanes-watch.sh` を親から切り離して常駐させる（12 章の `detach-run.sh`）か、Bot の 5 分ごとの定期実行で `lanes-monitor.sh`（1 回分の巡回）を回します。

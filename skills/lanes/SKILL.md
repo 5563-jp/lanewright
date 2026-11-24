@@ -80,7 +80,7 @@ zsh <kit>/lanes/detach-run.sh <launch.log> zsh <kit>/lanes/run-review.sh <worktr
 ```
 
 - **起動後 60 秒以内の確認**: `<kit>/lanes/lanes-status.sh <worktree> <label> --tail 20` を実行する。確認前に「起動した」と報告しない。`RUNNING` または `DONE` のときだけ「起動確認 OK: PID（プロセス識別番号） / ログパス」と報告する。
-- **5 分ウォッチ（`<kit>/lanes/lanes-watch.sh`）**: 既定 300 秒間隔で稼働レーンと open PR（変更を統合するためのレビュー依頼）を監視し、`$LANES_RUNS_ROOT/.lanes-watch.heartbeat`（heartbeat：生存確認用の定期更新ファイル）を更新する。`LANES_COMMANDER=claude` では `--until-wake` をバックグラウンド実行し、`WAKE:` で起きて次工程をつなぐ。外の Bot は `lanes-watch.sh` を `detach-run.sh` で 1 本だけ常駐させるか、5 分ごとのルーティンで `<kit>/lanes/lanes-monitor.sh`（1 回分の巡回。heartbeat は書かない）を回す。`--until-wake` なしの `lanes-watch.sh` は終わらないので、ルーティンのたびに起動しない（2 本目は exit 2）。
+- **5 分ウォッチ（`<kit>/lanes/lanes-watch.sh`）**: 既定 300 秒間隔で稼働レーンと open PR（変更を統合するためのレビュー依頼）を監視し、`$LANES_RUNS_ROOT/.lanes-watch.heartbeat`（heartbeat：生存確認用の定期更新ファイル）を更新する。レーンが終わったとき（新しい `.done`）だけは、次の 300 秒を待たずに見回る（終わったかどうかを見る間隔が `--quick-interval`、既定 5 秒）。`LANES_COMMANDER=claude` では `--until-wake` をバックグラウンド実行し、`WAKE:` で起きて次工程をつなぐ。外の Bot は `lanes-watch.sh` を `detach-run.sh` で 1 本だけ常駐させるか、5 分ごとのルーティンで `<kit>/lanes/lanes-monitor.sh`（1 回分の巡回。heartbeat は書かない）を回す。`--until-wake` なしの `lanes-watch.sh` は終わらないので、ルーティンのたびに起動しない（2 本目は exit 2）。
 - **10 分チェック（`LANES_CHECK_INTERVAL_MIN`。`<kit>/lanes/lanes-watch.sh --check`）**: heartbeat の生存（`WATCH OK` / `WATCH STALE` / `WATCH DEAD`）と稼働数・直近 N 分の DONE を確認する。STALE / DEAD ならウォッチを再起動し、次工程待ちや未起動の並列作業があれば追加起動する。
 - **停止と報告**: 止める場合は `kill <ランチャPID>` を使う（`kill -9` 禁止）。開始時刻不明など同一性が確認できない PID は停止・削除・再起動を保留する。経過報告は毎回「状態 / 経過時間 / 最終出力の時刻 / 次にやること」の 4 点に揃える。
 

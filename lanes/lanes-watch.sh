@@ -1,6 +1,7 @@
 #!/bin/zsh -f
 # 5 分監視と定期の生存確認（既定 10 分ごと。LANES_CHECK_INTERVAL_MIN）の入口。判定・時刻制限・排他は標準ライブラリの本体へ渡す。
-# lanes-watch.sh [--until-wake] [--interval 秒] [--max-hours 時間] / lanes-watch.sh --check
+# lanes-watch.sh [--until-wake] [--interval 秒] [--quick-interval 秒] [--max-hours 時間] / lanes-watch.sh --check
+# 見回りの合間も、終わったレーン（新しい .done）の有無だけは --quick-interval 秒ごと（既定 5 秒。0 で無効）に見て、あればすぐ見回る。
 # LANES_RUNS_ROOT / LANES_WATCH_MONITOR / LANES_WATCH_HEARTBEAT で使い捨て環境へ差し替え可能。
 [ -n "${ZSH_VERSION:-}" ] || exec zsh -f "$0" "$@"
 set -euo pipefail
