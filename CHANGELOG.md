@@ -15,6 +15,31 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   / `lanes-watch.sh` now runs its check without waiting for the next 300-second interval when a lane finishes (a new `.done`), in both
   `--until-wake` and daemon mode. Between checks it only compares the modification times of `.pid` / `.done` under `logs/` every `--quick-interval` seconds
   (default 5; `0` disables it). The `WAKE:` / `QUIET` decision still belongs to `lanes-monitor.sh`; stalled or dead lanes and PR state are still picked up by the regular check.
+- `detach-run.sh` が切り離しに使う `python3` を、スクリプトに書いた 2 つの場所だけから選ぶようにした（前から順に、最初にあるもの:
+  `/Library/Developer/CommandLineTools/usr/bin/python3`（Mac の Command Line Tools）→ `/usr/bin/python3`）。`PATH` の `python3`
+  （pyenv・Homebrew・仮想環境のもの）は使わない。動きが変わる点は次の 4 つ（`lanes/README.md` の 12 章）。
+  - 2 つの場所のどちらにも `python3` が無い環境では起動しない（今までは `PATH` の `python3` で動いた）。Mac は `xcode-select --install` を 1 回。
+  - `python3` が無いときの終了コードが 127 → 2（固定の文言を出す）。
+  - 呼び出し元の環境変数を受け取れないときは、注意を出して続行するのをやめ、exit 2 で止まる（続行すると、起動するコマンドが空の環境で動くため）。
+  - 起動ログのフォルダを作れないときは、固定の文言を出す（exit 1 は同じ。パスと例外の本文は出さない）。
+  起動するコマンドへ渡る環境変数・作業場所・入出力・pid・ほかの終了コードは変わらない。
+  / `detach-run.sh` now picks the `python3` it uses for detaching only from two fixed locations (the first that exists:
+  `/Library/Developer/CommandLineTools/usr/bin/python3`, then `/usr/bin/python3`). A `python3` on `PATH` (pyenv, Homebrew, a virtual environment)
+  is never used. Behavior changes: it does not start when neither location has `python3` (on a Mac, run `xcode-select --install` once);
+  the exit code for a missing `python3` is 2 instead of 127; when the caller's environment cannot be received it stops with exit 2 instead of
+  continuing with a note; when the launch-log directory cannot be created it prints a fixed message (still exit 1, without the path or the exception text).
+  The environment, working directory, I/O, pid, and other exit codes of the launched command are unchanged.
+
+### 直したこと / Fixed
+- 起動する対象のリポジトリの仮想環境を有効にしたシェルから `detach-run.sh` を呼ぶと、対象の中の `python3`・`mkdir` や、作業場所・`PYTHONPATH` に
+  ある同じ名前のファイルが、呼び出し元の環境変数を持ったままランチャの中で動いていた（どちらも `PATH` から選び、`python3` は作業場所と
+  `PYTHON*` を見ていた）。切り離しに使う `python3` は決め打ちの場所のものを、環境変数を 1 つも渡さずに `-I -S` で動かす。それが動き出すまで、
+  シェルは組み込みだけを使う（`mkdir` などの外部コマンドを呼ばない・一時ファイルを通さない）。どこから起動しても、起動ログをどこに置いても同じ。
+  `TMPPREFIX` が書けない場所を指していても起動できるようになった。
+  / When `detach-run.sh` was called from a shell with the target repository's virtual environment activated, that environment's `python3` and `mkdir`,
+  and same-named files in the working directory or on `PYTHONPATH`, ran inside the launcher with the caller's environment variables.
+  The detaching `python3` now comes from a fixed location and runs with an empty environment and `-I -S`; until it starts, the shell uses built-ins only
+  (no external commands, no temporary files). This holds wherever it is launched from and wherever the launch log is placed.
 
 ## [0.1.10] - レビューの判定行の字下げの数え方と、Gemini レビューの混入の点検 / Indent-aware verdict lines and contamination checks in Gemini review
 
