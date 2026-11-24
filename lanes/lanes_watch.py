@@ -93,17 +93,34 @@ def check(path):
     return code
 
 
+def run_mark(path):
+    """その実行の .pid を見分ける印（更新時刻とファイルの番号）。読めない・symlink なら None。
+    ランチャは回し直すたびに前の .pid を退避して新しく作るので、更新時刻が同じ（秒までしか残らない保存先）でも、ファイルの番号で別の実行と分かる。"""
+    try:
+        if os.path.islink(path):
+            return None
+        status = os.stat(path, follow_symlinks=False)
+        return status.st_mtime, status.st_ino
+    except OSError:
+        return None
+
+
 def finished_lanes():
-    """終わったレーン（.done が .pid 以降に書かれたもの）と、その実行の印（.pid の更新時刻）。読むだけで、何も書かない。
+    """終わったレーン（.done が .pid 以降に書かれたもの）と、その実行の印（run_mark）。読むだけで、何も書かない。
     見るのはフォルダの一覧と更新時刻だけ（作業ツリー 200・レーン 700 ほどで 1 回 0.1 秒ほど）。
     印に .done の時刻は使わない。同じ実行の .done が書き換わっただけでは「新しく終わった」とみなさず、
-    同じ label を回し直した実行は、.done の時刻の前後に関係なく別の実行として見分けるため。"""
+    同じ label を回し直した実行は、.done の時刻の前後に関係なく別の実行として見分けるため。
+    .pid を読めなかった label（一覧を取った後に退避された、など）は、その回は数えない（前の実行の .done が残っていても、
+    読めなかった印で「別の実行が終わった」とみなさない）。"""
     finished = {}
     for worktree, labels in discover_worktrees():
         for label in labels:
-            started, done = (mtime(os.path.join(worktree, "logs", label + suffix)) for suffix in (".pid", ".done"))
-            if done and done >= started:
-                finished[worktree, label] = started
+            mark = run_mark(os.path.join(worktree, "logs", label + ".pid"))
+            if mark is None:
+                continue
+            done = mtime(os.path.join(worktree, "logs", label + ".done"))
+            if done and done >= mark[0]:
+                finished[worktree, label] = mark
     return finished
 
 

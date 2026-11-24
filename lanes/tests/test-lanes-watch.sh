@@ -495,14 +495,29 @@ else: raise SystemExit('未定義の模擬応答')
         stamp("again.pid", 1000)
         check(lane not in watcher.finished_lanes(), "動いているレーン（.done が無い）は、終わったレーンの一覧に出ない")
         stamp("again.done", 9000)   # 前回の .done が、後の実行より未来の時刻
-        check(watcher.finished_lanes().get(lane) == 1000, "終わったレーンの実行の印は .pid の更新時刻")
+        first = watcher.finished_lanes().get(lane)
+        check(first is not None and first[0] == 1000 and first[1] == (mark_logs / "again.pid").stat().st_ino,
+              "終わったレーンの実行の印は .pid の更新時刻とファイルの番号")
         stamp("again.done", 9500)
-        check(watcher.finished_lanes().get(lane) == 1000, "同じ実行の .done が書き換わっても、実行の印は変わらない（合間の見回りを繰り返さない）")
+        check(watcher.finished_lanes().get(lane) == first, "同じ実行の .done が書き換わっても、実行の印は変わらない（合間の見回りを繰り返さない）")
         (mark_logs / "again.done").unlink()
+        (mark_logs / "again.pid").rename(mark_logs / "again.prev-1.pid")   # ランチャと同じく、前の .pid を退避してから新しく作る
         stamp("again.pid", 2000)
         check(lane not in watcher.finished_lanes(), "回し直した実行は、終わるまで一覧に出ない")
         stamp("again.done", 2500)   # 前回の .done（9500）より古い時刻で終わる
-        check(watcher.finished_lanes().get(lane) == 2000, "回し直した実行が終わると、.done の時刻が前回より古くても別の印で出る")
+        second = watcher.finished_lanes().get(lane)
+        check(second is not None and second[0] == 2000 and second != first, "回し直した実行が終わると、.done の時刻が前回より古くても別の印で出る")
+        # 更新時刻が同じ（秒までしか残らない保存先）でも、退避して作り直した .pid は別の実行と分かる
+        (mark_logs / "again.pid").rename(mark_logs / "again.prev-2.pid")
+        stamp("again.pid", 2000)
+        stamp("again.done", 2600)
+        third = watcher.finished_lanes().get(lane)
+        check(third is not None and third[0] == second[0] and third != second, "更新時刻が同じでも、作り直した .pid は別の実行の印になる（ファイルの番号）")
+        # 一覧を取った後に .pid が退避された（読めない）label は、前の実行の .done が残っていても、その回は数えない
+        real_mark = watcher.run_mark
+        with mock.patch.object(watcher, "run_mark", side_effect=lambda path: None if path.endswith("again.pid") else real_mark(path)):
+            check(lane not in watcher.finished_lanes(), ".pid を読めなかった label は、その回の一覧に入れない（別の実行が終わったとみなさない）")
+        check(watcher.run_mark(str(mark_logs / "no-such.pid")) is None, "無い .pid の印は None")
         for option, value in (("--interval", "0"), ("--interval", "nan"), ("--max-hours", "inf"), ("--max-hours", "-1"),
                               ("--quick-interval", "-1"), ("--quick-interval", "nan"), ("--quick-interval", "inf")):
             check(run(option, value).returncode == 2, f"不正値 {option}={value} を拒否")
