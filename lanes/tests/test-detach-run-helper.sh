@@ -32,7 +32,8 @@
 #   - detach-run.sh は、空の環境（env -i）と作り物の変数だけで回す。本物の環境変数は渡さない。値は出力に出さない（名前だけ）。
 #   - 写し（候補の絶対パスを置き換えたスクリプト）を使う項目は、置き換えが効いていることを先に確かめる。
 #   - 利用者の設定は読まない。作業ツリーの目印は空の .git フォルダ（git は呼ばない）。全データを一時領域に置き、外へ通信しない。
-#   - 結果は、一時領域の場所（別の作業ツリーの中かどうか）に依らない。
+#   - 結果は、一時領域の場所（別の作業ツリーの中かどうか・名前に改行や空白や = や [ があるかどうか）に依らない。
+#     作業場所は 16 進で、環境変数の一覧は NUL 区切りで比べる（改行で分けない）。
 #   - 検査対象が返した番号のプロセスを止めない（時間切れは失敗を報告するだけ。誤った番号・使い回された番号かもしれないため）。
 # 台帳・FIFO やリンクの起動ログ・記録の使い回しは test-review-reuse-launch.sh、引数を転記しないことは test-common-process.sh が見る。
 set -euo pipefail
@@ -62,7 +63,7 @@ if [[ -f "$C1" && -x "$C1" ]]; then REAL="$C1"; elif [[ -f "$C2" && -x "$C2" ]];
 else fail "決め打ちの 2 つの場所に python3 が無い（Mac は xcode-select --install。detach-run.sh はこの環境では起動できない）"; fi
 SRC="$(<"$DETACH")"
 MARKS="$T/marks"      # 動いてはいけないものが動いたら、ここに 1 行ずつ足す（名前と、目印の変数が見えたかどうかだけ。値は書かない）
-MSG1_TAIL='に無いので起動しない。PATH の python3 は使わない（Mac は xcode-select --install、Linux は OS の python3 を入れる）'
+MSG1="ERROR: 切り離しに使う python3 が決まった場所（$C1・$C2）に無いので起動しない。PATH の python3 は使わない（Mac は xcode-select --install、Linux は OS の python3 を入れる）"
 MSG2='ERROR: 起動ログのフォルダを作れないので起動しない。書けるフォルダの下のパスを指定する'
 MSG3='ERROR: 呼び出し元の環境変数を受け取れないので起動しない'
 MSG_OPEN='ERROR: 起動ログを開けない、または起動ログに使えない種類（symlink・ハードリンク・FIFO など）なので起動しない。普通のファイルのパスを指定する'
@@ -125,12 +126,13 @@ mkwrap() {
   print -r -- "#!/bin/sh"$'\n'"$2"$'\n'"exec ${(qq)REAL} \"\$@\"" > "$1"
   chmod +x "$1"
 }
-# 写し: 候補の絶対パス 2 つを置き換えたスクリプトを作る: mkcopy <名前> <1 番目の置き換え先> <2 番目の置き換え先> → REPLY
-# 置き換えが効いていること（元の候補が残っていない・選ぶ行に置き換え先が入っている）を先に確かめる
+# 写し: 候補を選ぶ 2 行の絶対パスを置き換えたスクリプトを作る: mkcopy <名前> <1 番目の置き換え先> <2 番目の置き換え先> → REPLY
+# 置き換えるのは選ぶ行だけ（文言の中の場所の表記は元のまま。置き換え先の名前に改行や空白があっても、文言は変わらない）。
+# 置き換えが効いていること（選ぶ行に元の候補が残っていない・置き換え先が入っている）を先に確かめる
 mkcopy() {
-  local body="${SRC//$C1/@@1@@}"
-  body="${body//$C2/${(q)3}}"; body="${body//@@1@@/${(q)2}}"
-  [[ "$body" != *"$C2"* && "$body" == *"set -- ${(q)2} "* && "$body" == *"set -- ${(q)3} "* ]] \
+  local body="$SRC" pick1="set -- $C1 " pick2="set -- $C2 "
+  body="${body//$pick1/set -- ${(q)2} }"; body="${body//$pick2/set -- ${(q)3} }"
+  [[ "$body" != *"$pick1"* && "$body" != *"$pick2"* && "$body" == *"set -- ${(q)2} "* && "$body" == *"set -- ${(q)3} "* ]] \
     || fail "写しを作れない（候補を選ぶ行が決まった形でない・置き換えが効いていない）: $1"
   REPLY="$T/$1.sh"; print -r -- "$body" > "$REPLY"
 }
@@ -172,19 +174,23 @@ no_marks "-f なし・.zshenv のフック"; launched "-f なし・.zshenv の�
 pass "対象の仮想環境を有効にした形（PATH は偽物だけ・環境変数は対象の中・偽モジュール）でも、対象のものはランチャの中で動かずに起動できる（作業場所 4 通り × 起動ログ 2 通り・-f なし）"
 
 # ---- 2. 補助に環境変数が渡らない。旗は -I -S - ----
-mkwrap "$T/w2/python3" "/usr/bin/env > ${(qq)T}/w2.env; printf '%s\\n' \"\$1\" \"\$2\" \"\$3\" > ${(qq)T}/w2.args"
+mkwrap "$T/w2/python3" "/usr/bin/env -0 > ${(qq)T}/w2.env; printf '%s\\n' \"\$1\" \"\$2\" \"\$3\" > ${(qq)T}/w2.args"
 mkfake "$T/w2/second"
 mkcopy copy2 "$T/w2/python3" "$T/w2/second"
 # 基準: 空の環境で sh のスクリプトを動かしたときに見える名前（sh 自身が足すもの。機械ごとの一覧は持たない）。
-# env には /bin/sh を渡す（スクリプトのパスを直に渡すと、一時領域のパスに = があるとき変数の代入と読まれる）
-print -r -- $'#!/bin/sh\n/usr/bin/env' > "$T/w2/baseline"
-/usr/bin/env -i /bin/sh "$T/w2/baseline" | sed 's/=.*//' | LC_ALL=C sort > "$T/w2.want"
+# env には /bin/sh を渡す（スクリプトのパスを直に渡すと、一時領域のパスに = があるとき変数の代入と読まれる）。
+# 一覧は NUL 区切りで取る（PWD の値に改行があっても、その続きを名前と取り違えない）
+print -r -- $'#!/bin/sh\n/usr/bin/env -0' > "$T/w2/baseline"
+/usr/bin/env -i /bin/sh "$T/w2/baseline" > "$T/w2.base"
+# NUL 区切りの環境の一覧から、名前だけを並べて取る: env_names <ファイル> → reply
+env_names() { reply=("${(@ps:\0:)$(<"$1")}"); reply=("${(@)reply:#}"); reply=("${(@o)reply%%\=*}") }
 run "$REPLY" "$W" "${target_env[@]}" -- "$T/out-logs/2.log" /usr/bin/touch "$T/started-2"
 launched "環境を記録する包み"; no_marks "環境を記録する包み"
-sed 's/=.*//' "$T/w2.env" | LC_ALL=C sort > "$T/w2.got"
-[[ -s "$T/w2.want" ]] && cmp -s "$T/w2.want" "$T/w2.got" \
-  || fail "補助に環境変数が渡っている（sh 自身が足す名前との差: $(LC_ALL=C comm -3 "$T/w2.want" "$T/w2.got" | tr -s '\t\n' ' ')）"
-if grep -q '^FAKE_SECRET_MARK=' "$T/w2.env"; then fail "補助から目印の変数が見える"; fi
+env_names "$T/w2.base"; want=("${reply[@]}")
+env_names "$T/w2.env"; got=("${reply[@]}")
+(( ${#want} )) && [[ "${(pj:\0:)want}" == "${(pj:\0:)got}" ]] \
+  || fail "補助に環境変数が渡っている（sh 自身が足す名前: ${(j: :)want} / 補助から見えた名前: ${(j: :)got}）"
+(( ! ${got[(Ie)FAKE_SECRET_MARK]} )) || fail "補助から目印の変数が見える"
 [[ "$(<"$T/w2.args")" == $'-I\n-S\n-' ]] || fail "補助の旗が -I -S - でない"
 pass "補助には環境変数が 1 つも渡らない（見えるのは sh 自身が足す名前だけ）。旗は -I -S -"
 
@@ -209,11 +215,7 @@ for a b in "$T/w4/none1" "$T/w4/none2" "$T/w4/isdir" "$T/w4/noexec"; do
   mkcopy copy4a "$a" "$b"
   run "$REPLY" "$W" PATH="$T/w4/path" -- "$T/out-logs/4a.log" /usr/bin/touch "$T/started-4a"
   no_marks "候補がどちらも使えない"
-  # 文言は 1 行で、候補の場所のところだけが写しの置き換え先になる（元の文言そのものは 8 で見る）
-  err="$(<"$T/err")"
-  [[ "$err" == 'ERROR: 切り離しに使う python3 が決まった場所（'*"）$MSG1_TAIL" && "$err" != *$'\n'* ]] \
-    || { cat "$T/err" >&2; fail "候補がどちらも使えない: 標準エラーが決まった文言と違う（rc=$rc）"; }
-  stopped "候補がどちらも使えない" 2 "$err" "$T/started-4a"
+  stopped "候補がどちらも使えない" 2 "$MSG1" "$T/started-4a"
 done
 # (b) 1 番目が無い → 2 番目で起動する
 mkcopy copy4b "$T/w4/none1" "$T/w4/second"
@@ -243,7 +245,7 @@ for n in range(3, 64):
         pass
 mask = os.umask(0)
 out = [
-    b"cwd " + os.fsencode(os.getcwd()),
+    b"cwd " + os.fsencode(os.getcwd()).hex().encode(),
     b"umask %o" % mask,
     b"stdin " + (b"devnull" if same(os.fstat(0), os.stat("/dev/null")) else b"other"),
     b"fds " + (",".join(fds) or "-").encode(),
@@ -257,6 +259,8 @@ EOF_PROBE
 mkwrap "$T/w5/python3" 'FAKE_WRAP_ADDED=1; PATH=/fake/wrap/bin; MANPATH="/fake/wrap/man:${MANPATH-}"; export FAKE_WRAP_ADDED PATH MANPATH'
 mkcopy copy5 "$T/w5/python3" "$T/w2/second"; copy5="$REPLY"
 mkdir -p "$T/cwd5"
+# 作業場所は 16 進で比べる（一時領域の名前に改行があっても、行の区切りと取り違えない）
+cwd_hex="$(print -rn -- "$T/cwd5" | od -An -v -tx1 | tr -d ' \n')"
 # そのまま渡りにくい形の変数も置く: スクリプトの中の名前と同じになりうるもの・空の値・改行と = と日本語・パイプの容量を超える長さ・
 # zsh が変数にできない名前（直に起動しても渡らない）
 t5_env=(PATH=/usr/bin:/bin k=呼び出し元の値 log=呼び出し元の値 FAKE_EMPTY= FAKE_TEXT=$'1 行目\n2 行目 = 日本語'
@@ -268,7 +272,7 @@ for loc in '' LC_ALL=en_US.UTF-8; do
   # umask が見え、標準入力は呼び出し元のまま
   run "$T/direct.zsh" "$T/cwd5" "${t5_env[@]}" $loc -- "$REAL" -I -S "$T/probe.py"
   ctl=("${(@f)$(<"$T/out")}")
-  [[ "$rc" == 0 && "${ctl[1]}" == "cwd $T/cwd5" && "${ctl[2]}" == 'umask 27' && "${ctl[3]}" == 'stdin other'
+  [[ "$rc" == 0 && "${ctl[1]}" == "cwd $cwd_hex" && "${ctl[2]}" == 'umask 27' && "${ctl[3]}" == 'stdin other'
       && ",${ctl[4]#fds }," == *,5,* && ",${ctl[4]#fds }," == *,9,* && "${ctl[6]}" == 'hup ignored' ]] \
     || { cat "$T/out" "$T/err" >&2; fail "直の起動で、呼び出し元の fd・umask・シグナルが見えない（用意が誤り。ロケール ${loc:-なし}）"; }
   run "$T/direct.zsh" "$T/cwd5" "${t5_env[@]}" $loc -- /usr/bin/env -0
@@ -288,7 +292,7 @@ for loc in '' LC_ALL=en_US.UTF-8; do
       || fail "$what: 起動したコマンドの環境変数が、直に起動したときと違う（名前だけ出す。直: ${(j: :)${(@)direct%%\=*}} / 切り離し: ${(j: :)${(@)detached%%\=*}}）"
     run "$script" "$T/cwd5" "${t5_env[@]}" $loc -- "$T/5p.log" "$REAL" -I -S "$T/probe.py" 日本語 $'a\xffb' 'sp ace'
     launched "$what"
-    [[ "$(<"$T/5p.log")" == "${HEADER_NL}cwd $T/cwd5"$'\numask 27\nstdin devnull\nfds -\nsession leader\nhup ignored\nargv '"$argv_hex" ]] \
+    [[ "$(<"$T/5p.log")" == "${HEADER_NL}cwd $cwd_hex"$'\numask 27\nstdin devnull\nfds -\nsession leader\nhup ignored\nargv '"$argv_hex" ]] \
       || { cat "$T/5p.log" >&2; fail "$what: 作業場所・umask・標準入力・fd・セッション・無視にした HUP・引数のバイト列のどれかが違う"; }
   done
 done
