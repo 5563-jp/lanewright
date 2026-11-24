@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unicodedata
 
 MAX_LIST = 200  # 変更パスの一覧に載せる行数（点検は全件で行う）
@@ -142,36 +143,70 @@ def dirs_of(path):
     return out
 
 
-def cat_batch(wt, names, env):
-    """名前（<commit>:<パス>）ごとの (oid, 種類, 中身) の並び。見つからない・取得できないものは None。
-    git が失敗した・出力の形が違うときは全体が None。"""
+def read_one(stream):
+    """git cat-file --batch の応答 1 件: (oid, 種類, 中身) / None（見つからない）/ False（形が違う・途切れた）。"""
+    head = stream.readline()
+    if not head.endswith(b"\n"):
+        return False
+    f = head[:-1].split(b" ")
+    if len(f) == 3 and HEX.fullmatch(f[0]) and f[2].isdigit():
+        size = int(f[2])
+        body = stream.read(size + 1)
+        return (f[0].decode(), f[1], body[:-1]) if len(body) == size + 1 and body.endswith(b"\n") else False
+    # 問い合わせの名前は必ず "<commit>:" で始まるので、見つからない応答の先頭が 16 進だけになることはない
+    return None if head.endswith((b" missing\n", b" ambiguous\n")) else False
+
+
+def cat_batch(wt, names, env, keep):
+    """名前（<commit>:<パス>）ごとの git cat-file --batch の応答を、届いた順に 1 件ずつ keep(番号, 応答) へ渡し、返った値の並びを返す。
+    応答は (oid, 種類, 中身)、見つからない・取得できないものは None。応答の中身は keep が返したものだけが残る（全部を貯めない）。
+    git が失敗した・出力の形が違う・途切れたときは全体が None。"""
     if not names:
         return []
-    r = run(["git", "-C", wt, "cat-file", "--batch"], b"".join(n + b"\n" for n in names), env)
-    if r is None or r.returncode != 0:
+    try:
+        p = subprocess.Popen(["git", "-C", wt, "cat-file", "--batch"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, env=env)
+    except OSError:
         return None
-    out, pos, buf = [], 0, r.stdout
-    for _ in names:
-        end = buf.find(b"\n", pos)
-        if end < 0:
-            return None
-        head, pos = buf[pos:end], end + 1
-        f = head.split(b" ")
-        if len(f) == 3 and HEX.fullmatch(f[0]) and f[2].isdigit():
-            size = int(f[2])
-            if buf[pos + size:pos + size + 1] != b"\n":
-                return None
-            out.append((f[0].decode(), f[1], buf[pos:pos + size]))
-            pos += size + 1
-        elif head.endswith((b" missing", b" ambiguous")):
-            out.append(None)
-        else:
-            return None
-    return out if pos == len(buf) else None
+    data = b"".join(n + b"\n" for n in names)
+
+    def feed():
+        # 応答を読みながら問い合わせを書く（書き終わるまで読まないと、git の出力がたまって両方が止まる）
+        try:
+            p.stdin.write(data)
+        except OSError:
+            pass
+        try:
+            p.stdin.close()
+        except OSError:
+            pass
+
+    writer = threading.Thread(target=feed)
+    writer.daemon = True
+    writer.start()
+    out, ok = [], False
+    try:
+        for i in range(len(names)):
+            obj = read_one(p.stdout)
+            if obj is False:
+                break
+            out.append(keep(i, obj))
+        ok = len(out) == len(names) and p.stdout.read(1) == b""
+    finally:
+        if not ok:
+            try:
+                p.kill()
+            except OSError:
+                pass
+        p.stdout.close()
+        rc = p.wait()
+        writer.join()
+    return out if ok and rc == 0 else None
 
 
-def tree_entries(obj):
-    """木の応答 → {名前: (mode（数値）, oid（16 進））}。木でない・取得できない・形が違えば None。"""
+def tree_entries(obj, keep):
+    """木の応答 → {名前: (mode（数値）, oid（16 進））}（keep にある名前だけを残す。形はすべての項目で確かめる）。
+    木でない・取得できない・形が違えば None。"""
     if obj is None or obj[1] != b"tree":
         return None
     oid, _, body = obj
@@ -181,36 +216,58 @@ def tree_entries(obj):
         nul = body.find(b"\0", sp + 1) if sp > pos else -1
         if nul < 0 or nul + 1 + n > len(body) or not TREE_MODE.fullmatch(body[pos:sp]):
             return None
-        out[body[sp + 1:nul]] = (int(body[pos:sp], 8), body[nul + 1:nul + 1 + n].hex())
+        name = body[sp + 1:nul]
+        if name in keep:
+            out[name] = (int(body[pos:sp], 8), body[nul + 1:nul + 1 + n].hex())
         pos = nul + 1 + n
     return out
+
+
+def steps(path):
+    """パスを親フォルダの木でたどる手順 [(フォルダ, その木で引く名前, 最後か)]。照合に使えない形なら None。"""
+    dirs = dirs_of(path)
+    if dirs is None:
+        return None
+    last = len(dirs) - 1
+    return [(d, path[len(d):] if i == last else dirs[i + 1][len(d):-1], i == last) for i, d in enumerate(dirs)]
 
 
 class Trees:
     """各 commit の木（変更パスの親フォルダ）と、そこにある .gitignore の中身を 1 回の git cat-file --batch で読む。
     項目の有無と種類は、親フォルダの木で確かめる（名前で引いた「missing」は、項目が無い場合と、部分 clone で中身を
-    取得できない場合を区別できないため）。dirs: 木を読む (commit, フォルダ)、ignores: .gitignore を読む (commit, フォルダ)。"""
+    取得できない場合を区別できないため）。ignores: .gitignore を読む (commit, フォルダ)、head・paths: HEAD に残っているかを
+    確かめる新しいパス（HEAD の木を、そのパスの親フォルダごとに読む）。
+    木の応答は届いた順に読み、点検に要る項目（.gitignore と、確かめるパスの次の名前）だけを残す（木の本文・全項目を貯めない）。"""
 
-    def __init__(self, wt, dirs, ignores, env):
-        tq, gq = sorted(set(dirs) | set(ignores)), sorted(set(ignores))
-        got = cat_batch(wt, [c.encode() + b":" + d[:-1] for c, d in tq]
-                        + [c.encode() + b":" + d + b".gitignore" for c, d in gq], env)
+    def __init__(self, wt, ignores, head, paths, env):
+        need = {k: {b".gitignore"} for k in ignores}
+        self.head, self.paths = head, set(paths) if head else set()
+        for p in self.paths:
+            for d, name, _ in steps(p) or []:
+                need.setdefault((head, d), set()).add(name)
+        tq, gq = sorted(need), sorted(ignores)
+        blobs = {}
+
+        def keep(i, obj):
+            if i < len(tq):
+                return tree_entries(obj, need[tq[i]])
+            return blobs.setdefault(obj[0], obj) if obj else obj   # 同じ .gitignore の中身は 1 つだけ持つ
+
+        # フォルダは末尾の / を付けたまま問い合わせる（最上位は "<commit>:"）。HEAD で同じ名前が通常ファイルに置き換わって
+        # いても、その本文を取得しない（"missing" になる）。git は問い合わせの行末の復帰文字を落とすが、/ の前の復帰文字は
+        # 名前の一部のまま渡る（末尾が復帰文字のフォルダで、別のフォルダの木を読まない）
+        got = cat_batch(wt, [c.encode() + b":" + d for c, d in tq] + [c.encode() + b":" + d + b".gitignore" for c, d in gq],
+                        env, keep)
         self.read = got is not None
         got = got or []
         self.trees, self.blobs = dict(zip(tq, got[:len(tq)])), dict(zip(gq, got[len(tq):]))
-        self.cache = {}
-
-    def entries(self, c, d):
-        if (c, d) not in self.cache:
-            self.cache[(c, d)] = tree_entries(self.trees.get((c, d)))
-        return self.cache[(c, d)]
 
     def gitignore(self, c, d):
         """c の時点の <d>.gitignore の規則: (中身, "")。規則なし（無い・フォルダ・リンク・サブモジュール）は (b"", "")。
         読めなければ (None, 理由)。Git はリンクの .gitignore を読まない（リンク先の名前を規則として扱わない）。"""
         if not self.read:
             return None, "その commit の時点の .gitignore を読めない（git cat-file が失敗）"
-        ents = self.entries(c, d)
+        ents = self.trees.get((c, d)) if (c, d) in self.blobs else None
         if ents is None:
             return None, "その commit の時点のフォルダの一覧を読めない（部分 clone など）"
         e = ents.get(b".gitignore")
@@ -221,17 +278,16 @@ class Trees:
             return None, "その commit の時点の .gitignore の中身を取得できない（部分 clone など）"
         return obj[2], ""
 
-    def exists(self, c, path):
-        """c の時点で path があるか: True / False / None（木を読めず分からない・照合に使えない形）。"""
-        dirs = dirs_of(path)
-        if dirs is None or not self.read:
+    def exists(self, path):
+        """HEAD の時点で path があるか: True / False / None（木を読めず分からない・照合に使えない形・問い合わせていないパス）。"""
+        st = steps(path)
+        if st is None or not self.read or path not in self.paths:
             return None
-        for i, d in enumerate(dirs):
-            ents = self.entries(c, d)
+        for d, name, last in st:
+            ents = self.trees.get((self.head, d))
             if ents is None:
                 return None
-            last = i == len(dirs) - 1
-            e = ents.get(path[len(d):] if last else dirs[i + 1][len(d):-1])
+            e = ents.get(name)
             if e is None or (not last and e[0] != 0o40000):
                 return False
         return True
@@ -424,16 +480,13 @@ def main():
     changes = [ch for _, _, cs in commits for ch in cs]
     targets = [ch for ch in changes if not ch.deleted]
     # 木を読む (commit, フォルダ): 規則の照合には各変更の commit の親フォルダ、残っているかの確認には HEAD の親フォルダ
-    ignores, dirs = set(), set()
+    ignores = set()
     for ch in targets:
-        ds = dirs_of(ch.path) or []
-        ignores.update((ch.sha, d) for d in ds)
-        if ch.new and head:
-            dirs.update((head, d) for d in ds)
-    trees = Trees(wt, dirs, ignores, env)
+        ignores.update((ch.sha, d) for d in dirs_of(ch.path) or [])
+    trees = Trees(wt, ignores, head, [ch.path for ch in targets if ch.new], env)
     # 新しく持ち込んだパスが HEAD に無いかは HEAD の木で確かめる（別の枝で同じ名前を足して消しても、HEAD に残っていれば印を付けない）
     for ch in targets:
-        ch.gone = bool(ch.new and head) and trees.exists(head, ch.path) is False
+        ch.gone = bool(ch.new and head) and trees.exists(ch.path) is False
     oids = sorted({ch.oid for ch in targets if ch.mode != GITLINK})
     sizes = blob_sizes(wt, oids, env)
     check_ignores(wt, targets, trees, tmp_parent, env)

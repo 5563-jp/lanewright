@@ -905,5 +905,44 @@ for shown in ('"a\\nb.key"', '"c\\nd.P8"'):
 assert "見つからなかった" not in t, t
 ENDH4
 pass "鍵の候補は最後の名前の末尾で判定する（ルート直下・下のフォルダ・名前の途中の改行で差が出ない。大文字・小文字を区別しない）"
+# 親フォルダの木は、末尾の / を付けたまま問い合わせる:
+# - 過去に bundle/ の下へ足し、HEAD で bundle が通常ファイルに置き換わっていても、その本文を取得しない（「HEAD には無い」は添える）
+# - 名前の末尾が復帰文字のフォルダは、そのフォルダの規則で照合する（復帰文字の無い同じ名前のフォルダの木を読まない）
+h3="$T/hist3"; git init -q -b main "$h3"; lanes_test_assert_repo "$h3"
+git -C "$h3" config user.name "Test User"; git -C "$h3" config user.email you@example.com; git -C "$h3" config commit.gpgSign false
+h3c() { git -C "$h3" add -A 2>/dev/null; git -C "$h3" commit -qm "test: $1" 2>/dev/null; }
+body_marker='HIST3_BODY_MARKER_NOT_FOR_FETCH'; cr=$'cr\r'
+print -r -- 'x' > "$h3/a.txt"; h3c '起点'
+h3from="$(git -C "$h3" rev-parse HEAD)"
+mkdir -p "$h3/bundle"; print -r -- 'dummy' > "$h3/bundle/part.pem"; h3c 'フォルダの下に足す'
+git -C "$h3" rm -rq bundle; print -r -- "$body_marker" > "$h3/bundle"; h3c '同じ名前の通常ファイルに置き換える'
+mkdir -p "$h3/cr" "$h3/$cr"; print -r -- 'x' > "$h3/cr/plain.txt"; print -r -- '*.secret' > "$h3/$cr/.gitignore"; h3c '末尾が復帰文字のフォルダの規則'
+print -r -- 'x' > "$h3/$cr/x.secret"; git -C "$h3" add -f -- "$cr/x.secret"; git -C "$h3" commit -qm 'test: 規則に当たる'
+h3cr="$(git -C "$h3" rev-parse --short=12 HEAD)"
+[[ -f "$h3/bundle" && -f "$h3/$cr/x.secret" && -f "$h3/cr/plain.txt" ]] || fail "末尾の / の一時リポを作れない"
+# cat-file --batch の応答を写し取る git の入口（本物の git へそのまま渡す）。点検が取得した本文に、置き換えたファイルの中身が無いことを見る
+real_git="$(whence -p git)"; gw="$T/hist3-gitwrap"; mkdir -p "$gw"
+print -rl -- '#!/bin/sh' \
+  'for a; do [ "$a" = --batch ] && { "$LANES_REAL_GIT" "$@" | tee -a "$LANES_CAT_LOG"; exit 0; }; done' \
+  'exec "$LANES_REAL_GIT" "$@"' > "$gw/git"
+chmod +x "$gw/git"
+: > "$T/hist3-cat.log"
+PATH="$gw:$PATH" LANES_REAL_GIT="$real_git" LANES_CAT_LOG="$T/hist3-cat.log" \
+  python3 -I "$LANES_DIR/review-history-inspect.py" "$h3" "$h3from" "$T" > "$T/hist3.out" || fail "末尾の / の点検処理が動かない"
+python3 -I - "$T/hist3.out" "$T/hist3-cat.log" "$body_marker" "$h3cr" <<'ENDH3' || fail "親フォルダの木を末尾の / を付けて問い合わせていない: $T/hist3.out"
+import sys
+t, cat, marker, crsha = open(sys.argv[1], encoding="utf-8").read(), open(sys.argv[2], "rb").read(), sys.argv[3], sys.argv[4]
+bad = t.split("- 規則に反する混入")[1].split("- 要確認候補")[0]
+maybe = t.split("- 要確認候補")[1].split("- 判定できなかったもの")[0]
+assert b" tree " in cat, "cat-file --batch の応答を写し取れていない"
+assert marker.encode() not in cat, "HEAD で通常ファイルに置き換わったフォルダの本文を取得した"
+assert "- 判定できなかったもの（照合に失敗した。「該当なし」ではない）: 0 件。" in t, t
+# 置き換わったフォルダの下に足したものは、HEAD には無い（HEAD の木で確かめる）
+assert " の A bundle/part.pem（秘密らしい名前。HEAD には無い（途中で消したが、公開履歴に残る））" in maybe, maybe
+# 末尾が復帰文字のフォルダの規則で照合する（表示だけ引用する）
+assert "commit " + crsha + ' の A "cr\\r/x.secret"（その commit の .gitignore の規則 *.secret（"cr\\r/.gitignore" 1 行目）で無視される' in bad, bad
+assert "見つからなかった" not in t, t
+ENDH3
+pass "親フォルダの木は末尾の / を付けて問い合わせる（通常ファイルに置き換わったフォルダの本文を取得しない・末尾が復帰文字のフォルダの規則で照合する）"
 
 print -r -- "PASS: $count 件 / EXIT:0"
