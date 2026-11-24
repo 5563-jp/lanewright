@@ -26,8 +26,11 @@
 #      git archive HEAD を mktemp -d の新しいフォルダへ展開して git init する）。logs/ 以外に未 commit の変更・未追跡のファイル、
 #      サブモジュールがあれば起動しない（logs/ だけの変更なら起動する）。
 #      作者名・メールが利用者の共通設定にあっても、親が照合して件数と一致しない commit の番号だけを渡す（作者の設定を変えたら照合し直す）。
-#      範囲の commit の一覧と変更統計は親が埋め込み、テンプレの履歴・作者の確認の項目はそれを参照する文に差し替える（full・delta とも。
-#      案件固有の指示は書き換えない）
+#      範囲の commit の一覧・変更統計・各 commit の変更パスと混入の点検は親が埋め込み、テンプレの履歴・作者の確認の項目はそれを参照する文に
+#      差し替える（full・delta とも。案件固有の指示は書き換えない）
+#   9. 混入の点検（review-history-inspect.py）は、変更時点の .gitignore と生のパスで照合し、規則に反する混入・要確認候補（名前・大きさ・前から追跡している無視対象の変更）・
+#      判定できなかったものを分ける（マージ自体の変更も含む。正規の run-*.sh・例外で許可した見本・削除は数えない）。
+#      3.11 以前の python3 でも同じ結果で動く（無ければ LANES_PARTIAL）
 set -euo pipefail
 # git の環境変数を外し、一時リポの外へ git が上っていかないようにする（本物のリポを書き換えない）
 source "${0:A:h}/_git-isolate.sh"; lanes_test_git_isolate
@@ -310,6 +313,19 @@ for spec in "status-error|STUB_AGY_STATUS=ERROR" "legacy-result|STUB_AGY_RESULT=
   [[ ! -e "$wt/logs/.$lb.review-state" ]] || fail "$lb: 正常に終わっていないのに再利用の記録を残した"
   pass "agy の $lb（終了コード 0）は EXIT:3・VERDICT: NONE（本文・エラーの本文の VERDICT: CLEAN を拾わない）"
 done
+# 成功した応答は削らずにログへ残し、空白の許否は判定（lanes_parse_review）の 1 か所だけが決める。判定行の直後の
+# ノーブレークスペース・全角空白は判定行そのものではないので NONE（EXIT:3）。空白・タブ・改行だけなら今までどおり CLEAN
+for spec in "tail-nbsp| " "tail-ideo|　" "tail-ideo-nl|　\\n"; do
+  lb="${spec%%|*}"; tail_ws="${spec#*|}"
+  STUB_AGY_RESPONSE="$CLEAN$tail_ws" grv 3 "$lb"
+  has "$wt/logs/$lb.done" 'VERDICT: NONE'
+  python3 -I -c 'import sys; t = open(sys.argv[1], encoding="utf-8").read(); assert ("\nVERDICT: CLEAN" + sys.argv[2][0] + "\n") in t, t' \
+    "$wt/logs/$lb.log" "$tail_ws" || fail "$lb: 応答の末尾の空白をログに残していない"
+  [[ ! -e "$wt/logs/.$lb.review-state" ]] || fail "$lb: 判定なしなのに再利用の記録を残した"
+done
+STUB_AGY_RESPONSE="$CLEAN"$' \t\\n\\n' grv 0 tail-space
+has "$wt/logs/tail-space.done" 'VERDICT: CLEAN'
+pass "応答の末尾は削らずにログへ残して判定する（判定行の直後のノーブレークスペース・全角空白は NONE・EXIT:3。空白・タブ・改行なら CLEAN）"
 
 # ---- 4. 禁止の道具・質問の道具は EXIT:4・VERDICT: NEEDS_FIX ----
 newrepo tools
@@ -620,6 +636,17 @@ GIT_CONFIG_GLOBAL="$T/global.gitconfig" STUB_AGY_RESPONSE="$CLEAN" grv 0 au2 --m
 [[ "$(calls)" == 1 ]] || fail "作者の設定を変えたのに、同じ HEAD の前回の結果を使った"
 argcheck "設定を変えた後の照合で不一致を数えない" '"commit 2 件のうち 2 件の作者が" in a[-1] and "changed@example.com" not in a[-1]'
 pass "作者の設定（user.name / user.email）を変えたら、同じ HEAD でも前回の結果を使わずに照合し直す"
+# 混入の点検が合わせる大文字・小文字の設定（対象リポの core.ignoreCase）を変えたら、同じ HEAD でも前回の結果を使わない
+# （新しい系列で見る。round 3 からは後回しの方針が変わり、それだけで条件が変わるため）
+GIT_CONFIG_GLOBAL="$T/global.gitconfig" STUB_AGY_RESPONSE="$CLEAN" grv 0 aic --mode full
+[[ "$(calls)" == 1 ]] || fail "新しい系列の 1 回目で agy を起動しなかった"
+GIT_CONFIG_GLOBAL="$T/global.gitconfig" STUB_AGY_RESPONSE="$CLEAN" grv 0 aic --mode full
+[[ "$(calls)" == 0 ]] || fail "同じ HEAD・同じ core.ignoreCase なのに agy を起動した"
+[[ "$(git -C "$wt" config --bool --get core.ignoreCase 2>/dev/null)" == true ]] && ic_next=false || ic_next=true
+git -C "$wt" config core.ignoreCase "$ic_next"
+GIT_CONFIG_GLOBAL="$T/global.gitconfig" STUB_AGY_RESPONSE="$CLEAN" grv 0 aic --mode full
+[[ "$(calls)" == 1 ]] || fail "core.ignoreCase を変えたのに、同じ HEAD の前回の結果を使った"
+pass "混入の点検が合わせる core.ignoreCase を変えたら、同じ HEAD でも前回の結果を使わずに点検し直す"
 # 指示書はコマンドの形で書き換えない。親がレビュー範囲の commit の一覧（短い SHA と件名）と変更統計（git diff --stat）を埋め込み、
 # 子には履歴・作者を表示し得るコマンドを使わないよう書く。テンプレの履歴・作者の確認の項目は、固定の文言のまま埋め込みを参照する
 # 文に差し替える（full・delta とも）。案件固有の指示・前回の指摘本文にある git の呼び出し（git blame を含む）はそのまま渡して起動する
@@ -670,5 +697,263 @@ assert "test: 枝の変更" in hist and "a.txt" in hist, hist
 assert "dev-only.txt" not in hist and "統合先だけの変更" not in hist, hist
 PY
 pass "比較起点が先に進んでいても、埋め込む commit の一覧と変更統計はこの枝の変更だけ（変更統計は分岐点からの差分）"
+# 分岐点と HEAD だけの変更統計では消える、途中で追加して消した禁止ファイルも、各 commit の変更パスと混入の点検に載る（内容は埋めない）
+newrepo dropped; L="$wt/logs"
+token='GRV_SECRET_TOKEN_NOT_FOR_PROMPT'
+print -r -- "$token" > "$wt/.env"
+git -C "$wt" add -f -- .env
+git -C "$wt" commit -qm 'test: 途中の秘密ファイル'
+added="$(git -C "$wt" rev-parse --short=12 HEAD)"
+git -C "$wt" rm -q .env
+change '秘密ファイルを消す'
+STUB_AGY_RESPONSE="$CLEAN" grv 0 drop --dry-run
+python3 -I - "$L/drop.dry-run.prompt.md" "$added" "$token" <<'ENDDROP' || fail "途中で追加して消した禁止ファイルの点検が指示書に無い、または内容が漏れている"
+import sys
+t, sha, token = open(sys.argv[1], encoding="utf-8").read(), sys.argv[2], sys.argv[3]
+hist = t.split("# レビュー範囲の commit と変更統計（ランチャが作った。作者は含まない）")[1].split("\n# ")[0]
+assert "各 commit の変更パス" in hist and "混入の点検" in hist, hist
+assert "commit " + sha + " の A .env（" in hist and "秘密らしい名前" in hist and "HEAD には無い（途中で消したが、公開履歴に残る）" in hist, hist
+assert token not in t, "秘密ファイルの内容が指示書に漏れている"
+stat = hist.split("- 変更統計")[1].split("- 各 commit の変更パス")[0]
+assert ".env" not in stat, stat
+ENDDROP
+pass "途中で追加して消した禁止ファイルも、各 commit の変更パスと混入の点検に載る（内容は埋め込まない）"
+# 混入の点検（review-history-inspect.py）: 比較起点の後の各 commit を、その commit の時点の .gitignore と生のパスで照合する。
+# - 規則に反する混入（無視されるパスを新しく持ち込んだ）と、要確認候補（名前・大きさ・前から追跡している無視対象の変更）と、判定できなかったものを分ける
+# - 正規の run-*.sh の変更・.gitignore の例外（!.env.example）で許可した見本・比較起点からあったファイルの削除は数えない
+# - マージ commit 自体で生じた変更も点検し、表示と点検で同じ一覧を使う
+# - 引用符・タブ・前後の空白を含む名前も実名で照合し（Git の表示用の引用を通さない・前後の空白を削らない）、表示だけ引用する
+# - 変更時点の規則で見る（あとで規則から外した .log は混入、あとで規則に足した .cfg は混入ではない）
+newrepo insp; L="$wt/logs"
+print -r -- $'logs/\n.env*\n!.env.example\n*.log' > "$wt/.gitignore"
+mkdir -p "$wt/tools"; print -r -- '#!/bin/sh' > "$wt/tools/run-tool.sh"
+python3 -I -c 'import sys; open(sys.argv[1], "wb").write(b"\0" * 1100000)' "$wt/old-big.bin"
+print -r -- 'x' > "$wt/keep.log"; mkdir -p "$wt/cfg"; print -r -- 'x' > "$wt/cfg/site.pem"
+git -C "$wt" add -A; git -C "$wt" add -f keep.log; git -C "$wt" commit -qm 'test: 比較起点までの準備'
+git -C "$wt" update-ref refs/remotes/origin/develop HEAD
+from="$(git -C "$wt" rev-parse HEAD)"
+print -r -- 'echo ok' >> "$wt/tools/run-tool.sh"; print -r -- 'EXAMPLE_ONLY=' > "$wt/.env.example"; git -C "$wt" rm -q old-big.bin
+print -r -- 'y' >> "$wt/keep.log"; print -r -- 'y' >> "$wt/cfg/site.pem"
+git -C "$wt" add -A; git -C "$wt" commit -qm 'test: 正規のファイルの変更・見本・削除・前から追跡しているファイルの変更'
+c2="$(git -C "$wt" rev-parse --short=12 HEAD)"
+mkdir -p "$wt/q\"uo" "$wt/ta"$'\t'"b"
+for f in "q\"uo/.env" "ta"$'\t'"b/.env" " .env" ".env "; do print -r -- "$token" > "$wt/$f"; done
+print -r -- '#!/bin/sh' > "$wt/run-new.sh"
+git -C "$wt" add -f -A; git -C "$wt" commit -qm 'test: 紛らわしい名前'
+weird="$(git -C "$wt" rev-parse --short=12 HEAD)"
+print -r -- 'x' > "$wt/tmp.log"; git -C "$wt" add -f tmp.log; git -C "$wt" commit -qm 'test: 当時は無視されるログ'
+logsha="$(git -C "$wt" rev-parse --short=12 HEAD)"
+print -r -- $'logs/\n.env*\n!.env.example' > "$wt/.gitignore"; git -C "$wt" add -A; git -C "$wt" commit -qm 'test: ログを規則から外す'
+print -r -- 'x' > "$wt/later.cfg"; git -C "$wt" add -A; git -C "$wt" commit -qm 'test: 当時は無視されない設定'
+print -r -- 'later.cfg' >> "$wt/.gitignore"; git -C "$wt" add -A; git -C "$wt" commit -qm 'test: あとで規則に足す'
+mkdir -p "$wt/we"$'\n'"ird"; print -r -- 'x' > "$wt/we"$'\n'"ird/f.txt"; git -C "$wt" add -A; git -C "$wt" commit -qm 'test: 改行を含むフォルダ'
+git -C "$base" checkout -q -b side; print -r -- 'side' > "$base/side.txt"; git -C "$base" add -A
+git -C "$base" -c user.name="Test User" -c user.email=you@example.com -c commit.gpgSign=false commit -qm 'test: 横の変更'
+git -C "$wt" merge -q --no-ff --no-commit side
+print -r -- "$token" > "$wt/.env.local"; git -C "$wt" add -f .env.local; git -C "$wt" commit -qm 'test: マージで足す'
+merge="$(git -C "$wt" rev-parse --short=12 HEAD)"
+STUB_AGY_RESPONSE="$CLEAN" grv 0 insp --dry-run
+cp -- "$L/insp.dry-run.prompt.md" "$T/insp.prompt.md"
+inspcheck() {   # <指示書のファイル>
+  python3 -I - "$1" "$weird" "$logsha" "$merge" "$token" "$c2" <<'ENDINSP' || fail "混入の点検の分類・表示が違う: $1"
+import sys
+t, weird, logsha, merge, token, c2 = open(sys.argv[1], encoding="utf-8").read(), *sys.argv[2:7]
+hist = t.split("# レビュー範囲の commit と変更統計（ランチャが作った。作者は含まない）")[1].split("\n# ")[0]
+listing = hist.split("- 各 commit の変更パス")[1].split("- 混入の点検")[0]
+bad = hist.split("- 規則に反する混入")[1].split("- 要確認候補")[0]
+maybe = hist.split("- 要確認候補")[1].split("- 判定できなかったもの")[0]
+unknown = hist.split("- 判定できなかったもの")[1]
+# マージ commit 自体で足したパスも、一覧と点検の両方に同じ commit で載る
+assert merge + " AA .env.local" in listing, listing
+assert "commit " + merge + " の AA .env.local（" in bad, bad
+# 引用符・タブ・前後の空白を含む名前は実名で照合し、表示だけ引用する（生のタブ・改行は指示書に入れない）
+for shown in ('"q\\"uo/.env"', '"ta\\tb/.env"', '".env "'):
+    assert "commit " + weird + " の A " + shown + "（" in bad, (shown, bad)
+assert "commit " + weird + " の A \" .env\"（秘密らしい名前）" in maybe, maybe
+assert "ta\tb" not in t and "we\nird" not in t, "生のタブ・改行が指示書に入った"
+# 名前だけで候補にしたもの（規則には反しない）は候補に分け、正規のファイルの変更・許可した見本・削除は数えない
+assert "run-new.sh（名前が run-*.sh" in maybe and "run-new.sh" not in bad, (bad, maybe)
+for name in ("tools/run-tool.sh", ".env.example", "old-big.bin", "later.cfg", "side.txt"):
+    assert name not in bad and name not in maybe, (name, bad, maybe)
+assert " M tools/run-tool.sh" in listing and " A .env.example" in listing and " D old-big.bin" in listing, listing
+# 前から追跡しているファイルの変更は混入に数えない。ただし無視されるファイル・秘密らしい名前のファイルの変更は要確認候補にする
+assert "commit " + c2 + " の M keep.log（その commit の .gitignore の規則 *.log（.gitignore 4 行目）で無視されるファイルを変更した" in maybe, maybe
+assert "commit " + c2 + " の M cfg/site.pem（秘密らしい名前のファイルを変更した）" in maybe, maybe
+assert "keep.log" not in bad and "site.pem" not in bad, bad
+# 変更時点の規則: あとで規則から外したログは、持ち込んだ時点で無視されていたので混入
+assert "commit " + logsha + " の A tmp.log（その commit の .gitignore の規則 *.log（.gitignore 4 行目）で無視される" in bad, bad
+# 照合できないもの（改行を含むフォルダ）は「判定できなかったもの」に分け、「見つからなかった」と書かない
+assert '"we\\nird/f.txt"（パスの形を照合に使えない' in unknown, unknown
+assert "見つからなかった" not in hist, hist
+assert "規則に反する混入（その commit の時点の .gitignore で無視されるパスを、新しく持ち込んだ）: 5 件" in hist, bad
+assert token not in t, "秘密らしいファイルの内容が指示書に漏れている"
+ENDINSP
+}
+inspcheck "$T/insp.prompt.md"
+pass "混入の点検は、変更時点の規則と生のパスで照合し、規則に反する混入・要確認候補・判定できなかったものを分ける（マージ自体の変更も含む。正規の run-*.sh・許可した見本・削除は数えない。前から追跡している無視対象・秘密らしい名前の変更は候補）"
+# 動作前提の python3（macOS 付属の 3.9 など、3.11 以前）でも、点検処理そのものが動いて同じ結果になる。
+# 3.11 以前の python3 があれば、ランチャ全体（親の補助処理）もその python3 に固定して dry-run する
+# macOS の /usr/bin/python3 は開発ツールへの仮の入口で、開発ツールが無いと導入の画面を出すので呼ばない
+# （開発ツールの場所（xcode-select -p）にある python3 を直接使う）。macOS 以外は /usr/bin/python3 も候補にする
+old_py=""; py_cands=()
+if [[ "$(uname -s)" == Darwin ]]; then
+  dev="$(xcode-select -p 2>/dev/null)" || dev=""
+  [[ -n "$dev" && -x "$dev/usr/bin/python3" ]] && py_cands+=("$dev/usr/bin/python3")
+else
+  py_cands+=(/usr/bin/python3)
+fi
+for c in python3.11 python3.10 python3.9 python3.8; do p="$(command -v "$c" 2>/dev/null)" && py_cands+=("$p"); done
+for p in "${py_cands[@]}"; do
+  [[ -x "$p" ]] || continue
+  exe="$(cd / && "$p" -I -c 'import sys; print(sys.executable if (3, 8) <= sys.version_info[:2] < (3, 12) else "")' 2>/dev/null)" || continue
+  [[ -n "$exe" && -x "$exe" ]] && { old_py="$exe"; break; }
+done
+if [[ -n "$old_py" ]]; then
+  "$old_py" -I "$LANES_DIR/review-history-inspect.py" "$wt" "$from" > "$T/insp-old.out" || fail "3.11 以前の python3（$old_py）で点検処理が動かない"
+  python3 -I "$LANES_DIR/review-history-inspect.py" "$wt" "$from" > "$T/insp-new.out" || fail "点検処理が動かない"
+  cmp -s "$T/insp-old.out" "$T/insp-new.out" || { diff "$T/insp-old.out" "$T/insp-new.out" >&2; fail "3.11 以前の python3 と今の python3 で点検の結果が違う"; }
+  LANES_PY_FIXED="$old_py" STUB_AGY_RESPONSE="$CLEAN" grv 0 insp-old --dry-run
+  inspcheck "$L/insp-old.dry-run.prompt.md"
+  pass "3.11 以前の python3（$("$old_py" -I -c 'import platform; print(platform.python_version())')）でも点検処理が動き、今の python3 と同じ結果になる（ランチャ全体をその python3 に固定しても同じ）"
+else
+  print -r -- "LANES_PARTIAL: 3.11 以前の python3 が無いので、古い Python で点検処理を動かす確かめを省いた"
+fi
+# 比較起点を読めない・16 進でないときは、点検処理は何も出さずに終了コード 1（呼び出し側が「点検できなかった」と書く）
+rc=0; out="$(python3 -I "$LANES_DIR/review-history-inspect.py" "$wt" "--all" 2>&1)" || rc=$?
+(( rc == 1 )) && [[ -z "$out" ]] || fail "16 進でない比較起点で点検処理が止まらない（rc=$rc）"
+rc=0; out="$(python3 -I "$LANES_DIR/review-history-inspect.py" "$wt" "0123456789abcdef0123456789abcdef01234567" 2>&1)" || rc=$?
+(( rc == 1 )) && [[ -z "$out" ]] || fail "読めない比較起点で点検処理が止まらない（rc=$rc）"
+pass "比較起点を読めない・16 進でないときは、点検処理は何も出さずに終了コード 1"
+# 点検の細かい規則（点検処理を直接呼ぶ）:
+# - .gitignore の有無と種類は木で確かめる（リンクの .gitignore はリンク先の名前を規則にしない。部分 clone で中身が無ければ判定できない）
+# - 秘密鍵の拡張子（.key・.p8）は規則に無くても名前で要確認候補（途中で足して消した鍵も載る）
+# - 大文字・小文字の扱いは対象リポの core.ignoreCase に合わせる・フォルダの規則の出典も引用して表示する
+# - 「HEAD には無い」は HEAD の木で確かめる（別の枝で同じ名前を足して消しても、HEAD に残っていれば書かない）
+hi="$T/hist2"; git init -q -b main "$hi"; lanes_test_assert_repo "$hi"
+git -C "$hi" config user.name "Test User"; git -C "$hi" config user.email you@example.com; git -C "$hi" config commit.gpgSign false
+hic() { git -C "$hi" add -A 2>/dev/null; git -C "$hi" commit -qm "test: $1" 2>/dev/null; }
+print -r -- '*.tmp' > "$hi/.gitignore"; print -r -- 'x' > "$hi/a.txt"; hic '起点'
+hfrom="$(git -C "$hi" rev-parse HEAD)"
+mkdir -p "$hi/ln"; print -r -- 'x' > "$hi/ln/rules.txt"; ln -s rules.txt "$hi/ln/.gitignore"; hic 'リンクの .gitignore'
+mkdir -p "$hi/certs"; print -r -- 'dummy' > "$hi/certs/server.key"; print -r -- 'dummy' > "$hi/AuthKey_TEST0000.p8"; hic '鍵を足す'
+git -C "$hi" rm -q certs/server.key; hic '鍵を消す'
+mkdir -p "$hi/ta"$'\t'"b"; print -r -- '*.secret' > "$hi/ta"$'\t'"b/.gitignore"; hic 'フォルダの規則'
+print -r -- 'x' > "$hi/ta"$'\t'"b/x.secret"; git -C "$hi" add -f -- "ta"$'\t'"b/x.secret"; git -C "$hi" commit -qm 'test: 規則に当たる'
+print -r -- 'x' > "$hi/UP.TMP"; git -C "$hi" add -f -- UP.TMP; git -C "$hi" commit -qm 'test: 大文字の名前'
+git -C "$hi" checkout -q -b side "$hfrom" 2>/dev/null
+print -r -- 'side' > "$hi/keep.pem"; hic '横で足す'; git -C "$hi" rm -q keep.pem; hic '横で消す'
+git -C "$hi" checkout -q main 2>/dev/null
+print -r -- 'main' > "$hi/keep.pem"; hic '本線で足す'
+git -C "$hi" merge -q --no-ff -m 'test: 横を取り込む' side 2>/dev/null
+[[ -f "$hi/keep.pem" && -L "$hi/ln/.gitignore" ]] || fail "点検の細かい規則の一時リポを作れない"
+hist2check() {   # <出力> <core.ignoreCase>
+  python3 -I - "$1" "$2" <<'ENDH2' || fail "点検の細かい規則が違う（core.ignoreCase=$2）: $1"
+import sys
+t, ic = open(sys.argv[1], encoding="utf-8").read(), sys.argv[2]
+bad = t.split("- 規則に反する混入")[1].split("- 要確認候補")[0]
+maybe = t.split("- 要確認候補")[1].split("- 判定できなかったもの")[0]
+unknown = t.split("- 判定できなかったもの")[1]
+assert "- 判定できなかったもの（照合に失敗した。「該当なし」ではない）: 0 件。" in t, unknown
+# リンクの .gitignore は規則として読まない（リンク先の名前 rules.txt を規則にしない）
+assert "ln/rules.txt" not in bad and "ln/rules.txt" not in maybe, (bad, maybe)
+# フォルダの規則の出典も引用して表示する（生のタブを入れない）
+assert '"ta\\tb/x.secret"（その commit の .gitignore の規則 *.secret（"ta\\tb/.gitignore" 1 行目）で無視される' in bad, bad
+assert "\t" not in t, "生のタブが出力に入った"
+# 対象リポの core.ignoreCase に合わせる（false なら UP.TMP は *.tmp に当たらない）
+if ic == "true":
+    assert "UP.TMP（その commit の .gitignore の規則 *.tmp（.gitignore 1 行目）で無視される" in bad, bad
+else:
+    assert "UP.TMP" not in bad and "UP.TMP" not in maybe, (bad, maybe)
+# 秘密鍵の拡張子は、規則に無くても名前で要確認候補（規則に反する混入にはしない）。途中で消した鍵には HEAD に無いことを添える
+assert " の A certs/server.key（秘密らしい名前。HEAD には無い（途中で消したが、公開履歴に残る））" in maybe, maybe
+assert " の A AuthKey_TEST0000.p8（秘密らしい名前）" in maybe, maybe
+assert "server.key" not in bad and "AuthKey" not in bad, bad
+# 別の枝で同じ名前を足して消しても、HEAD に残っているものには「HEAD には無い」と書かない
+keep = [l for l in maybe.splitlines() if "keep.pem" in l]
+assert len(keep) == 2 and all("（秘密らしい名前）" in l and "HEAD には無い" not in l for l in keep), keep
+ENDH2
+}
+for ic in false true; do
+  git -C "$hi" config core.ignoreCase "$ic"
+  python3 -I "$LANES_DIR/review-history-inspect.py" "$hi" "$hfrom" "$T" > "$T/hist2-$ic.out" || fail "点検処理が動かない（core.ignoreCase=$ic）"
+  hist2check "$T/hist2-$ic.out" "$ic"
+done
+pass "点検は、リンクの .gitignore を規則にせず、秘密鍵の拡張子を要確認候補にし、対象リポの core.ignoreCase に合わせ、規則の出典も引用し、HEAD に残っているかを HEAD の木で確かめる"
+# 部分 clone（中身を取っていない）では、.gitignore の中身を取得できないので「判定できなかったもの」に分ける（「規則なし」にしない）。
+# 変更 1 件につき 1 回だけ数える（大きさと規則の両方を確かめられなくても、件数は変更の数）
+git -C "$hi" config uploadpack.allowFilter true
+git clone -q --no-local --filter=blob:none --no-checkout "file://$hi" "$T/hist2-pc" 2>/dev/null || fail "部分 clone を作れない"
+python3 -I "$LANES_DIR/review-history-inspect.py" "$T/hist2-pc" "$hfrom" "$T" > "$T/hist2-pc.out" || fail "部分 clone で点検処理が動かない"
+python3 -I - "$T/hist2-pc.out" <<'ENDPC' || fail "部分 clone で .gitignore の中身を取得できないのに、判定できなかったものに分けていない: $T/hist2-pc.out"
+import sys
+t = open(sys.argv[1], encoding="utf-8").read()
+unknown = t.split("- 判定できなかったもの")[1]
+assert "- 判定できなかったもの（照合に失敗した。「該当なし」ではない）: 9 件（理由別: 大きさが分からない 9・規則と照合できない 9）" in t, unknown
+assert "UP.TMP（大きさを確かめられない・その commit の時点の .gitignore の中身を取得できない（部分 clone など））" in unknown, unknown
+assert "見つからなかった" not in t, t
+ENDPC
+pass "部分 clone で .gitignore の中身を取得できないときは「判定できなかったもの」に分ける（規則なしにしない。変更 1 件につき 1 回数える）"
+# 鍵の候補はパスの最後の名前の末尾で判定する（ルート直下の .key・.p8 も、下のフォルダの .key も、名前の途中に改行がある鍵の名前も候補。
+# 大文字・小文字を区別しない。内容は開かない）。途中で足して消した鍵には HEAD に無いことを添える
+h4="$T/hist4"; git init -q -b main "$h4"; lanes_test_assert_repo "$h4"
+git -C "$h4" config user.name "Test User"; git -C "$h4" config user.email you@example.com; git -C "$h4" config commit.gpgSign false
+h4c() { git -C "$h4" add -A 2>/dev/null; git -C "$h4" commit -qm "test: $1" 2>/dev/null; }
+print -r -- 'x' > "$h4/a.txt"; h4c '起点'
+h4from="$(git -C "$h4" rev-parse HEAD)"
+mkdir -p "$h4/sub"; for f in .key .P8 sub/.key $'a\nb.key' $'c\nd.P8'; do print -r -- 'dummy' > "$h4/$f"; done; h4c '鍵の名前'
+git -C "$h4" rm -q -- $'a\nb.key' $'c\nd.P8'; h4c '名前の途中に改行がある鍵を消す'
+[[ -f "$h4/.key" && -f "$h4/sub/.key" ]] || fail "鍵の名前の一時リポを作れない"
+python3 -I "$LANES_DIR/review-history-inspect.py" "$h4" "$h4from" "$T" > "$T/hist4.out" || fail "鍵の名前の点検処理が動かない"
+python3 -I - "$T/hist4.out" <<'ENDH4' || fail "鍵の候補を最後の名前の末尾で判定していない: $T/hist4.out"
+import sys
+t = open(sys.argv[1], encoding="utf-8").read()
+maybe = t.split("- 要確認候補")[1].split("- 判定できなかったもの")[0]
+assert "- 判定できなかったもの（照合に失敗した。「該当なし」ではない）: 0 件。" in t, t
+for shown in (".key", ".P8", "sub/.key"):
+    assert " の A " + shown + "（秘密らしい名前）" in maybe, (shown, maybe)
+for shown in ('"a\\nb.key"', '"c\\nd.P8"'):
+    assert " の A " + shown + "（秘密らしい名前。HEAD には無い（途中で消したが、公開履歴に残る））" in maybe, (shown, maybe)
+assert "見つからなかった" not in t, t
+ENDH4
+pass "鍵の候補は最後の名前の末尾で判定する（ルート直下・下のフォルダ・名前の途中の改行で差が出ない。大文字・小文字を区別しない）"
+# 親フォルダの木は、末尾の / を付けたまま問い合わせる:
+# - 過去に bundle/ の下へ足し、HEAD で bundle が通常ファイルに置き換わっていても、その本文を取得しない（「HEAD には無い」は添える）
+# - 名前の末尾が復帰文字のフォルダは、そのフォルダの規則で照合する（復帰文字の無い同じ名前のフォルダの木を読まない）
+h3="$T/hist3"; git init -q -b main "$h3"; lanes_test_assert_repo "$h3"
+git -C "$h3" config user.name "Test User"; git -C "$h3" config user.email you@example.com; git -C "$h3" config commit.gpgSign false
+h3c() { git -C "$h3" add -A 2>/dev/null; git -C "$h3" commit -qm "test: $1" 2>/dev/null; }
+body_marker='HIST3_BODY_MARKER_NOT_FOR_FETCH'; cr=$'cr\r'
+print -r -- 'x' > "$h3/a.txt"; h3c '起点'
+h3from="$(git -C "$h3" rev-parse HEAD)"
+mkdir -p "$h3/bundle"; print -r -- 'dummy' > "$h3/bundle/part.pem"; h3c 'フォルダの下に足す'
+git -C "$h3" rm -rq bundle; print -r -- "$body_marker" > "$h3/bundle"; h3c '同じ名前の通常ファイルに置き換える'
+mkdir -p "$h3/cr" "$h3/$cr"; print -r -- 'x' > "$h3/cr/plain.txt"; print -r -- '*.secret' > "$h3/$cr/.gitignore"; h3c '末尾が復帰文字のフォルダの規則'
+print -r -- 'x' > "$h3/$cr/x.secret"; git -C "$h3" add -f -- "$cr/x.secret"; git -C "$h3" commit -qm 'test: 規則に当たる'
+h3cr="$(git -C "$h3" rev-parse --short=12 HEAD)"
+[[ -f "$h3/bundle" && -f "$h3/$cr/x.secret" && -f "$h3/cr/plain.txt" ]] || fail "末尾の / の一時リポを作れない"
+# cat-file --batch の応答を写し取る git の入口（本物の git へそのまま渡す）。点検が取得した本文に、置き換えたファイルの中身が無いことを見る
+real_git="$(whence -p git)"; gw="$T/hist3-gitwrap"; mkdir -p "$gw"
+print -rl -- '#!/bin/sh' \
+  'for a; do [ "$a" = --batch ] && { "$LANES_REAL_GIT" "$@" | tee -a "$LANES_CAT_LOG"; exit 0; }; done' \
+  'exec "$LANES_REAL_GIT" "$@"' > "$gw/git"
+chmod +x "$gw/git"
+: > "$T/hist3-cat.log"
+PATH="$gw:$PATH" LANES_REAL_GIT="$real_git" LANES_CAT_LOG="$T/hist3-cat.log" \
+  python3 -I "$LANES_DIR/review-history-inspect.py" "$h3" "$h3from" "$T" > "$T/hist3.out" || fail "末尾の / の点検処理が動かない"
+python3 -I - "$T/hist3.out" "$T/hist3-cat.log" "$body_marker" "$h3cr" <<'ENDH3' || fail "親フォルダの木を末尾の / を付けて問い合わせていない: $T/hist3.out"
+import sys
+t, cat, marker, crsha = open(sys.argv[1], encoding="utf-8").read(), open(sys.argv[2], "rb").read(), sys.argv[3], sys.argv[4]
+bad = t.split("- 規則に反する混入")[1].split("- 要確認候補")[0]
+maybe = t.split("- 要確認候補")[1].split("- 判定できなかったもの")[0]
+assert b" tree " in cat, "cat-file --batch の応答を写し取れていない"
+assert marker.encode() not in cat, "HEAD で通常ファイルに置き換わったフォルダの本文を取得した"
+assert "- 判定できなかったもの（照合に失敗した。「該当なし」ではない）: 0 件。" in t, t
+# 置き換わったフォルダの下に足したものは、HEAD には無い（HEAD の木で確かめる）
+assert " の A bundle/part.pem（秘密らしい名前。HEAD には無い（途中で消したが、公開履歴に残る））" in maybe, maybe
+# 末尾が復帰文字のフォルダの規則で照合する（表示だけ引用する）
+assert "commit " + crsha + ' の A "cr\\r/x.secret"（その commit の .gitignore の規則 *.secret（"cr\\r/.gitignore" 1 行目）で無視される' in bad, bad
+assert "見つからなかった" not in t, t
+ENDH3
+pass "親フォルダの木は末尾の / を付けて問い合わせる（通常ファイルに置き換わったフォルダの本文を取得しない・末尾が復帰文字のフォルダの規則で照合する）"
 
 print -r -- "PASS: $count 件 / EXIT:0"
