@@ -54,7 +54,9 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 - 既定（`LANES_REVIEW_GEMINI_PCT=0`）のまま `--engine` を使わなければ、新しい系列のレビュー役は今までと同じ（構成の既定の役）。
   同じ系列の途中で構成（`LANES_TOOLS`）を変えたときは、前回の役が今の構成にあればその役で続ける（変えるなら `--engine` か新しい系列の label で）。
 
-- 字下げされたコード例の判定行の除外、各 commit の変更パスによる混入点検、パス照合の強化は v0.1.10 へ回した（r6 の指摘。枝 `feat/review-inspect-v0.1.10`）。v0.1.9 の VERDICT は、最後の空でない行が判定行そのものであるときだけ採用する、という既存のきまりのままにする。
+- 空白とタブが混在する字下げ判定行の解析や行番号照合、各 commit の変更パスによる混入点検、パス照合の強化は v0.1.10 へ回した（r6 の指摘。枝 `feat/review-inspect-v0.1.10`）。
+  v0.1.9 の VERDICT は、元の最終行が判定行そのものであることに加え、本文解析で採用できる判定行が末尾にあること（explicit）も求める。
+  「書式例」のあとに 4 空白またはタブで字下げした `VERDICT: CLEAN` だけで終わる応答は合格にしない（v0.1.8 と同じ強さ）。
 
 ## [0.1.8] - レビューの重さに「起きる条件」を足し、P0/P1 が減らない周回を止める / Severity needs a trigger condition; stop loops where P0/P1 do not go down
 

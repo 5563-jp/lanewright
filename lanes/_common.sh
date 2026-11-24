@@ -660,14 +660,16 @@ success = re.search(
     r"(?:確認できなかった|見つかりませんでした|見つからなかった)", text, re.I)
 explicit = bool(verdicts) and verdicts[-1][0] == lines[-1]
 # レビュー役（Claude・Gemini）の最終判断は、整形前の元の本文の最後の空でない行（前後の空白を除く）が
-# `VERDICT: CLEAN` か `VERDICT: NEEDS_FIX` そのものであるときだけ（表・引用・コードを除いた後の行では見ない。判定はここ 1 か所）
+# `VERDICT: CLEAN` か `VERDICT: NEEDS_FIX` そのものであるときだけ（表・引用・コードを除いた後の行では見ない。判定はここ 1 か所）。
+# 加えて、本文解析で採用できる判定行が末尾にあること（explicit）も求める。字下げしたコード例だけが最後にある応答を、
+# 空白を除いたあとの完全一致だけで合格にしない（v0.1.8 と同じ強さ）。
 raw_last = next((l.strip() for l in reversed(raw.splitlines()) if l.strip()), "")
 final_line = re.fullmatch(r"VERDICT: (CLEAN|NEEDS_FIX)", raw_last)
 if unavailable or fence is not None:
     verdict = "NONE"
 elif mode == "codex" and sys.argv[3] and not completed:
     verdict = "NONE"
-elif mode == "review" and final_line is None:
+elif mode == "review" and (final_line is None or not explicit):
     # 最後の行が判定行でなければ、指摘の重大度から推定しない
     # （推定した NEEDS_FIX が round 3 以降の後回し・昇格で CLEAN に化けないよう、ここで判定なしにする）
     verdict = "NONE"

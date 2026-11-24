@@ -208,7 +208,7 @@ pass "対象リポに json.py・hashlib.py などがあっても、親の Python
 # （偽の CLI（tests/stubs の agy・claude・codex。#!/usr/bin/env python3 で動く）を動かすときは数えない。本物の CLI の代わりで、
 # 親の補助処理ではない。子の agy は ANTIGRAVITY_HEADLESS=true で、点検が呼ぶ claude・codex は最初の引数が stubs の下）
 newrepo venv
-outer_py="$(command -v python3)"; real_py="$(python3 -I -c 'import sys; print(sys.executable)')"
+real_py="$(python3 -I -c 'import sys; print(sys.executable)')"
 mkdir -p "$wt/.venv/bin"
 print -r -- "#!/bin/sh
 case \"\${ANTIGRAVITY_HEADLESS:-}:\${1:-}\" in true:*|*:'$STUBS'/*) ;; *) printf '%s\\n' \"\$*\" >> '$T/venv.mark' ;; esac
@@ -243,13 +243,16 @@ out="$(LANES_PY_FIXED="$wt/.venv/bin/python3" zsh -f "$LANES_DIR/lanes-doctor.sh
 [[ "$out" == *"渡された python3 が作業ツリーの中にある"* ]] || fail "点検が、渡された作業ツリーの中の python3 を NG にしない: $out"
 [[ ! -e "$T/venv.mark" ]] || { cat "$T/venv.mark" >&2; fail "渡された作業ツリーの中の python3 を動かした"; }
 # 固定の決め方: 作業ツリーの中（実パス）のフォルダ・python3 は飛ばし、外が無ければ使える python3 は無い（LANES_PY は空）。
-# 固定するのは実体（sys.executable の実パス）
+# 固定するのは実体（sys.executable の実パス）。起動元の python3 があるフォルダ（pyenv の振り分け先など）は使わず、
+# 取得済みの実体をテスト専用フォルダに置いて共用する（同じフォルダに bash が無い環境でも、リンク除外の確認が落ちない）。
 real_exe="${real_py:A}"
+mkdir -p "$T/real-py-bin"
+ln -s "$real_exe" "$T/real-py-bin/python3"
 ln -s "$wt/.venv/bin" "$T/venv-link"
 pin() { zsh -fc 'LANES_DIR="$1"; source "$LANES_DIR/_common.sh"; path=("${@:3}"); rc=0; lanes_python_pin "$2" || rc=$?; print -r -- "rc=$rc py=$LANES_PY"' _ "$LANES_DIR" "$@"; }
-[[ "$(pin "$wt" "$wt/.venv/bin" "$T/venv-link" "${outer_py:h}")" == "rc=0 py=$real_exe" ]] || fail "作業ツリーの中（リンクを辿った先も）の python3 を飛ばさない: $(pin "$wt" "$wt/.venv/bin" "$T/venv-link" "${outer_py:h}")"
+[[ "$(pin "$wt" "$wt/.venv/bin" "$T/venv-link" "$T/real-py-bin")" == "rc=0 py=$real_exe" ]] || fail "作業ツリーの中（リンクを辿った先も）の python3 を飛ばさない: $(pin "$wt" "$wt/.venv/bin" "$T/venv-link" "$T/real-py-bin")"
 [[ "$(pin "$wt" "$wt/.venv/bin" "$T/venv-link")" == "rc=1 py=" ]] || fail "作業ツリーの中にしか python3 が無いのに固定した"
-[[ "$(pin "$wt" . "${outer_py:h}")" == "rc=0 py=$real_exe" ]] || fail "相対パスのフォルダ（.）の python3 を使った"
+[[ "$(pin "$wt" . "$T/real-py-bin")" == "rc=0 py=$real_exe" ]] || fail "相対パスのフォルダ（.）の python3 を使った"
 out="$(zsh -fc 'LANES_DIR="$1"; source "$LANES_DIR/_common.sh"; path=("$2/.venv/bin"); lanes_early_target "$2" lbl 0' _ "$LANES_DIR" "$wt" 2>&1)" && fail "作業ツリーの外に python3 が無いのに止めない" || true
 [[ "$out" == *"作業ツリーの外に python3 が無い"* ]] || fail "作業ツリーの外に python3 が無いときの案内が出ない: $out"
 [[ ! -e "$T/venv.mark" ]] || { cat "$T/venv.mark" >&2; fail "固定の決め方の確かめで、作業ツリーの中の python3 を動かした"; }
@@ -267,7 +270,7 @@ for d in \$PATH; do
 done
 exit 127" > "$T/shim/python3"
 chmod +x "$T/shim/python3"
-[[ "$(pin "$wt" "$wt/.venv/bin" "$T/shim" "${outer_py:h}")" == "rc=0 py=$real_exe" ]] || fail "選び直す shim を実体ではなくそのまま固定した: $(pin "$wt" "$wt/.venv/bin" "$T/shim" "${outer_py:h}")"
+[[ "$(pin "$wt" "$wt/.venv/bin" "$T/shim" "$T/real-py-bin")" == "rc=0 py=$real_exe" ]] || fail "選び直す shim を実体ではなくそのまま固定した: $(pin "$wt" "$wt/.venv/bin" "$T/shim" "$T/real-py-bin")"
 : > "$T/shim.mark"
 PATH="$wt/.venv/bin:$T/shim:$PATH" LANES_CHECK_CMD=/usr/bin/true STUB_AGY_RESPONSE="$CLEAN" \
   zsh -f "$LANES_DIR/run-review.sh" "$wt" "$T/prompt.md" venv-shim --engine gemini --dry-run > "$T/out" 2>&1 \
@@ -287,7 +290,7 @@ ln -s "$wt/.venv/bin/python3" "$T/outside-link/python3"
 : > "$T/venv.mark"
 [[ "$(pin "$wt" "$T/shim" "$T/outside-link")" == "rc=1 py=" ]] || fail "探索先の python3 が作業ツリーへのリンクなのに、外の本物が無い状態で固定した: $(pin "$wt" "$T/shim" "$T/outside-link")"
 [[ ! -s "$T/venv.mark" ]] || { cat "$T/venv.mark" >&2; fail "実体確認の探索先にある、作業ツリーへのリンクの python3 を動かした"; }
-[[ "$(pin "$wt" "$T/shim" "$T/outside-link" "${outer_py:h}")" == "rc=0 py=$real_exe" ]] || fail "探索先のリンクを外したあと、作業ツリーの外の実体を固定しない: $(pin "$wt" "$T/shim" "$T/outside-link" "${outer_py:h}")"
+[[ "$(pin "$wt" "$T/shim" "$T/outside-link" "$T/real-py-bin")" == "rc=0 py=$real_exe" ]] || fail "探索先のリンクを外したあと、作業ツリーの外の実体を固定しない: $(pin "$wt" "$T/shim" "$T/outside-link" "$T/real-py-bin")"
 [[ ! -s "$T/venv.mark" ]] || { cat "$T/venv.mark" >&2; fail "外の実体を固定するときに、作業ツリーへのリンクの python3 を動かした"; }
 pass "探索先の python3 が作業ツリーへのリンクでも、実体を確かめる前に動かさない"
 
