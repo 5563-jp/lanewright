@@ -191,6 +191,12 @@ LANES_CHECKS_PRESENT=lint parse_case codex 'VERDICT: NEEDS_FIX' "| lint | 未導
 LANES_CHECKS_PRESENT=lint parse_case codex 'VERDICT: NEEDS_FIX' "**lint**: 該当なし（未導入）${nl}VERDICT: CLEAN"
 LANES_CHECKS_PRESENT=lint parse_case codex 'VERDICT: NEEDS_FIX' "\`lint\`: 該当なし${nl}VERDICT: CLEAN"
 LANES_CHECKS_PRESENT=unit parse_case codex 'VERDICT: NEEDS_FIX' "- 単体テスト: 仕組みが無い${nl}VERDICT: CLEAN"
+# Codex の本文: 成功を述べる文があっても、最後の判定行が NEEDS_FIX なら合格にしない。判定行の後ろに全角空白・ノーブレークスペースが付いていても同じ
+# （判定行の候補を空白とタブだけで作る制限を Codex の読み取りにも効かせると、候補が空になって前半の成功文だけで CLEAN になる。
+#   0.1.8・0.1.9 は NEEDS_FIX。途中の候補の制限を足した直しでこの誤合格が出たので、その直しは取り消した）
+parse_case codex 'VERDICT: NEEDS_FIX' "単体テストに問題は見つからなかったが、結合時の修正が必要${nl}VERDICT: NEEDS_FIX　"
+parse_case codex 'VERDICT: NEEDS_FIX' "単体テストに問題は見つからなかったが、結合時の修正が必要${nl}VERDICT: NEEDS_FIX ${nl}"
+parse_case codex 'VERDICT: NEEDS_FIX' "問題は見つからなかった${nl}**VERDICT: NEEDS_FIX**　${nl}"
 parse_case codex 'VERDICT: NEEDS_FIX' "**lint**: 未実施${nl}VERDICT: CLEAN"
 parse_case codex 'VERDICT: NEEDS_FIX' "- \`unit\`: 未実施${nl}VERDICT: CLEAN"
 parse_case checks INCOMPLETE "**lint**: 未実施${nl}${na_line}"
@@ -264,13 +270,6 @@ LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: NONE' "問題なし${nl
 LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: NONE' "問題なし${nl}VERDICT: CLEAN${nl}"$' '
 LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: NONE' "問題なし${nl}VERDICT: CLEAN${nl}"$'\f\n'
 LANES_REVIEW_CHECKS_REUSED=1 parse_case review 'VERDICT: CLEAN' "問題なし${nl}VERDICT: CLEAN${nl}"$' \t\n\n'
-# 途中の判定候補も同じ（元の行から空白とタブだけを除いて作る）。全角空白・ノーブレークスペースで囲んだ途中の行は判定行ではなく、
-# 最後の正規の判定行より優先しない。空白とタブだけで囲んだ途中の NEEDS_FIX は今までどおり優先する
-parse_case review  'VERDICT: CLEAN'     "問題なし${nl}${skip_line}${nl}"$'　VERDICT: NEEDS_FIX　\n'"VERDICT: CLEAN"
-parse_case review  'VERDICT: CLEAN'     "問題なし${nl}${skip_line}${nl}"$'-  VERDICT: NEEDS_FIX\n'"VERDICT: CLEAN"
-parse_case review  'VERDICT: CLEAN'     "問題なし${nl}${skip_line}${nl}"$'**VERDICT:　NEEDS_FIX**\n'"VERDICT: CLEAN"
-parse_case review  'VERDICT: NEEDS_FIX' "問題なし${nl}${skip_line}${nl}"$' VERDICT: NEEDS_FIX \t\n'"VERDICT: CLEAN"
-parse_case review  'VERDICT: NEEDS_FIX' "問題なし${nl}${skip_line}${nl}"$'- **VERDICT: NEEDS_FIX**\n'"VERDICT: CLEAN"
 parse_case review  'VERDICT: CLEAN'     "問題なし"$'\r\n'"${skip_line}"$'\r\n'"VERDICT: CLEAN"$'\r\n'
 parse_case extract 'VERDICT: NEEDS_FIX' "- [P2] 判定行の無い残件${nl}${skip_line}"
 parse_case extract 'VERDICT: CLEAN'     "問題なし${nl}VERDICT: CLEAN${nl}| 検証 | 結果 |"

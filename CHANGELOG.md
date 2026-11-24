@@ -33,7 +33,6 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   それが最後の行になるので採用しない）。
 - Gemini のレビューで、テンプレの「`git show --stat`」の項目は、埋め込みの変更パスと混入の点検の結果と `git diff --stat` を参照する文に差し替える。
 - 再利用の条件（`rvd_context`）に `review-history-inspect.py` の中身と、対象リポジトリで有効な `core.ignoreCase` を足した（設定で無視の判定が変わるので、変えたら同じ HEAD でもレビューし直す）。上げた後の最初のレビューは、前回 `CLEAN` の系列でも 1 回 full になる。
-- レビュー役（Claude・Gemini）の判定行の候補は、途中の行も元の行から空白とタブだけを除いて作る（最後の行と同じ制限。全角空白・ノーブレークスペースで囲んだ途中の `VERDICT: NEEDS_FIX` を、最後の正規の判定行より優先しない）。
 
 ### 直したこと / Fixed（v0.1.9 の作業枝で先送りした点検の穴を、戻す前に塞いだもの）
 - 点検は macOS 付属の `python3`（3.9）でも動く（文字列の埋め込み式の中で外側と同じ引用符を使わない。3.11 以前の `python3` で動くことをテストで確かめる）。
