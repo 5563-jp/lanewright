@@ -6,6 +6,8 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+## [0.1.11] - レーンが終わったらすぐ見回る・切り離しに使う python3 を決め打ちにする / Check right after a lane finishes; a fixed helper python3 for detaching
+
 ### 変えたこと / Changed
 - `lanes-watch.sh` が、レーンが終わったとき（新しい `.done`）だけは次の 300 秒を待たずに見回るようにした（`--until-wake` も終わらない常駐も同じ）。
   今までは、レーンが終わってから司令塔が起きて次工程をつなぐまで最大 5 分あいていた。見回りの合間に `logs/` の `.pid` と `.done` の更新時刻だけを
