@@ -22,7 +22,9 @@
 #      detach-run.sh は、起動ログが FIFO・ハードリンク・symlink なら、その先へ書かずに起動を断る）
 #   9. python3 の入口が環境変数を書き換える Mac（Xcode の /usr/bin/python3・pyenv の shims など）でも使い回す。
 #      detach-run.sh は、呼び出し元の環境変数をそのまま子へ渡す（入口が足した・書き換えた分を渡さない）。
-#      同じ確認を、そのまま回しても chk-run.sh の確認コマンドの中から回しても、結果は同じ（回す場所で緑と赤が変わらない）
+#      同じ確認を、そのまま回しても chk-run.sh の確認コマンドの中から回しても、結果は同じ（回す場所で緑と赤が変わらない）。
+#      PATH の先頭に置く偽の入口を通るのは、ランチャと chk-run.sh（detach-run.sh は PATH の python3 を使わない。
+#      detach-run.sh 自身の入口が環境変数を書き換える形は、test-detach-run-helper.sh の 5 が見る）
 # 使い方: test-review-reuse-launch.sh [--core]
 #   --core: 1 の最初の確認（Codex のレビューの、chk-run.sh の直後の本物の起動）だけを回して終わる。
 #           9 が、同じ確認を回す場所を変えて回すのに使う（selftest.sh は引数なしで全部を回す）
@@ -478,12 +480,14 @@ pass "対照: 普通のファイルの起動ログ（新規・追記）と /dev/
 # ---- 9. python3 の入口が環境変数を書き換える Mac でも使い回す。結果は、回す場所（普段のシェル・chk-run.sh の中）で変わらない ----
 # 経緯: detach-run.sh は python3 でコマンドを切り離す。Mac の python3 は、本物の前に入口を通ることが多い（Xcode の /usr/bin/python3・
 #       pyenv の shims など）。入口は、本物を起動する前に環境変数を書き換える（Xcode: MANPATH の先頭へ通るたびに足す・SDKROOT などを足す /
-#       pyenv: PYENV_DIR に最初に通った場所を入れる・PATH の先頭に本物の場所を足す）。detach-run.sh が python3 から見えた環境変数を
-#       そのまま子へ渡していたので、起動したランチャだけが呼び出し元と違う環境になり、指紋（環境変数が入る）が合わず、
-#       本物の起動のたびに「使わない: input-changed」になった。
+#       pyenv: PYENV_DIR に最初に通った場所を入れる・PATH の先頭に本物の場所を足す）。そのころの detach-run.sh は PATH の python3 を使い、
+#       python3 から見えた環境変数をそのまま子へ渡していたので、起動したランチャだけが呼び出し元と違う環境になり、
+#       指紋（環境変数が入る）が合わず、本物の起動のたびに「使わない: input-changed」になった。
 #       このテストも、回す場所で結果が変わった: 入口を一度通った後の環境（レーンの中・chk-run.sh の確認コマンドの中）から回すと緑、
 #       普段のシェルから回すと赤（pyenv の形は、一度通ると PATH の先頭が本物になり、そこから先は入口を通らないので、赤が隠れた）。
 # どの Mac でも同じ形になるよう、通るたびに環境変数を書き換える偽の入口を PATH の先頭に置いて確かめる。
+# 今の detach-run.sh は、決め打ちの場所の python3 を環境変数なしで動かすので、この偽の入口を通らない。通るのは、起動されたランチャと
+# chk-run.sh の中の python3（どちらも PATH から選ぶ）。子へ渡す環境変数が呼び出し元のままであることは、下の指紋の比べで今までどおり見る
 # 偽の入口が起動する「本物」は、python3 自身が答える実体（sys.executable）にする。PATH から見つかる python3 が pyenv の shims のような
 # 入口だと、その入口が PATH の先頭に本物の場所を足すので、2 回目から偽の入口を通らなくなる（毎回通る形にならない）
 real_py="$(python3 -I -c 'import sys; print(sys.executable)')" || fail "python3 を起動できない（用意が誤り）"
