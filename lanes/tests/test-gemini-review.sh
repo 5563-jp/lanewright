@@ -313,6 +313,19 @@ for spec in "status-error|STUB_AGY_STATUS=ERROR" "legacy-result|STUB_AGY_RESULT=
   [[ ! -e "$wt/logs/.$lb.review-state" ]] || fail "$lb: 正常に終わっていないのに再利用の記録を残した"
   pass "agy の $lb（終了コード 0）は EXIT:3・VERDICT: NONE（本文・エラーの本文の VERDICT: CLEAN を拾わない）"
 done
+# 成功した応答は削らずにログへ残し、空白の許否は判定（lanes_parse_review）の 1 か所だけが決める。判定行の直後の
+# ノーブレークスペース・全角空白は判定行そのものではないので NONE（EXIT:3）。空白・タブ・改行だけなら今までどおり CLEAN
+for spec in "tail-nbsp| " "tail-ideo|　" "tail-ideo-nl|　\\n"; do
+  lb="${spec%%|*}"; tail_ws="${spec#*|}"
+  STUB_AGY_RESPONSE="$CLEAN$tail_ws" grv 3 "$lb"
+  has "$wt/logs/$lb.done" 'VERDICT: NONE'
+  python3 -I -c 'import sys; t = open(sys.argv[1], encoding="utf-8").read(); assert ("\nVERDICT: CLEAN" + sys.argv[2][0] + "\n") in t, t' \
+    "$wt/logs/$lb.log" "$tail_ws" || fail "$lb: 応答の末尾の空白をログに残していない"
+  [[ ! -e "$wt/logs/.$lb.review-state" ]] || fail "$lb: 判定なしなのに再利用の記録を残した"
+done
+STUB_AGY_RESPONSE="$CLEAN"$' \t\\n\\n' grv 0 tail-space
+has "$wt/logs/tail-space.done" 'VERDICT: CLEAN'
+pass "応答の末尾は削らずにログへ残して判定する（判定行の直後のノーブレークスペース・全角空白は NONE・EXIT:3。空白・タブ・改行なら CLEAN）"
 
 # ---- 4. 禁止の道具・質問の道具は EXIT:4・VERDICT: NEEDS_FIX ----
 newrepo tools

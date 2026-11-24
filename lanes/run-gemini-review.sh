@@ -715,7 +715,8 @@ if mode == "write":
     with open(log, "a", encoding="utf-8") as f:
         f.write("----\n" + meta)
         if ok:
-            f.write("\n" + response.rstrip() + "\n")
+            # 成功した本文は削らずにそのまま残す（末尾の全角空白・ノーブレークスペースなどの許否は、判定（lanes_parse_review）の 1 か所だけが決める）
+            f.write("\n" + response + ("" if response.endswith("\n") else "\n"))
         else:
             why = "・".join(dict.fromkeys(invalid)) or (f"status={safe(status)}" if status != "SUCCESS" else "応答が空")
             f.write(f"[meta] agy が正常に終わっていない（{why}）ため VERDICT は採用しない\n")
