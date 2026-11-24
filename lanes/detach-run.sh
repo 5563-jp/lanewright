@@ -57,8 +57,12 @@ from pathlib import Path
 log, cmd = Path(sys.argv[1]), sys.argv[2:]
 
 def say(text):
-    """文言を標準エラーへ出す。この python3 は空の環境で動き、ロケールが C になるので、UTF-8 のバイト列で直に書く。"""
-    os.write(2, (text + "\n").encode("utf-8"))
+    """文言を標準エラーへ出す。この python3 は空の環境で動き、ロケールが C になるので、UTF-8 のバイト列で直に書く。
+    標準エラーが閉じているなどで書けなくても、止めない（呼び出し側が決めた終了コードを、そのまま返す）。"""
+    try:
+        os.write(2, (text + "\n").encode("utf-8"))
+    except OSError:
+        pass
 
 # 起動ログのフォルダは、ここで作る（シェルの側では作らない。補助の前に外部コマンドを呼ばないため）。パスと例外の本文は出さない
 try:

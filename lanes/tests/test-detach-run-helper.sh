@@ -17,7 +17,8 @@
 #      （( ) で包まないこと / fd 3 のデータだけを子の環境にすること）
 #   6. 終了コードと文言（空 1・不足 2・無いコマンド 2・フォルダを作れない 1・起動ログがフォルダ 2・成功 0）。
 #      引数とパスを出さない（mkdir の try / 固定の文言）。文言を UTF-8 のバイト列で直に書くこと自体は、ここでは見分けられない
-#      （3.7 以降の python3 は、ロケールが C でも print が同じバイト列を出す）
+#      （3.7 以降の python3 は、ロケールが C でも print が同じバイト列を出す）。
+#      標準エラーを閉じていても、終了コードは同じ（文言を書けなくても止めないこと）
 #   7. 端の入力（消した作業場所・相対パスや - 始まりや空白と = と日本語を含む起動ログ・PATH が無い場所だけ・
 #      TMPPREFIX が書けない場所・名前だけのコマンド）でも起動できる（補助の前に外部コマンドを呼ばないこと / コマンドの名前の解決を足さないこと）
 #   8. 書き方の決まり（静的）: 補助へ乗り換える行までに、禁じた書き方が無い。候補はちょうど 2 つ。補助の本文に一重引用符が無く、
@@ -292,6 +293,7 @@ pass "起動したコマンドの環境変数は直に起動したときと同�
 
 # ---- 6. 終了コードと文言 ----
 print -r -- 'ファイル' > "$T/plain-file"
+mkcopy copy6 "$T/w3/closed" "$T/w2/second"; copy6="$REPLY"      # 呼び出し元の環境変数を受け取れない写し（3 と同じ）
 for loc in '' LC_ALL=en_US.UTF-8; do
   what="ロケール ${loc:-なし}"
   run "$DETACH" "$W" $loc --
@@ -308,10 +310,26 @@ for loc in '' LC_ALL=en_US.UTF-8; do
   stopped "$what・フォルダを作れない" 1 "$MSG2" "$T/started-6"
   run "$DETACH" "$W" $loc -- "$T/out-logs" /usr/bin/touch "$T/started-6"
   stopped "$what・起動ログがフォルダ" 2 "$MSG_OPEN" "$T/started-6"
+  # 標準エラーを閉じていても（文言を書けなくても）、終了コードは同じ。標準入力は、開いた場合と閉じた場合。
+  # 標準エラーの記録（$T/err）が空であることは、閉じる用意が効いていることの確認を兼ねる
+  for run_pre in 'exec 2>&-' 'exec 2>&- <&-'; do
+    shut="$what・${run_pre#exec }"
+    rm -f -- "$T/out-logs/6.log"
+    run "$DETACH" "$W" $loc -- "$T/out-logs/6.log" "$T/no-such-command" FAKE-ARG-MARK
+    stopped "$shut・無いコマンド" 2 '' "$T/started-6"
+    [[ "$(<"$T/out-logs/6.log")" == "$HEADER" ]] || fail "$shut・無いコマンド: 起動ログに見出しのほかのもの（文言・引数・例外の本文）が出ている"
+    run "$DETACH" "$W" $loc -- "$T/plain-file/sub/6.log" /usr/bin/touch "$T/started-6"
+    stopped "$shut・フォルダを作れない" 1 '' "$T/started-6"
+    run "$DETACH" "$W" $loc -- "$T/out-logs" /usr/bin/touch "$T/started-6"
+    stopped "$shut・起動ログがフォルダ" 2 '' "$T/started-6"
+    run "$copy6" "$W" $loc -- "$T/out-logs/6.log" /usr/bin/touch "$T/started-6"
+    stopped "$shut・環境を受け取れない" 2 '' "$T/started-6"
+  done
+  run_pre=':'
   run "$DETACH" "$W" $loc -- "$T/out-logs/6.log" /usr/bin/true
   launched "$what・成功"
 done
-pass "終了コードと文言（空 1・不足 2・無いコマンド 2・フォルダを作れない 1・起動ログがフォルダ 2・成功 0）。文言は固定で、引数・パス・例外の本文を出さない（ロケール 2 通りで同じ）"
+pass "終了コードと文言（空 1・不足 2・無いコマンド 2・フォルダを作れない 1・起動ログがフォルダ 2・成功 0）。文言は固定で、引数・パス・例外の本文を出さない。標準エラーを閉じていても終了コードは同じ（ロケール 2 通りで同じ）"
 
 # ---- 7. 端の入力でも起動できる ----
 mkdir -p "$T/bin7"
