@@ -18,9 +18,11 @@
 #   6. 終了コードと文言（空 1・不足 2・無いコマンド 2・フォルダを作れない 1・起動ログがフォルダ 2・成功 0）。
 #      引数とパスを出さない（mkdir の try / 固定の文言）。文言を UTF-8 のバイト列で直に書くこと自体は、ここでは見分けられない
 #      （3.7 以降の python3 は、ロケールが C でも print が同じバイト列を出す）。
+#      起動ログの末尾が /. のときは、手前のファイルを起動ログにせずに止まる（作るフォルダを、書かれたままの引数から求めること）。
 #      標準エラーを閉じていても、終了コードは同じ（文言を書けなくても止めないこと）
-#   7. 端の入力（消した作業場所・相対パスや - 始まりや空白と = と日本語を含む起動ログ・PATH が無い場所だけ・
-#      TMPPREFIX が書けない場所・名前だけのコマンド）でも起動できる（補助の前に外部コマンドを呼ばないこと / コマンドの名前の解決を足さないこと）
+#   7. 端の入力（消した作業場所・相対パスや - 始まりや空白と = と日本語を含む起動ログ・末尾が / や途中に // のある起動ログ・
+#      PATH が無い場所だけ・TMPPREFIX が書けない場所・名前だけのコマンド）でも起動できる
+#      （補助の前に外部コマンドを呼ばないこと / コマンドの名前の解決を足さないこと）
 #   8. 書き方の決まり（静的）: 補助へ乗り換える行までに、禁じた書き方が無い。候補はちょうど 2 つ。補助の本文に一重引用符が無く、
 #      読み込むのは決まった標準ライブラリだけで、Python として読める
 #   5〜7 は、呼び出し元のロケールなしと UTF-8 の 2 通りで回す。
@@ -310,6 +312,18 @@ for loc in '' LC_ALL=en_US.UTF-8; do
   stopped "$what・フォルダを作れない" 1 "$MSG2" "$T/started-6"
   run "$DETACH" "$W" $loc -- "$T/out-logs" /usr/bin/touch "$T/started-6"
   stopped "$what・起動ログがフォルダ" 2 "$MSG_OPEN" "$T/started-6"
+  # 起動ログの末尾が /. のとき、手前のもの（/. を除いたパス）を起動ログにして起動しない。作るフォルダは /. の手前そのものなので、
+  # 手前が普通のファイル・デバイスなら「フォルダを作れない」、手前がフォルダになる（無ければ作る）なら「起動ログがフォルダ」で止まる
+  rm -rf -- "$T/dot6"; mkdir -p "$T/dot6/dir"
+  for log in /dev/null/. "$T/plain-file/." "$T/plain-file/./." "$T/plain-file/.//"; do
+    run "$DETACH" "$W" $loc -- "$log" /usr/bin/touch "$T/started-6"
+    stopped "$what・起動ログ $log" 1 "$MSG2" "$T/started-6"
+  done
+  [[ "$(<"$T/plain-file")" == 'ファイル' ]] || fail "$what: 末尾が /. の起動ログで、手前の普通のファイルへ書いている"
+  for log in "$T/dot6/dir/x.log/." "$T/dot6/dir/." "$T/dot6/new/."; do
+    run "$DETACH" "$W" $loc -- "$log" /usr/bin/touch "$T/started-6"
+    stopped "$what・起動ログ $log" 2 "$MSG_OPEN" "$T/started-6"
+  done
   # 標準エラーを閉じていても（文言を書けなくても）、終了コードは同じ。標準入力は、開いた場合と閉じた場合。
   # 標準エラーの記録（$T/err）が空であることは、閉じる用意が効いていることの確認を兼ねる
   for run_pre in 'exec 2>&-' 'exec 2>&- <&-'; do
@@ -329,7 +343,7 @@ for loc in '' LC_ALL=en_US.UTF-8; do
   run "$DETACH" "$W" $loc -- "$T/out-logs/6.log" /usr/bin/true
   launched "$what・成功"
 done
-pass "終了コードと文言（空 1・不足 2・無いコマンド 2・フォルダを作れない 1・起動ログがフォルダ 2・成功 0）。文言は固定で、引数・パス・例外の本文を出さない。標準エラーを閉じていても終了コードは同じ（ロケール 2 通りで同じ）"
+pass "終了コードと文言（空 1・不足 2・無いコマンド 2・フォルダを作れない 1・起動ログがフォルダ 2・成功 0）。文言は固定で、引数・パス・例外の本文を出さない。末尾が /. の起動ログは、手前のファイルを起動ログにせずに止まる。標準エラーを閉じていても終了コードは同じ（ロケール 2 通りで同じ）"
 
 # ---- 7. 端の入力でも起動できる ----
 mkdir -p "$T/bin7"
@@ -342,11 +356,12 @@ for loc in '' LC_ALL=en_US.UTF-8; do
   run_pre=':'
   launched "$what・消した作業場所"
   [[ ! -d "$T/gone$i" && -f "$T/started-7-$i-gone" ]] || fail "$what・消した作業場所: コマンドが動いていない（または作業場所を消せていない）"
-  for log in logs/rel.log -dash.log "$R/sp ace/a=b 日本語.log"; do
+  # 末尾の / は、無いものとして扱う（起動ログは、/ を除いた名前の普通のファイル）
+  for log in logs/rel.log -dash.log x.log ./dot.log "$R/sp ace/a=b 日本語.log" "$R//sl//a.log" "$R/new/n.log" "$R/tr/t.log/"; do
     rm -f -- "$T/started-7"
     run "$DETACH" "$R" $loc -- "$log" /usr/bin/touch "$T/started-7"
     launched "$what・起動ログ $log"
-    ( cd "$R" && [[ -f "$log" ]] ) && [[ -f "$T/started-7" ]] || fail "$what・起動ログ $log: 起動ログがその場所に無い・コマンドが動いていない"
+    ( cd "$R" && [[ -f "${log%/}" ]] ) && [[ -f "$T/started-7" ]] || fail "$what・起動ログ $log: 起動ログがその場所に無い・コマンドが動いていない"
   done
   for v in PATH="$T/no-such-dir/bin" TMPPREFIX="$T/no-such-dir/zsh"; do
     rm -f -- "$T/started-7"
@@ -359,7 +374,7 @@ for loc in '' LC_ALL=en_US.UTF-8; do
   launched "$what・名前だけのコマンド"
   [[ "$(<"$T/started-7-named")" == ran ]] || fail "$what・名前だけのコマンド: 呼び出し元の PATH から起動していない"
 done
-pass "端の入力でも起動できる（消した作業場所・相対パスや - 始まりや空白と = と日本語を含む起動ログ・PATH や TMPPREFIX が無い場所・名前だけのコマンド）"
+pass "端の入力でも起動できる（消した作業場所・相対パスや - 始まりや空白と = と日本語を含む起動ログ・末尾が / や途中に // のある起動ログ・PATH や TMPPREFIX が無い場所・名前だけのコマンド）"
 
 # ---- 8. 書き方の決まり（静的）----
 lines=("${(@f)SRC}")

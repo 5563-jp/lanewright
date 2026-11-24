@@ -64,9 +64,11 @@ def say(text):
     except OSError:
         pass
 
-# 起動ログのフォルダは、ここで作る（シェルの側では作らない。補助の前に外部コマンドを呼ばないため）。パスと例外の本文は出さない
+# 起動ログのフォルダは、ここで作る（シェルの側では作らない。補助の前に外部コマンドを呼ばないため）。パスと例外の本文は出さない。
+# 作るフォルダは、書かれたままの引数から求める（末尾の / を除いた、最後の / より前。/ が無ければ今の場所）。Path は末尾の /. を
+# 落とすので、log.parent から求めると、<ファイル>/. や /dev/null/. が「そのファイルを起動ログにする」指定として通ってしまう
 try:
-    log.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(os.path.dirname(sys.argv[1].rstrip("/") or "/") or ".", exist_ok=True)
 except OSError:
     say("ERROR: 起動ログのフォルダを作れないので起動しない。書けるフォルダの下のパスを指定する")
     sys.exit(1)
