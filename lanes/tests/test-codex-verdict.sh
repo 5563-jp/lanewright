@@ -208,5 +208,30 @@ parse_case codex 'VERDICT: NONE'  "レビューで確認できなかった${nl}V
 parse_case codex 'VERDICT: NONE'  "レビューを完了できなかった。理由は時間切れ${nl}VERDICT: CLEAN"
 parse_case codex 'VERDICT: NONE'  "レビューを中断した${nl}VERDICT: CLEAN"
 parse_case codex 'VERDICT: NONE'  "レビューを完了できなかった点はないとは言えない${nl}VERDICT: CLEAN"
+# レビュー役（Claude・Gemini）の判定（review）: 整形前の元の本文の最後の空でない行（前後の空白を除く）が
+# `VERDICT: CLEAN` / `VERDICT: NEEDS_FIX` そのものでなければ、指摘の重大度から推定せず NONE（表・引用・飾りの付いた行が最後でも NONE）。
+# 4字下げ（またはタブ）のコード例は本文解析では除外するので、それが最後の空でない行なら NONE。前後1〜2個の空白だけなら従来どおり採用する。
+# 必須検証の記録の使い回しでも、字下げのコード例だけでは合格にしない（explicit＝本文末尾に採用可能な判定行、も必要）。
+# 実装・QA の自己申告（extract）は今までどおり重大度から NEEDS_FIX を推定し、表の後ろの判定行の扱いも変えない
+parse_case review  'VERDICT: NONE'      "- [P2] 判定行の無い残件${nl}${skip_line}"
+parse_case review  'VERDICT: NONE'      "- [P1] 判定行の無い重大な指摘"
+parse_case review  'VERDICT: NONE'      "- [P2] 残件${nl}VERDICT: NEEDS_FIX${nl}追記の行"
+parse_case review  'VERDICT: NONE'      "- [P2] 残件${nl}VERDICT: NEEDS_FIX${nl}| 検証 | 結果 |${nl}|---|---|${nl}| unit | PASS |"
+parse_case review  'VERDICT: NONE'      "問題なし${nl}${skip_line}${nl}VERDICT: CLEAN${nl}| 検証 | 結果 |"
+parse_case review  'VERDICT: NONE'      "問題なし${nl}${skip_line}${nl}VERDICT: CLEAN${nl}> 補足の引用"
+parse_case review  'VERDICT: NONE'      "問題なし${nl}${skip_line}${nl}**VERDICT: CLEAN**"
+parse_case review  'VERDICT: NEEDS_FIX' "- [P2] 残件${nl}${skip_line}${nl}VERDICT: NEEDS_FIX"
+parse_case review  'VERDICT: NEEDS_FIX' "- [P2] 残件${nl}${skip_line}${nl}VERDICT: CLEAN"
+parse_case review  'VERDICT: CLEAN'     "問題なし${nl}${skip_line}${nl}VERDICT: CLEAN"
+parse_case review  'VERDICT: CLEAN'     "問題なし${nl}${skip_line}${nl}  VERDICT: CLEAN  ${nl}${nl}   ${nl}"
+parse_case review  'VERDICT: NONE'      "判定行の記入例:${nl}    VERDICT: CLEAN"
+parse_case review  'VERDICT: NONE'      "問題なし${nl}${skip_line}${nl}    VERDICT: CLEAN"
+parse_case review  'VERDICT: NONE'      $'問題なし\n\tVERDICT: CLEAN'
+parse_case review  'VERDICT: NONE'      "書式例:${nl}${nl}    VERDICT: CLEAN"
+LANES_REVIEW_CHECKS_REUSED=1 parse_case review  'VERDICT: NONE'  "判定行の記入例:${nl}    VERDICT: CLEAN"
+LANES_REVIEW_CHECKS_REUSED=1 parse_case review  'VERDICT: NONE'  "書式例:${nl}${nl}    VERDICT: CLEAN"
+LANES_REVIEW_CHECKS_REUSED=1 parse_case review  'VERDICT: CLEAN' "問題なし${nl}${skip_line}${nl}VERDICT: CLEAN"
+parse_case extract 'VERDICT: NEEDS_FIX' "- [P2] 判定行の無い残件${nl}${skip_line}"
+parse_case extract 'VERDICT: CLEAN'     "問題なし${nl}VERDICT: CLEAN${nl}| 検証 | 結果 |"
 print -- "---- $pass passed, $fail failed"
 (( fail == 0 ))

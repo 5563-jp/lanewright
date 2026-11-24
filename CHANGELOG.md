@@ -6,6 +6,58 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+## [0.1.9] - 読み取り専用の Gemini レビューとレビュー役の振り分け / Read-only Gemini review and reviewer routing
+
+### 足したこと / Added
+- 読み取り専用の Gemini レビューランチャ `lanes/run-gemini-review.sh` を足した（構成に `gemini` がある ① `full` / ③ `claude-gemini` で使える）。
+  Codex・Claude のレビューと同じ入口（`run-review.sh`）・同じ判定（`review-dedup.zsh` の full / delta / 同じ head の再利用・round 3 以降の後回し票・
+  必須検証の使い回し）・同じ終了コードの決まりで動く。agy に `--sandbox`・`--settings`（MCP・書く道具・サブエージェント・ブラウザ・Web・予約・ワークフローを拒否）・
+  `--mode plan` を必ず付け、実行の記録で禁止の道具・質問の道具（`ask_*`）が呼ばれていれば不合格（`EXIT:4`）にする。
+  agy は時間切れや失敗でも終了コード 0 で `status: "ERROR"` を出すことがあるので、`SUCCESS` で本文があるときだけ判定する（それ以外は `VERDICT: NONE`）。
+  `CLEAN` は必須検証の成功（成功行か親の `chk-run.sh` の記録の使い回し）を確かめたときだけ保存する。子が書けるのは作業ツリー（前後の比較で不合格）と
+  scratch の `work/` だけで、実行の記録の原本と渡す指示書は子から書けない scratch の `record.<実行ごと>/`（実行ごとに新しく作り、前の実行の原本は消さない）に置き、
+  監査・判定は原本で行って子の終了後に `logs/` へ写す。一時エラーのやり直しも同じ指示書を使い、残り時間は作業ツリーの比較の後に求める。
+  Gemini で実装したものは、`run-gemini-review.sh` を直接呼んでも起動しない（`--impl-engine` も受け付ける）。
+  Gemini のレビューは作業ツリーがきれいなときだけ起動する（`logs/` 以外に未 commit の変更・未追跡のファイルがある、またはサブモジュールがあるときは exit 2。
+  commit してから起動する）。作業ツリーを scratch に写して試すときは `.git` ごと写さず（元の管理フォルダを指すため）、`git archive HEAD` を
+  新しい空のフォルダ（`mktemp -d`）へ展開して `git init` し直すよう指示書に書く（写すのは commit 済みの中身だけ）。
+- `run-review.sh` に `--engine codex|gemini|claude`（レビュー役の明示）と `--impl-engine claude|gemini|codex`（実装した道具のヒント）を足した。
+- 設定 `LANES_REVIEW_GEMINI_PCT`（既定 `0`）: 新しい系列のレビューをこの割合で Gemini に回す（`50` なら既定の役と交互）。
+  割合で決めた役は作業ツリーの `logs/.<系列>.review-pick` に残して引き継ぐ（起動前の点検で止まった系列を呼び直しても、数え方を二重に進めない。
+  作業ツリーと同じ寿命なので、同じパスに作り直した作業ツリーには持ち越さない）。
+  同じ系列の r2 以降は前回と同じレビュー役で続ける。**Gemini で実装したもの（`--impl-engine gemini` か `logs/` の `.pid` に `lane=gemini`）は Gemini でレビューしない。**
+  実装の記録（`logs/` の `.pid`）を読めないときも、実装元が分からないので同じに扱う。
+- 設定 `GEMINI_REVIEW_DENY`: Gemini レビューで拒否する道具を足す（固定の一覧は外せない）。
+
+### 変えたこと / Changed
+- 再利用の記録（`logs/.<系列>.review-state`）にレビュー役（`last_reviewer`）を残すようにした（Codex・Claude のレビューとも。旧記録は証跡の見出しで判別する）。
+- 再利用の条件（`rvd_context`）に `run-gemini-review.sh` の中身を足した。上げた後の最初のレビューは、前回 `CLEAN` の系列でも 1 回 full になる。
+- 前回 `NEEDS_FIX` の後の再レビューも、レビュー役を変えた回は差分ではなく全体を見る（Codex・Claude・Gemini とも。前回の指摘は引き継ぐ）。
+- 読み取り専用の制限の設定（`CODEX_REVIEW_SANDBOX`・`CLAUDE_REVIEW_TOOLS`・`CLAUDE_REVIEW_DENY`・`GEMINI_REVIEW_DENY`）を再利用の条件に入れた。
+- commit の作者の照合に使う有効な作者の設定（`user.name` / `user.email`）の指紋を再利用の条件に入れた（値は入れない）。設定を変えたら同じ HEAD でもレビューし直す。
+  Gemini のレビューでは、作者の照合を親で行い、件数と一致しない commit の番号だけを指示書に入れる（名前・メールは渡さない）。
+  レビュー範囲の commit の一覧（短い SHA と件名）と変更統計（`git diff --stat`）も親が作って指示書に埋め込み、子には `git log`・`git show`・`git blame`・
+  `git shortlog` などの履歴・作者を表示し得るコマンドを使わないよう書く（中身は `git diff` と作業ツリーのファイルの読み取りで確かめる）。
+  テンプレの履歴・作者の確認の項目は固定の文言のまま埋め込みを参照する文に差し替える（指示書の全文をコマンドの形で書き換えることはしない）。
+- Claude・Gemini のレビューは、整形前の元の本文の最後の空でない行（前後の空白を除く）が `VERDICT: CLEAN` / `VERDICT: NEEDS_FIX` そのものであるときだけ
+  それを最終判断とし、そうでなければ（判定行の後ろに表・引用・補足が続く、飾りが付いている、判定行が無い）指摘があっても重大度から推定せず
+  `VERDICT: NONE`（`EXIT:3`）にする（round 3 以降の後回し・合格への昇格・前回の指摘の後回し・再利用の記録の保存をしない）。
+  Claude レビューのテンプレにも、最後の行は飾りを付けずその後ろに何も書かないことを書いた。Codex のレビューは完了証明が最終判断の代わりなので今までどおり。
+- レビューのランチャ・`review-dedup.zsh`・`_common.sh`・`chk-run.sh` が呼ぶ Python は、起動時に作業ツリーの外から選んで固定した `python3` を `-I` で動かすようにした
+  （作業ツリーの中の仮想環境を有効にしたシェルから起動しても、その環境の起動時の処理や対象リポにある同じ名前のモジュールを読み込まない。
+  作業ツリーの外に `python3` が無ければ exit 2）。入口（`run-review.sh`・`run-impl.sh`）で 1 回だけ決めた `python3` を、振り分け先・起動前点検（`lanes-doctor.sh`）・
+  `chk-run.sh --query` へ渡し、渡された側は選び直さない（作業ツリーの外の実行ファイルであることだけ確かめ、作業ツリーの中なら止める）。
+  固定するのは `PATH` の `python3` そのものではなく実体（作業ツリーの外のフォルダだけの `PATH`・`cd /`・`PYENV_VERSION` / `PYENV_DIR` なしで一度呼んで得た
+  `sys.executable` の実パス）なので、pyenv の shim のように呼ばれるたびに元の `PATH` から作業ツリーの中の `python3` を選び直すことはない。
+  実体を確かめる探索先からも、`python3` が作業ツリー内の実行ファイルへのリンクであるフォルダは外す（振り分けプログラムが、確かめる前にそのプログラムを動かさない）。
+- 数値の設定キーは、`lanes.env` が先頭の 0 を外して整数に揃える（`LANES_REVIEW_GEMINI_PCT=0050` は `50`）。
+- 既定（`LANES_REVIEW_GEMINI_PCT=0`）のまま `--engine` を使わなければ、新しい系列のレビュー役は今までと同じ（構成の既定の役）。
+  同じ系列の途中で構成（`LANES_TOOLS`）を変えたときは、前回の役が今の構成にあればその役で続ける（変えるなら `--engine` か新しい系列の label で）。
+
+- 空白とタブが混在する字下げ判定行の解析や行番号照合、各 commit の変更パスによる混入点検、パス照合の強化は v0.1.10 へ回した（r6 の指摘。枝 `feat/review-inspect-v0.1.10`）。
+  v0.1.9 の VERDICT は、元の最終行が判定行そのものであることに加え、本文解析で採用できる判定行が末尾にあること（explicit）も求める。
+  「書式例」のあとに 4 空白またはタブで字下げした `VERDICT: CLEAN` だけで終わる応答は合格にしない（v0.1.8 と同じ強さ）。
+
 ## [0.1.8] - レビューの重さに「起きる条件」を足し、P0/P1 が減らない周回を止める / Severity needs a trigger condition; stop loops where P0/P1 do not go down
 
 ### 変えたこと / Changed

@@ -9,6 +9,9 @@
 #   LANES_ROLE_IMPL          実装役（claude か "claude gemini"）
 #   LANES_ROLE_REVIEW        レビュー役（codex か claude）
 #   LANES_REVIEW_INDEPENDENT 1 = 実装と別系統の道具でレビュー / 0 = 同じ系統（独立性が弱い）
+# 構成に gemini があれば、LANES_REVIEW_GEMINI_PCT（0〜100）の割合でレビューを Gemini（run-gemini-review.sh）へ回せる
+#   （振り分けは入口の run-review.sh。Gemini で実装したものは Gemini に回さない）。上の 4 つの変数の値は割合に関係なく変わらない。
+#   --print は割合が 1 以上のとき「うち N% を Gemini レビューへ振り分け」と補足する
 # 構成の表（docs/roles.md と同じ）:
 #   ① full          claude codex gemini → 実装 Claude と Gemini / レビュー Codex
 #   ② claude-codex  claude codex        → 実装 Claude            / レビュー Codex
@@ -79,6 +82,11 @@ lanes_roles_print() {
   print -r -- "構成: $mark $LANES_PROFILE（道具: $LANES_TOOLS_NORMALIZED）"
   print -r -- "実装: $impl_line"
   print -r -- "レビュー: $review_line"
+  # 割合の振り分け（LANES_REVIEW_GEMINI_PCT。lanes.env が 0〜100 の整数か確かめ済み。ここでも数字だけかを見てから比べる）
+  local pct="${LANES_REVIEW_GEMINI_PCT:-0}"
+  if lanes_roles_has_tool gemini && [[ "$pct" == <-> && ${#pct} -le 3 ]] && (( pct > 0 && pct <= 100 )); then
+    print -r -- "レビューの振り分け: うち ${pct}% を Gemini レビューへ振り分け（Gemini 実装分は除く。run-review.sh → run-gemini-review.sh・読み取り専用。同じ系列の r2 以降は前回と同じ役）"
+  fi
   if (( LANES_REVIEW_INDEPENDENT )); then
     print -r -- "レビューの独立性: あり（実装と別系統の道具で見る）"
   else

@@ -3,7 +3,10 @@
 # 使い方: lanes-doctor.sh [--quiet] [<worktree>]
 #   --quiet     問題が無ければ何も出さない（run-impl.sh / run-review.sh が起動前に使う）。問題があれば同じ一覧を出す
 #   <worktree>  （任意）レーンを走らせる作業ツリー。渡すと、ランチャが書く logs/ が git に無視されているかも見る
-#               （無視されていなければ注意だけ。未追跡の logs/ が残り、誤って commit される原因になる）
+#               （無視されていなければ注意だけ。未追跡の logs/ が残り、誤って commit される原因になる）。
+#               ログイン状態の解析に使う python3 も、その作業ツリーの外のものにする（ランチャと同じ決め方）
+#   入口・ランチャからの起動前点検では、ランチャが固定した python3 が LANES_PY_FIXED で渡る。渡されたら選び直さず、
+#   作業ツリーの外の実行ファイルであることだけ確かめる（作業ツリーの中なら NG）。単独で回したときだけ PATH から選ぶ
 # 見るもの:
 #   - 構成: LANES_TOOLS が正しいか（lanes-roles.sh と同じ判定）
 #   - 必須の道具: python3 / git / zsh。任意: gh（GitHub の CLI。無ければ注意だけ）
@@ -86,6 +89,11 @@ if (( roles_ok )); then
     source "$LANES_DIR/_common.sh"
     # 点検の途中で止まっても .done 等を書かない（_common.sh の終了処理はランチャ用）
     unfunction TRAPEXIT TRAPZERR 2>/dev/null || true
+    # 作業ツリーを渡されたら、ログイン状態の解析に使う python3 をその外のものに決める（渡された python3 は確かめるだけ）
+    if [[ -n "$worktree" ]] && ! lanes_python_pin "$worktree"; then
+      ng "python3: 作業ツリーの外の python3 を決められない（${LANES_PY_GIVEN:+渡された python3 が作業ツリーの中にある・実行できない。}PATH の、作業ツリーの外の絶対パスのフォルダに python3 を置く）: $worktree"
+      have_python=0
+    fi
   fi
   # <tool> <変数名> <コマンド名> <ログインのやり直し方>
   check_cli() {

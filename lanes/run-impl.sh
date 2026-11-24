@@ -55,6 +55,9 @@ if [[ "$engine" == claude && -n "$gemini_only" ]]; then
 fi
 # 起動前点検は振り分け先が排他・終了記録（.pid / .done）を取った後に行う（失敗を今回の FAILED として残すため）
 export LANES_ENTRY_PREFLIGHT=1
+# 親の補助処理の python3 は、作業ツリーを知った lanes_early_target で決めたものを振り分け先へ渡す（run-review.sh と同じ。
+# 振り分け先は選び直さず確かめるだけ）。作業ツリーが決まらない呼び方では渡さない（振り分け先が自分で決めて止める）
+(( ${#positional} < 2 )) || export LANES_PY_FIXED="$LANES_PY"
 
 case "$engine" in
   claude) exec zsh -f "$LANES_DIR/run-claude.sh" "${pass[@]}" ;;

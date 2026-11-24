@@ -118,7 +118,7 @@ else
   lanes_mark_start "$logdir" "$label" gemini "$wt"
 fi
 lanes_require_tool gemini run-gemini.sh
-lanes_entry_preflight
+lanes_entry_preflight "$wt"
 [[ -n "${verify//[[:space:]]/}" ]] || lanes_die "--verify は必須（全体テストと build を指定）"
 (( ${#allowed_paths} )) || lanes_die "--allow-path は必須（今回の保存可能なファイル、または末尾 / のディレクトリ）"
 gem_changes initial >/dev/null || lanes_die "作業開始前の変更・保存範囲の確認に失敗"

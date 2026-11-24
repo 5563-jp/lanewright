@@ -116,6 +116,8 @@ lanes_unknown_opt_width() {   # <不明なオプション> [次の語...]。読�
 }
 lanes_early_target() {   # <worktree> <label> <dry-run なら 1>。保留中の引数の誤りがあれば、ここで止める（記録してから exit 2）
   local wt="$1" label="$2" dry="${3:-0}"
+  # 親の補助処理の Python を、この作業ツリーの外のものに固定し直す（記録を書くより前。固定できなければ記録せずに止める）
+  [[ -z "$wt" ]] || lanes_python_require "$wt"
   if [[ "$dry" != 1 && "$label" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' && -n "$wt" && -d "$wt/logs" && ! -L "$wt/logs" ]]; then
     typeset -g LANES_EARLY_LOGDIR="${wt:A}/logs" LANES_EARLY_LABEL="$label"
   fi
@@ -155,8 +157,75 @@ lanes_record_early_failure() {
 }
 lanes_now() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 
-# zsh -f は .zshrc を読まないので PATH は起動元の継承だけ。python3 は必須
-command -v python3 >/dev/null 2>&1 || lanes_die "python3 が PATH に無い"
+# ---- 親の補助処理に使う Python（作業ツリーの外のもの）----
+# 親の補助処理（指紋・監査・記録の読み書き・子の監督）は "$LANES_PY" -I で動かす。-I はカレントフォルダ・PYTHON* の環境変数・
+# 利用者の site を読まないが、PATH から選んだ python3 そのものが作業ツリーの中の仮想環境（.venv を有効にしたシェル）だと、
+# その環境の起動時の処理（pyvenv.cfg・site-packages の .pth・sitecustomize）を読む。そこで使う python3 を起動時に 1 つに固定する:
+#   PATH の絶対パスのフォルダを前から見て、最初にある実行できる python3（. などの相対パスのフォルダは見ない）。
+#   lanes_python_pin <worktree> は、フォルダか python3 の実パスがその作業ツリーの中にあるものも飛ばし、残った候補を
+#   作業ツリーの外のフォルダだけの PATH で一度呼んで実体（sys.executable の実パス）を確かめ、その実体を固定する
+#   （pyenv の shim のように、呼ばれるたびに PATH から Python を選び直すプログラムを固定しない。
+#   ランチャは lanes_early_target と lanes_require_worktree で呼ぶ。chk-run.sh も同じ関数で決める）。
+#   作業ツリーの外に無ければ止める（中の python3 には倒さない）。
+# zsh -f は .zshrc を読まないので PATH は起動元の継承だけ。値は export しない（子にも、chk-run.sh の環境の指紋にも入れない）
+# 入口で 1 回だけ決める: 入口（run-review.sh・run-impl.sh）が作業ツリーを知った時点で決めた python3 の絶対パスを、振り分け先・
+# 起動前点検（lanes-doctor.sh）・必須検証の問い合わせ（chk-run.sh --query）へ LANES_PY_FIXED で渡す（設定キーではない）。
+# 渡されたら PATH から選び直さず、作業ツリーの外の実在する実行ファイルであることだけ確かめる（作業ツリーの中・実行できないなら
+# 使わずに止める）。受け取ったらすぐ環境から外す（CLI の子にも、chk-run.sh の環境の指紋にも入れない）
+unset LANES_PY
+typeset -g +x LANES_PY=""
+typeset -g +x LANES_PY_GIVEN="${LANES_PY_FIXED:-}"
+unset LANES_PY_FIXED
+lanes_python_pin() {   # [worktree] → 0 = LANES_PY を固定した / 1 = 使える python3 が無い（LANES_PY は空）
+  local root="" dir py exe probe
+  local -a outside
+  [[ -z "${1:-}" ]] || root="${1:A}"
+  LANES_PY=""
+  if [[ -n "$LANES_PY_GIVEN" ]]; then
+    py="$LANES_PY_GIVEN"
+    [[ "$py" == /* && -f "$py" && -x "$py" ]] || return 1
+    if [[ -n "$root" ]] && [[ "${py:h:A}/" == "$root/"* || "${py:A}/" == "$root/"* ]]; then return 1; fi
+    LANES_PY="$py"
+    return 0
+  fi
+  # 作業ツリーを知っているときは、PATH の python3 が使う Python を選び直すプログラム（pyenv の shim など）でも、後で元の PATH
+  # （作業ツリーの中の .venv/bin など）から選び直さないよう、実体の絶対パスを確かめてから固定する。確かめるときは作業ツリーの
+  # 外の絶対パスのフォルダだけの PATH・cd /・PYENV_VERSION / PYENV_DIR なしで呼ぶ（作業ツリーの中の python3 や .python-version を
+  # 選ばせない）。実体（sys.executable の実パス）が作業ツリーの外の実行ファイルでなければ、その候補は使わない
+  if [[ -n "$root" ]]; then
+    for dir in "${path[@]}"; do
+      [[ "$dir" == /* && "${dir:A}/" != "$root/"* ]] || continue
+      # 探索先の python3 が作業ツリー内の実行ファイルへのリンクなら、このフォルダも使わない
+      # （pyenv の振り分けプログラムが、実体を確かめる前にそのプログラムを動かさない）
+      probe="$dir/python3"
+      if [[ -e "$probe" && "${probe:A}/" == "$root/"* ]]; then
+        continue
+      fi
+      outside+=("$dir")
+    done
+  fi
+  for dir in "${path[@]}"; do
+    [[ "$dir" == /* ]] || continue
+    py="$dir/python3"
+    [[ -f "$py" && -x "$py" ]] || continue
+    if [[ -n "$root" ]] && [[ "${dir:A}/" == "$root/"* || "${py:A}/" == "$root/"* ]]; then continue; fi
+    if [[ -n "$root" ]]; then
+      exe="$( unset PYENV_VERSION PYENV_DIR; path=("${outside[@]}"); cd / && "$py" -I -c 'import sys; print(sys.executable)' < /dev/null 2>/dev/null )" || continue
+      [[ "$exe" == /* ]] || continue
+      py="${exe:A}"
+      [[ -f "$py" && -x "$py" && "$py/" != "$root/"* ]] || continue
+    fi
+    LANES_PY="$py"
+    return 0
+  done
+  return 1
+}
+lanes_python_require() {   # <worktree>: 作業ツリーの外の python3 に固定し直す（入口から渡されていれば確かめるだけ）。無ければ止める
+  lanes_python_pin "$1" && return 0
+  [[ -z "$LANES_PY_GIVEN" ]] || lanes_die "入口から渡された python3 が、作業ツリーの外の実行ファイルではない（選び直さずに止める）: $LANES_PY_GIVEN（作業ツリー: $1）"
+  lanes_die "作業ツリーの外に python3 が無い（作業ツリーの中の python3 は親の補助処理に使わない。PATH の、作業ツリーの外の絶対パスのフォルダに python3 を置く）: $1"
+}
+lanes_python_pin || lanes_die "使える python3 が無い（PATH の絶対パスのフォルダに置く。入口から渡された python3 が実行できないときも止める）"
 
 # バイナリが無ければ PATH から探す
 lanes_resolve_bin() {
@@ -208,10 +277,13 @@ lanes_require_tool() {
 # 入口は LANES_ENTRY_PREFLIGHT=1 を付けて振り分け先へ exec し、振り分け先が lanes_mark_start の後にこれを呼ぶ。
 # こうすると点検の失敗も今回の .done（EXIT:2）として残り、同じ label の前回の成功（DONE）と取り違えない。
 # 直接ランチャを呼んだときは何もしない（そのランチャ自身の道具の点検だけが走る）。子の CLI へ引き継がないよう外す。
-lanes_entry_preflight() {
+# 点検には、このランチャが固定した python3（LANES_PY_FIXED）と対象の作業ツリーを渡す（点検は選び直さず、作業ツリーの外の
+# 実行ファイルであることだけ確かめる。ログイン状態の解析もこの python3 で行う）
+lanes_entry_preflight() {   # <worktree>
   [[ "${LANES_ENTRY_PREFLIGHT:-0}" == 1 ]] || return 0
   unset LANES_ENTRY_PREFLIGHT
-  zsh -f "$LANES_DIR/lanes-doctor.sh" --quiet || lanes_die "起動前点検（lanes-doctor.sh）で足りないものがある → 起動しない"
+  [[ -n "${1:-}" && -n "$LANES_PY" ]] || lanes_die "起動前点検に作業ツリーと固定した python3 を渡せない → 起動しない"
+  LANES_PY_FIXED="$LANES_PY" zsh -f "$LANES_DIR/lanes-doctor.sh" --quiet "$1" || lanes_die "起動前点検（lanes-doctor.sh）で足りないものがある → 起動しない"
 }
 
 # <worktree> <gitdir> <共通の管理フォルダ> → git の制御ファイルの指紋（子の実行の前後で比べる）。
@@ -220,7 +292,7 @@ lanes_entry_preflight() {
 # 共通の config / config.worktree・hooks の中身（下のフォルダも）。git は呼ばない（呼ぶ前に比べるため）。値は出さず指紋だけ出す。
 # gitdir と共通の管理フォルダは、子を起動する前に git で確かめた値を渡す（子の後で git に聞き直さない）
 lanes_git_ctl_fingerprint() {
-  python3 - "$1/.git" "$2" "$3" <<'PY_GIT_CTL_FP'
+  "$LANES_PY" -I - "$1/.git" "$2" "$3" <<'PY_GIT_CTL_FP'
 import hashlib, os, pathlib, sys
 dotgit, gitdir, common = (pathlib.Path(a) for a in sys.argv[1:4])
 h = hashlib.sha256()
@@ -255,6 +327,7 @@ lanes_block_git_transport() {
 
 lanes_require_worktree() {
   local wt="$1"
+  lanes_python_require "$wt"   # 親の補助処理の Python を作業ツリーの外のものに固定する（上の lanes_python_pin）
   [[ -d "$wt" ]] || lanes_die "worktree が無い: $wt"
   git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || lanes_die "git 作業ツリーじゃない: $wt"
   git -C "$wt" rev-parse --verify -q HEAD >/dev/null 2>&1 || lanes_die "commit が 1 つも無い（HEAD 無し）: $wt"
@@ -294,7 +367,7 @@ lanes_codex_auth_state() {
 lanes_claude_auth_state() {
   local s rc=0; s="$("$CLAUDE_BIN" auth status < /dev/null 2>/dev/null)" || rc=$?
   # JSON 本文をプロセス引数へ渡さず、標準入力だけで検査する。
-  print -r -- "$s" | python3 -c '
+  print -r -- "$s" | "$LANES_PY" -I -c '
 import json, sys
 rc = int(sys.argv[1])
 try:
@@ -340,7 +413,7 @@ lanes_codex_no_mcp_args() {
   (( $# == 1 )) && [[ -d "$1" ]] || lanes_die "MCP の確認対象 worktree を 1 つ指定すること"
   lanes_resolve_bin CODEX_BIN codex
   local overrides item
-  overrides="$(python3 - "$CODEX_BIN" "$1" <<'PY'
+  overrides="$("$LANES_PY" -I - "$CODEX_BIN" "$1" <<'PY'
 import json, re, subprocess, sys
 def servers(args):
     p = subprocess.run([sys.argv[1], *args, "mcp", "list", "--json"],
@@ -406,7 +479,7 @@ lanes_git_summary() {
 #                        all … LANES_CHECK_CMD が設定されているか .lanes/check.sh がある（3 項目すべてを NA にはできない）
 # 判定の呼び出し（lanes_parse_review）の前に LANES_CHECKS_PRESENT へ入れて渡す。中身（scripts の本文）は出さない
 lanes_checks_present() {   # <worktree>
-  python3 -I - "$1" <<'PYCHECKS'
+  "$LANES_PY" -I - "$1" <<'PYCHECKS'
 import json, os, sys
 wt = sys.argv[1]
 try:
@@ -429,8 +502,10 @@ PYCHECKS
 }
 
 LANES_FINDING_RE='^[[:space:]]*(([-*+]|[0-9]+[.)])[[:space:]]+)?(\*\*)?\[P'
-lanes_parse_review() {   # <log> <extract|infer|codex|checks|resolved|followups|P0|P1|P2|P3> [完了証明]
-  python3 - "$1" "$2" "${3:-}" "${LANES_REVIEW_CHECKS_REUSED:-0}" <<'PYREVIEW'
+# review は extract と同じ判定に「整形前の元の本文の最後の空でない行が VERDICT 行そのものでなければ NONE」を足したもの（Claude・Gemini のレビューランチャが使う。
+# Codex のレビューは完了証明が最終判断の代わりなので codex を使う。実装・QA の自己申告は extract のまま）
+lanes_parse_review() {   # <log> <extract|review|infer|codex|checks|resolved|followups|P0|P1|P2|P3> [完了証明]
+  "$LANES_PY" -I - "$1" "$2" "${3:-}" "${LANES_REVIEW_CHECKS_REUSED:-0}" <<'PYREVIEW'
 import hashlib, json, os, pathlib, re, sys
 mode = sys.argv[2]
 # 必須検証を親の chk-run.sh の記録で済ませたレビュー。未実施・省略の報告は不足に数えず、失敗の報告だけ不足にする
@@ -583,15 +658,28 @@ success = re.search(
     r"|\bdid not find any (?:discrete, actionable )?(?:bugs|issues)\b"
     r"|(?:修正が必要な(?:具体的な)?(?:不具合|問題)|新たな不具合|変更に問題|不具合|問題)は?"
     r"(?:確認できなかった|見つかりませんでした|見つからなかった)", text, re.I)
+explicit = bool(verdicts) and verdicts[-1][0] == lines[-1]
+# レビュー役（Claude・Gemini）の最終判断は、整形前の元の本文の最後の空でない行（前後の空白を除く）が
+# `VERDICT: CLEAN` か `VERDICT: NEEDS_FIX` そのものであるときだけ（表・引用・コードを除いた後の行では見ない。判定はここ 1 か所）。
+# 加えて、本文解析で採用できる判定行が末尾にあること（explicit）も求める。字下げしたコード例だけが最後にある応答を、
+# 空白を除いたあとの完全一致だけで合格にしない（v0.1.8 と同じ強さ）。
+raw_last = next((l.strip() for l in reversed(raw.splitlines()) if l.strip()), "")
+final_line = re.fullmatch(r"VERDICT: (CLEAN|NEEDS_FIX)", raw_last)
 if unavailable or fence is not None:
     verdict = "NONE"
 elif mode == "codex" and sys.argv[3] and not completed:
+    verdict = "NONE"
+elif mode == "review" and (final_line is None or not explicit):
+    # 最後の行が判定行でなければ、指摘の重大度から推定しない
+    # （推定した NEEDS_FIX が round 3 以降の後回し・昇格で CLEAN に化けないよう、ここで判定なしにする）
     verdict = "NONE"
 elif checks_missing or na_blocked or (check_lines and not checks_complete):
     verdict = "NEEDS_FIX"
 elif any(findings[:3]):
     verdict = "NEEDS_FIX"
-elif mode != "infer" and verdicts and verdicts[-1][0] == lines[-1]:
+elif mode == "review":
+    verdict = "NEEDS_FIX" if any(v == "NEEDS_FIX" for _, v in verdicts) else final_line[1]
+elif mode != "infer" and explicit:
     verdict = "NEEDS_FIX" if any(v == "NEEDS_FIX" for _, v in verdicts) else verdicts[-1][1]
 elif completed and success and not verdicts:
     verdict = "CLEAN"
@@ -601,6 +689,7 @@ print("VERDICT: " + verdict)
 PYREVIEW
 }
 lanes_extract_verdict() { lanes_parse_review "$1" extract; }
+lanes_review_verdict() { lanes_parse_review "$1" review; }
 lanes_count_findings() { lanes_parse_review "$1" "$2"; }
 lanes_infer_verdict() { lanes_parse_review "$1" infer; }
 lanes_codex_verdict() { lanes_parse_review "$1" codex "${2:-}"; }
@@ -625,7 +714,7 @@ lanes_codex_verdict() { lanes_parse_review "$1" codex "${2:-}"; }
 # 知らせて 0 を返す（set -e の下で呼び出し元を止めない）
 lanes_records_claim() {   # <logdir> <label:名前|file:名前>...
   local logdir="$1"; shift
-  python3 -I -c 'import os, stat, sys
+  "$LANES_PY" -I -c 'import os, stat, sys
 d, entries = sys.argv[1], sys.argv[2:]
 lines = []
 for entry in entries:
@@ -671,7 +760,7 @@ lanes_ps_lstart() { LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | sed 's/^
 
 # 同一性不明は終了済みと区別する。削除・再起動は止め、停止信号は送らない。
 lanes_process_state() {
-  python3 - "$1" "$2" <<'PY'
+  "$LANES_PY" -I - "$1" "$2" <<'PY'
 import os, subprocess, sys
 try:
     pid = int(sys.argv[1])
@@ -726,7 +815,7 @@ lanes_record_child() {
   # 名前の付け替え（rename）で .pid を置き換える。パスで開き直さないので、作ってから書くまでの隙に差し替えられても外へ書かない。
   # rename は宛先の symlink を辿らず、その名前ごと置き換える（mv と違い、宛先がフォルダへのリンクでもその中へ移さない）
   print -r -- "${LANES_PIDFILE_BASE:-}"$'\n'"child_pid=$1"$'\n'"child_lstart=$LANES_CHILD_LSTART" \
-    | python3 -I -c 'import os,sys
+    | "$LANES_PY" -I -c 'import os,sys
 d=os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 name=sys.argv[2]; tmp=f".{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
 fd=os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666, dir_fd=d)
@@ -968,14 +1057,14 @@ except Exception:
 
 # 呼び出し元の標準入出力を保って背景起動する。LANES_CHILD を wait すれば孫の回収まで完了する。
 lanes_start_child() {
-  python3 -c "$LANES_PROCESS_GUARD" supervise "$@" <&0 &
+  "$LANES_PY" -I -c "$LANES_PROCESS_GUARD" supervise "$@" <&0 &
   typeset -g LANES_CHILD=$!
   typeset -g LANES_MANAGED_CHILD_PID="$LANES_CHILD"
   lanes_record_child "$LANES_CHILD"
 }
 
 # 記録用: このレーンが CLI に渡す設定のモデルと effort（考える深さ）を LANES_REC_MODEL / LANES_REC_EFFORT に入れる。
-# <lane> = lanes_mark_start に渡す名前（claude / claude-review / qa / codex / codex-review / gemini）。知らない名前は 1 を返す。
+# <lane> = lanes_mark_start に渡す名前（claude / claude-review / qa / codex / codex-review / gemini / gemini-review）。知らない名前は 1 を返す。
 # 空（引数を付けない＝CLI の既定に任せる）は空のまま。後から「どの設定で回したか」を集計できるように .pid と証跡に残す。
 # 値は設定を読み終えた時点のもの（ランチャが CLI に渡す値と同じ変数）。改行は 1 行の記録を壊すので空白にする
 lanes_lane_model_effort() {
@@ -983,7 +1072,7 @@ lanes_lane_model_effort() {
   case "$1" in
     claude|claude-review|qa) m="${CLAUDE_MODEL:-}"; e="${CLAUDE_EFFORT:-}" ;;
     codex|codex-review)      m="${CODEX_MODEL:-}";  e="${CODEX_EFFORT:-}" ;;
-    gemini)                  m="${GEMINI_MODEL:-}"; e="${GEMINI_EFFORT:-}" ;;
+    gemini|gemini-review)    m="${GEMINI_MODEL:-}"; e="${GEMINI_EFFORT:-}" ;;
     *) return 1 ;;
   esac
   typeset -g LANES_REC_MODEL="${${m//$'\n'/ }//$'\r'/ }" LANES_REC_EFFORT="${${e//$'\n'/ }//$'\r'/ }"
@@ -1052,7 +1141,7 @@ lanes_fresh_file() {
 
 # logs/ の識別子（dev:inode）。symlink は辿らない
 lanes_logdir_id() {
-  python3 -I -c 'import os,sys
+  "$LANES_PY" -I -c 'import os,sys
 s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$1" 2>/dev/null
 }
 
@@ -1060,7 +1149,7 @@ s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$1" 2>/dev/null
 # 0 = 無い。1 = ある（名前を stderr に出す）。ランチャは子の後に logs/<label>.* をパスのまま書くので、
 # ファイル 1 つでも外を指していると、サンドボックスの外にいるランチャが外のファイルを書き換えてしまう
 lanes_logdir_entries_ok() {
-  python3 -I -c 'import os,stat,sys
+  "$LANES_PY" -I -c 'import os,stat,sys
 bad=[]
 with os.scandir(sys.argv[1]) as it:
     for e in it:
@@ -1126,7 +1215,7 @@ lanes_kill_child() {
   [[ -n "$started" ]] || { [[ "$(lanes_process_state "$LANES_CHILD" "")" == dead ]]; return $?; }
   local mode=stop
   [[ "${LANES_MANAGED_CHILD_PID:-}" == "$LANES_CHILD" ]] && mode=stop-supervisor
-  python3 -c "$LANES_PROCESS_GUARD" "$mode" "$LANES_CHILD" "$started" || return $?
+  "$LANES_PY" -I -c "$LANES_PROCESS_GUARD" "$mode" "$LANES_CHILD" "$started" || return $?
 }
 
 lanes_finish_after_stop() {

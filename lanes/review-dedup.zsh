@@ -1,4 +1,5 @@
-# review-dedup.zsh — run-codex-review.sh と run-claude-review.sh から source する。同じレビューの繰り返しを省く
+# review-dedup.zsh — run-codex-review.sh・run-claude-review.sh・run-gemini-review.sh から source する。同じレビューの繰り返しを省く
+#  （入口の run-review.sh も、系列の前回のレビュー役を読むのに source する: rvd_prev_reviewer）
 #  - 系列（series）: label の末尾 -r<N> を外したもの（rev-wap83-r5 → rev-wap83）。round は -r<N> から取る
 #  - 前回 CLEAN・未保存変更なし・条件一致のときだけ delta または同一結果を再利用する
 #  - 前回 NEEDS_FIX は指摘本文を渡し、前回レビューした HEAD からの delta で見る（rvd_fix_mode）。旧記録・同じ HEAD・未保存変更は full
@@ -11,7 +12,7 @@ rvd_label_round() { if [[ "$1" =~ '-r([0-9]+)$' ]]; then print -- "${match[1]}";
 rvd_state_file() { print -- "$1/.$2.review-state"; }   # <logdir> <series>
 # 本文も同じ JSON 記録に格納する。旧 key=value 形式は読み取りだけ互換にする。
 rvd_state_get() {
-  python3 - "$1" "$2" <<'PY_STATE'
+  "$LANES_PY" -I - "$1" "$2" <<'PY_STATE'
 import json, pathlib, sys
 p, key = pathlib.Path(sys.argv[1]), sys.argv[2]
 if p.is_file():
@@ -69,7 +70,7 @@ rvd_prev_verdict() { rvd_record_get "$(rvd_prev_record "$1" "$2" "$3")" verdict;
 # 無視対象のファイル（.env.local・手元の設定やメモなど）も中身まで比べる（QA の写しと同じ考え方）。
 # 既知の生成物（依存・ビルドとテストの出力・キャッシュ）は、どの深さにあっても比べない。レビューがテストを回すと書き換わるため。
 rvd_snapshot() {
-  python3 - "$1" <<'PY_SNAPSHOT'
+  "$LANES_PY" -I - "$1" <<'PY_SNAPSHOT'
 import hashlib, os, pathlib, stat, subprocess, sys
 GENERATED_DIRS = {"node_modules", ".next", ".turbo", ".cache", "coverage", "test-results", "playwright-report",
                   "dist", "build", "out", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
@@ -146,7 +147,7 @@ PY_SNAPSHOT
 # 枝（refs/heads）と origin の追跡枝は入れない。worktree 同士で共有され、並行する他のレーンの commit や fetch で変わるため（誤検出になる）。
 # ここで見ていない書き換え（他の枝の作成など）が前後の比較に出ないことは docs/roles.md に書いてある。
 rvd_git_guard() {
-  python3 - "$1" <<'PY_GUARD'
+  "$LANES_PY" -I - "$1" <<'PY_GUARD'
 import hashlib, os, pathlib, subprocess, sys
 wt = sys.argv[1]
 def git(*args):
@@ -181,22 +182,31 @@ PY_GUARD
 # 起点・案件指示・設定・実装・テンプレの内容を条件に含める（値そのものは記録しない）。
 # 検証の設定（LANES_CHECK_CMD の値・対象の .lanes/check.sh の中身・package.json の scripts のうち検証に関わるもの）も含める。
 # 検証が「未導入」で CLEAN になった後に検証を足したら、同じ HEAD でも前回の結果を使わずにレビューし直す。
-# 必須検証の使い回しの有無と使った記録（rvd_checks_key）、レビュー役（codex / claude）も含める。
+# 必須検証の使い回しの有無と使った記録（rvd_checks_key）、レビュー役（codex / claude / gemini）も含める。
 # 記録が変わった（使い回しが無くなった・親が回し直した）ら、同じ HEAD でも前回の結果を使わない。
-# <root> <prompt> <base> <mode> <policy> <model> <effort> [worktree] [使い回しの鍵] [レビュー役]
+# キットのファイルが無い（一部だけを写したテストの置き場など）ときは「無い」ことを条件に入れる（後で置かれたら条件が変わる）。
+# 読み取り専用の制限の設定（Gemini の拒否の一覧・Claude の使えるツールと拒否・Codex の sandbox）も [制限の設定] で入れる。
+# 制限を強めたら、前の制限の下で出た CLEAN を同じ HEAD でも使わない。
+# commit の作者の照合に使う有効な作者の設定（git config user.name / user.email）の指紋も入れる（値は入れない）。
+# <root> <prompt> <base> <mode> <policy> <model> <effort> [worktree] [使い回しの鍵] [レビュー役] [制限の設定]
 rvd_context() {
-  python3 - "$@" <<'PY_CONTEXT'
-import hashlib, json, os, pathlib, sys
+  "$LANES_PY" -I - "$@" <<'PY_CONTEXT'
+import hashlib, json, os, pathlib, subprocess, sys
 root, prompt, base, mode, policy, model, effort = sys.argv[1:8]
 wt = sys.argv[8] if len(sys.argv) > 8 else ''
 reuse = sys.argv[9] if len(sys.argv) > 9 else ''
 kind = sys.argv[10] if len(sys.argv) > 10 else ''
+restrict = sys.argv[11] if len(sys.argv) > 11 else ''
 h = hashlib.sha256()
-for value in [base, mode, policy, model, effort, 'checks-reuse:' + reuse, 'reviewer:' + kind]: h.update(value.encode() + b'\0')
-for p in [pathlib.Path(prompt), *[pathlib.Path(root) / f for f in
-          ['review-dedup.zsh', 'run-codex-review.sh', 'run-claude-review.sh', '_common.sh', 'codex-review-output.py',
-           'templates/claude-review-full.md', 'templates/claude-review-delta.md', 'templates/codex-review-focus.md']]]:
-    h.update(p.read_bytes() + b'\0')
+for value in [base, mode, policy, model, effort, 'checks-reuse:' + reuse, 'reviewer:' + kind, 'restrict:' + restrict]: h.update(value.encode() + b'\0')
+h.update(pathlib.Path(prompt).read_bytes() + b'\0')
+for f in ['review-dedup.zsh', 'run-codex-review.sh', 'run-claude-review.sh', 'run-gemini-review.sh', '_common.sh',
+          'codex-review-output.py', 'templates/claude-review-full.md', 'templates/claude-review-delta.md',
+          'templates/codex-review-focus.md']:
+    try:
+        h.update((pathlib.Path(root) / f).read_bytes() + b'\0')
+    except FileNotFoundError:
+        h.update(b'missing:' + f.encode() + b'\0')
 # 検証の設定。名前は _common.sh の lanes_checks_present が見るものと同じ
 h.update(b'check-cmd:' + os.environ.get('LANES_CHECK_CMD', '').encode() + b'\0')
 if wt:
@@ -217,6 +227,15 @@ if wt:
     if not isinstance(scripts, dict): scripts = {}
     names = ['typecheck', 'type-check', 'typecheck:all', 'check-types', 'tsc', 'lint', 'test', 'test:unit', 'unit', 'test:ci']
     h.update(b'scripts:' + json.dumps({n: scripts.get(n) for n in names}, sort_keys=True, ensure_ascii=False).encode() + b'\0')
+    # commit の作者の照合に使う有効な作者の設定（user.name / user.email）。値そのものではなく指紋だけを入れる。
+    # 作者の設定を変えたら、前の設定で照合した結果（全件一致など）を同じ HEAD でも使わない
+    for key in ('user.name', 'user.email'):
+        try:
+            p = subprocess.run(['git', '-C', wt, 'config', key], stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+            value = b'rc:%d:' % p.returncode + hashlib.sha256(p.stdout).digest()
+        except (OSError, subprocess.SubprocessError):
+            value = b'error'
+        h.update(b'author-' + key.encode() + b':' + value + b'\0')
 print(h.hexdigest())
 PY_CONTEXT
 }
@@ -296,29 +315,95 @@ rvd_previous_followups() {
 }
 
 # <logdir> <series> <round> <head> <verdict> <gate> <label> <context> <tree> <base> <report> [未解決本文] [前回の解消確認必須:0|1]
+#   [レビュー役: codex|claude|gemini]（入口の run-review.sh が、同じ系列の r2 以降を同じレビュー役で続けるのに読む。rvd_prev_reviewer）
 rvd_save_state() {
   [[ "$5" == 'VERDICT: CLEAN' || "$5" == 'VERDICT: NEEDS_FIX' ]] || return 1
   local f; f="$(rvd_state_file "$1" "$2")"
-  python3 - "$f" "$3" "$4" "$5" "$6" "$7" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" "${13:-0}" <<'PY_SAVE'
+  "$LANES_PY" -I - "$f" "$3" "$4" "$5" "$6" "$7" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" "${13:-0}" "${14:-}" <<'PY_SAVE'
 import json, os, pathlib, sys
-f, rnd, head, verdict, gate, label, context, tree, base, report, pending, blocking = sys.argv[1:]
+f, rnd, head, verdict, gate, label, context, tree, base, report, pending, blocking, reviewer = sys.argv[1:]
 body = pathlib.Path(report).read_text(encoding='utf-8') if report else ''
 record = dict(last_round=rnd, last_head=head, last_verdict=verdict, last_gate=gate,
               last_label=label, last_context=context, last_tree=tree, last_base=base,
               last_report=(pending + '\n' if pending else '') + body,
               last_blocking_previous=blocking, last_exit=0)
+# レビュー役は分かるときだけ残す（渡されない旧の呼び出しは、読む側が証跡の見出しから判別する）
+if reviewer in ('codex', 'claude', 'gemini'):
+    record['last_reviewer'] = reviewer
 tmp = pathlib.Path(f + '.tmp.' + str(os.getpid()))
 tmp.write_text(json.dumps(record, ensure_ascii=False) + '\n', encoding='utf-8')
 os.replace(tmp, f)
 PY_SAVE
 }
 
+# ---- 系列の前回のレビュー役（入口の run-review.sh が、r2 以降も同じ役で続けるのに使う）----
+# 証跡（<label>.evidence.md）の 1 行目の見出し「## Codex|Gemini|Claude レビュー証跡（…）」から役を読む（codex / gemini / claude）。
+# 読めない・見出しが違うときは何も出さない。symlink は辿らない
+rvd_evidence_reviewer() {   # <evidence.md>
+  local first=""
+  [[ -f "$1" && ! -L "$1" ]] || return 0
+  { IFS= read -r first < "$1"; } 2>/dev/null || true
+  if [[ "$first" =~ '^## (Codex|Gemini|Claude) レビュー証跡' ]]; then print -r -- "${(L)match[1]}"; fi
+  return 0
+}
+# <record>（rvd_prev_record の結果）→ その記録を残したレビュー役（codex / gemini / claude）。分からなければ何も出さない。
+#   再利用の記録（.review-state）なら last_reviewer、無い旧記録は last_label の証跡の見出し。証跡の記録ならその見出し
+rvd_record_reviewer() {
+  local f="$1" v label
+  [[ -n "$f" ]] || return 0
+  if [[ "$f" == *.review-state ]]; then
+    [[ -f "$f" && ! -L "$f" ]] || return 0
+    v="$(rvd_state_get "$f" last_reviewer 2>/dev/null)" || v=""
+    case "$v" in codex|gemini|claude) print -r -- "$v"; return 0 ;; esac
+    label="$(rvd_state_get "$f" last_label 2>/dev/null)" || label=""
+    [[ ! "$label" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' ]] || rvd_evidence_reviewer "${f:h}/$label.evidence.md"
+    return 0
+  fi
+  rvd_evidence_reviewer "$f"
+}
+# <logdir> <series> → 前回のレビュー役（codex / gemini / claude）。分からなければ何も出さない。次の順で探す:
+#   1. 再利用の記録（logs/.<系列>.review-state）の last_reviewer（無い旧記録は、その記録の last_label の証跡の見出し）
+#   2. 系列の証跡（logs/<系列>-r<N>.evidence.md）のうち N が最大のものの見出し（記録が無いとき。失敗した回の証跡でもよい）
+rvd_prev_reviewer() {
+  local logdir="$1" series="$2" state v f n best=-1 latest=""
+  state="$(rvd_state_file "$logdir" "$series")"
+  v="$(rvd_record_reviewer "$state")"
+  if [[ -n "$v" ]]; then print -r -- "$v"; return 0; fi
+  for f in "$logdir/$series"-r<->.evidence.md(N); do
+    n="${${f:t}#"$series"-r}"; n="${n%.evidence.md}"
+    if [[ "$n" == <-> && ${#n} -le 6 ]] && (( n > best )); then best=$n; latest="$f"; fi
+  done
+  [[ -z "$latest" ]] || rvd_evidence_reviewer "$latest"
+  return 0
+}
+# ---- 実装した道具（同じ道具でのレビューの禁止。入口の run-review.sh と run-gemini-review.sh が同じ判定を使う）----
+# <logdir> [--impl-engine の値] → 0 = Gemini で実装した（か、実装元が分からない）。--impl-engine gemini か、logs/ の .pid に
+# Gemini の実装レーン（lane=gemini）が 1 つでもあれば当たり（どちらかに当たれば Gemini で実装したとみなす。--impl-engine claude でも
+# logs/ の記録は打ち消さない）。レビュー・QA の .pid（lane=gemini-review など）は数えない。
+# 実装の記録を確かめられないとき（logs/ が symlink・フォルダでない・中を読めない、.pid が普通のファイルでない・読めない）は
+# 実装元が分からないので当たりとみなす（迷ったら Gemini に回さない側）。logs/ が無いときだけは記録が無いので外れ
+rvd_impl_gemini() {
+  local logdir="$1" impl="${2:-}" f v
+  [[ "$impl" != gemini ]] || return 0
+  [[ -e "$logdir" || -L "$logdir" ]] || return 1
+  [[ -d "$logdir" && ! -L "$logdir" && -r "$logdir" && -x "$logdir" ]] || return 0
+  for f in "$logdir"/*.pid(N); do
+    [[ -f "$f" && ! -L "$f" ]] || return 0
+    v="$(sed -n 's/^lane=//p' "$f" 2>/dev/null)" || return 0
+    [[ "${v%%$'\n'*}" != gemini ]] || return 0
+  done
+  return 1
+}
+
 # 前回 NEEDS_FIX の後の周回（round 2 以降）は差分だけを見る（1 回目は全体・2 回目からは差分）。
-# 前回レビューした HEAD が今の HEAD の祖先で、前後とも未保存変更が無く、比較起点（今の base == 前回の base）が同じで確かめられるときだけ delta。
-# それ以外（起点変更・旧記録・同じ HEAD・枝の作り直し・未保存変更）は full。
+# 前回レビューした HEAD が今の HEAD の祖先で、前後とも未保存変更が無く、比較起点（今の base == 前回の base）と
+# レビュー役（今の役 == 前回の役。rvd_record_reviewer）が同じだと確かめられるときだけ delta。
+# それ以外（起点変更・役の変更・役の分からない記録・旧記録・同じ HEAD・枝の作り直し・未保存変更）は full。
+# 役を変えたら、新しい役は元の変更を一度も見ていないので全体を見る（前回の指摘はどちらでも引き継ぐ）。
 # 指示の変更（round 3 からの後回しの方針を含む）は前回の指摘の引き継ぎで足りるので、ここでは見ない。
-rvd_fix_mode() {   # <worktree> <前回の head> <今の tree> <前回の tree> <今の base> <前回の base> → delta / full
-  local wt="$1" prev="$2" tree="${3:-}" old_tree="${4:-}" cur_base="${5:-}" prev_base="${6:-}"
+rvd_fix_mode() {   # <worktree> <前回の head> <今の tree> <前回の tree> <今の base> <前回の base> <今の役> <前回の役> → delta / full
+  local wt="$1" prev="$2" tree="${3:-}" old_tree="${4:-}" cur_base="${5:-}" prev_base="${6:-}" cur_kind="${7:-}" prev_kind="${8:-}"
+  [[ -n "$cur_kind" && "$cur_kind" == "$prev_kind" ]] || { print -- full; return; }
   [[ -n "$prev" && -n "$cur_base" && "$cur_base" == "$prev_base" && "$tree" == clean:* && "$old_tree" == clean:* ]] || { print -- full; return; }
   git -C "$wt" rev-parse -q --verify "$prev^{commit}" >/dev/null 2>&1 || { print -- full; return; }
   [[ "$(git -C "$wt" rev-parse "$prev^{commit}")" != "$(git -C "$wt" rev-parse HEAD)" ]] || { print -- full; return; }
@@ -367,7 +452,7 @@ EOT
 # 増えた・変わった・消えた・普通のファイルでなくなった記録があれば、子の前の状態へ戻して不合格にする。
 # rvd_states_snapshot <logdir> → 覚えた中身（1 行の JSON）を出す
 rvd_states_snapshot() {
-  python3 -I - "$1" <<'PY_STATES'
+  "$LANES_PY" -I - "$1" <<'PY_STATES'
 import base64, json, os, re, stat, sys
 d = sys.argv[1]; out = {}
 if os.path.isdir(d) and not os.path.islink(d):
@@ -389,7 +474,7 @@ PY_STATES
 # 戻しきれなかったときは exit 2。ランチャは rvd_mark_blocked で「使い回し禁止」の印を置く（logs/ の中と、子の作業場所の外の
 # 両方）。ランチャはこの印があると、どの系列でも前回の記録を使わず（同じ HEAD の省略も差分にもしない）毎回 full でレビューする
 rvd_states_restore() {
-  python3 -I -c '
+  "$LANES_PY" -I -c '
 import base64, json, os, re, shutil, stat, sys
 d = sys.argv[1]
 pat = re.compile(r"\..+\.review-state")
@@ -478,16 +563,17 @@ rvd_mark_blocked() {   # <logdir> → 0 = logs/ の外の印は置けた（logs/
 # ランチャの記録（logs/ の直下の .pid・ログ・証跡・起動ログなどのうち、ランチャが台帳 logs/.lanes-records に載せた持ち主のもの）は
 # 指紋に入らない（chk-run.sh の is_lane_record）ので、detach-run.sh が先に logs/launch.log を書いていても、前のレーンの記録が
 # 残っていても、記録と合う。台帳に無い名前のファイル（確認コマンドが読む logs/input.json など）は入力のまま。
-# _common.sh が外した API キーなどは、親が chk-run.sh を回したときの環境に戻して渡す（chk-run.sh は何も実行しない）
+# _common.sh が外した API キーなどは、親が chk-run.sh を回したときの環境に戻して渡す（chk-run.sh は何も実行しない）。
+# ランチャが固定した python3 も LANES_PY_FIXED で渡す（chk-run.sh は補助処理の Python を選び直さず、環境の指紋からは外す）
 rvd_checks_query() {
   local lanes_dir="$1" wt="$2" out="" rc=0 line
   typeset -g RVD_CHECKS_REUSE=no RVD_CHECKS_HEAD="" RVD_CHECKS_AT="" RVD_CHECKS_SRC="" RVD_CHECKS_FP="" RVD_CHECKS_REASON=""
   if [[ "${LANES_REVIEW_REUSE_CHECKS:-1}" != 1 ]]; then RVD_CHECKS_REUSE=off; RVD_CHECKS_REASON="LANES_REVIEW_REUSE_CHECKS=0"; return 0; fi
   [[ -f "$lanes_dir/chk-run.sh" ]] || { RVD_CHECKS_REASON="chk-run.sh が無い"; return 0; }
   if (( ${+functions[lanes_with_caller_auth_env]} )); then
-    out="$(lanes_with_caller_auth_env bash "$lanes_dir/chk-run.sh" "$wt" --query 2>/dev/null)" || rc=$?
+    out="$(export LANES_PY_FIXED="${LANES_PY:-}"; lanes_with_caller_auth_env bash "$lanes_dir/chk-run.sh" "$wt" --query 2>/dev/null)" || rc=$?
   else
-    out="$(bash "$lanes_dir/chk-run.sh" "$wt" --query 2>/dev/null)" || rc=$?
+    out="$(export LANES_PY_FIXED="${LANES_PY:-}"; bash "$lanes_dir/chk-run.sh" "$wt" --query 2>/dev/null)" || rc=$?
   fi
   if (( rc == 0 )) && [[ "${${(f)out}[1]:-}" == reuse=yes ]]; then
     for line in "${(@f)out}"; do

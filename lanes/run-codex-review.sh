@@ -61,7 +61,7 @@ series="$(rvd_series "$label")"
 if rvd_checks_block "$allow_missing"; then lanes_die "$RVD_CHECKS_BLOCK"; fi
 (( dry )) || lanes_mark_start "$logdir" "$label" codex-review "$wt" "file:.$series.review-state" "file:$series.followups.md" "file:.review-reuse-blocked"
 lanes_require_tool codex run-codex-review.sh
-lanes_entry_preflight
+lanes_entry_preflight "$wt"
 lanes_require_prompt "$prompt"
 round="$(rvd_round "$logdir" "$series" "$label" "$round")"
 [[ "$round" == <-> && ${#round} -le 6 ]] || lanes_die "round が不正"
@@ -78,8 +78,8 @@ else
 fi
 review_base="$base"
 policy=early; (( round >= 3 )) && policy=followups
-# 再利用の条件（指示・起点・設定・検証の設定）。検証の設定が変わったら同じ HEAD でも省略しない（review-dedup.zsh の rvd_context）
-review_context() { rvd_context "$LANES_DIR" "$prompt" "$review_base" "$requested_mode" "$policy" "$CODEX_MODEL" "$CODEX_EFFORT" "$wt" "$checks_key" codex; }
+# 再利用の条件（指示・起点・設定・検証の設定・sandbox の設定）。検証や sandbox の設定が変わったら同じ HEAD でも省略しない（review-dedup.zsh の rvd_context）
+review_context() { rvd_context "$LANES_DIR" "$prompt" "$review_base" "$requested_mode" "$policy" "$CODEX_MODEL" "$CODEX_EFFORT" "$wt" "$checks_key" codex "sandbox=${CODEX_REVIEW_SANDBOX:-read-only}"; }
 context="$(review_context)"
 tree="$(rvd_snapshot "$wt")" || lanes_die "レビュー前の内容確認に失敗"
 decided="$(rvd_decide_mode "$wt" "$prev_head" "$prev_v" "$context" "$(rvd_record_get "$record" context)" "$tree" "$(rvd_record_get "$record" tree)")"
@@ -107,7 +107,7 @@ if [[ "$prev_v" == 'VERDICT: NEEDS_FIX' ]]; then
   skip_same=0
   [[ -n "$(rvd_record_get "$record" report)" ]] || lanes_die "前回の未解決指摘本文が無い。復元してから再レビューする"
   if [[ "$requested_mode" != full ]] && ! rvd_reuse_blocked "$logdir" \
-     && [[ "$(rvd_fix_mode "$wt" "$prev_head" "$tree" "$(rvd_record_get "$record" tree)" "$review_base" "$(rvd_record_get "$record" base)")" == delta ]]; then
+     && [[ "$(rvd_fix_mode "$wt" "$prev_head" "$tree" "$(rvd_record_get "$record" tree)" "$review_base" "$(rvd_record_get "$record" base)" codex "$(rvd_record_reviewer "$record")")" == delta ]]; then
     mode=delta; base="$prev_head"
   else
     mode=full; base="$review_base"
@@ -162,7 +162,7 @@ branch="$(git -C "$wt" branch --show-current 2>/dev/null)"; [[ -n "$branch" ]] |
 head="$(git -C "$wt" rev-parse --short=12 HEAD)"
 template="$LANES_DIR/templates/claude-review-$mode.md"
 [[ -s "$template" ]] || template="$LANES_DIR/templates/claude-review-full.md"
-LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" python3 - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" "$scratch" "$scratch_rule" "$(rvd_checks_rule)" <<'PY'
+LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" "$LANES_PY" -I - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" "$scratch" "$scratch_rule" "$(rvd_checks_rule)" <<'PY'
 import os, sys, pathlib
 tpl, case, out, wt, branch, head, base, mode, date, scratch, rule, checks_rule = sys.argv[1:13]
 t = pathlib.Path(tpl).read_text(encoding="utf-8")
@@ -185,7 +185,7 @@ PY
 focus="$LANES_DIR/templates/codex-review-focus.md"
 delta_note=""
 [[ "$mode" == "delta" ]] && delta_note="$(rvd_delta_note "$wt" "$base" "$round" "$review_base")"
-devinst="$(python3 - "$focus" "$final" "$delta_note" "$unresolved_note" <<'PY2'
+devinst="$("$LANES_PY" -I - "$focus" "$final" "$delta_note" "$unresolved_note" <<'PY2'
 import sys, json, pathlib
 parts = [pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").rstrip(),
          pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").rstrip()]
@@ -240,7 +240,7 @@ blocked_before=0; rvd_reuse_blocked "$logdir" && blocked_before=1
 # レビューの子から push（と fetch）をできなくする（読み取り専用の役。git の通信は要らない）
 lanes_block_git_transport
 rc=0
-lanes_start_child python3 "$LANES_DIR/codex-review-output.py" "$body_log" "$proof" "${cmd[@]}" > /dev/null 2> "$err"
+lanes_start_child "$LANES_PY" -I "$LANES_DIR/codex-review-output.py" "$body_log" "$proof" "${cmd[@]}" > /dev/null 2> "$err"
 wait "$LANES_CHILD" || rc=$?
 lanes_logdir_check
 LANES_CHILD=""
@@ -366,7 +366,7 @@ gate="$(rvd_escalate "$round" "$verdict" "$gate")"
 { print -- ""; print -- "----"; cat "$evidence"; print -- "finished: $(lanes_now)"; print -- "EXIT:$rc"; print -- "$verdict"; } >> "$log"
 cat "$evidence"
 final_rc=$rc
-(( rc == 0 )) && rvd_save_state "$logdir" "$series" "$round" "$(git -C "$wt" rev-parse HEAD)" "$verdict" "$gate" "$label" "$context" "$snapshot_after" "$review_base" "$log" "$pending_note" "$blocking_previous"
+(( rc == 0 )) && rvd_save_state "$logdir" "$series" "$round" "$(git -C "$wt" rev-parse HEAD)" "$verdict" "$gate" "$label" "$context" "$snapshot_after" "$review_base" "$log" "$pending_note" "$blocking_previous" codex
 (( rc == 0 )) && [[ "$verdict" != "VERDICT: CLEAN" && "$verdict" != "VERDICT: NEEDS_FIX" ]] && final_rc=3
 lanes_mark_done "$final_rc" "$verdict" "codex-review rc=$rc gate=$gate $sevsum"
 exit $final_rc

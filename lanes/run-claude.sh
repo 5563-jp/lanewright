@@ -41,7 +41,7 @@ else
   for f in "$log" "$json" "$err" "$evidence" "$final"; do lanes_rotate_log "$f"; done
 fi
 lanes_require_tool claude run-claude.sh
-lanes_entry_preflight
+lanes_entry_preflight "$wt"
 mkdir -p "$logdir"
 (( ! dry )) || lanes_records_claim "$logdir" "label:$label"   # dry-run が書く <label>.dry-run.prompt.md も、書く前にランチャの記録の台帳へ載せる
 # レーン専用の作業場所。一時ファイルは ~/Downloads ではなくここへ。マージ後 cleanup が消す

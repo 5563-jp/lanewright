@@ -102,7 +102,7 @@ launch() {   # <期待 rc> <構成> <ランチャ> [引数...]
   (( rc == want )) || { cat "$T/$label.out" >&2; fail "$name [$tools] expected=$want got=$rc"; }
   LAST_LABEL="$label"
 }
-for spec in "run-codex.sh|codex" "run-codex-review.sh|codex" "run-gemini.sh|gemini"; do
+for spec in "run-codex.sh|codex" "run-codex-review.sh|codex" "run-gemini.sh|gemini" "run-gemini-review.sh|gemini"; do
   name="${spec%%|*}"; tool="${spec##*|}"
   for tools in "claude" "claude codex" "claude gemini"; do
     [[ " $tools " == *" $tool "* ]] && continue
@@ -347,6 +347,158 @@ pass "run-review.sh は解決できない --base を exit 2"
 entry 2 "claude codex" run-review.sh --mode bogus
 pass "run-review.sh の --mode の誤りは exit 2"
 
+# ---- 7b. レビュー役の振り分け（--engine・同じ道具でのレビューの禁止・系列の引き継ぎ・割合 LANES_REVIEW_GEMINI_PCT）----
+# 上の $wt には、構成に無い道具の確認などで lane=gemini の .pid が残っている（Gemini 実装とみなされる）ので、専用の worktree で試す
+wtr="$T/wt-route"
+git -C "$base" worktree add -q -b feat/route "$wtr"
+# Gemini レビューの応答。必須検証の仕組みが無い一時リポなので成功行は NA（成功行の無い CLEAN は NEEDS_FIX になる）。
+# 見張りの確認間隔（既定 5 秒）も縮めて速く回す
+export STUB_AGY_RESPONSE=$'問題なし\\nCHECKS: typecheck=NA lint=NA unit=NA build=SKIP\\nVERDICT: CLEAN' GEMINI_POLL_SEC=1
+rentry() {   # <期待 rc> <構成> [引数...]（label は引数で渡す）。出力は OUT
+  local want="$1" tools="$2"; shift 2
+  n=$(( n + 1 )); local rc=0
+  LANES_TOOLS="$tools" zsh -f "$LANES_DIR/run-review.sh" "$wtr" "$T/prompt.md" "$@" > "$T/r$n.out" 2>&1 || rc=$?
+  (( rc == want )) || { cat "$T/r$n.out" >&2; fail "run-review.sh [$tools] $* expected=$want got=$rc"; }
+  OUT="$(< "$T/r$n.out")"
+}
+lane_of() { sed -n 's/^lane=//p' "$wtr/logs/$1.pid" | head -1; }
+# 行き先は入口が標準エラーに出す 1 行（レビュー役: <役>（理由）→ <ランチャ>）で見る。同じ HEAD の dry-run は前回の結果を使う近道で
+# CLI の引数を出さないので、引数は初回（新しい系列）のときだけ見る
+routed() { [[ "$OUT" == *"→ $1"* ]]; }
+gem_dry() { routed run-gemini-review.sh; }
+codex_dry() { routed run-codex-review.sh; }
+claude_dry() { routed run-claude-review.sh; }
+rentry 0 "claude codex gemini" r-a --engine gemini --dry-run
+gem_dry && [[ "$OUT" == *"$STUBS/agy"* && "$OUT" == *"--mode plan"* && "$OUT" == *"--sandbox"* ]] \
+  && [[ "$OUT" == *"レビュー役: gemini（--engine の指定）"* ]] || fail "--engine gemini が run-gemini-review.sh に振り分けない"
+pass "run-review.sh --engine gemini は run-gemini-review.sh（plan モード・端末サンドボックス）"
+rentry 0 "claude codex gemini" r-b --engine claude --dry-run
+claude_dry && [[ "$OUT" == *"$STUBS/claude"* && "$OUT" == *"--disallowedTools="* ]] || fail "① で --engine claude が Claude レビューに振り分けない"
+pass "run-review.sh --engine claude は ① でも Claude レビュー（明示を尊重）"
+rentry 0 "claude gemini" r-c --engine gemini --dry-run
+gem_dry || fail "③ で --engine gemini が Gemini レビューに振り分けない"
+pass "run-review.sh --engine gemini は ③ でも使える"
+rentry 2 "claude codex" r-d --engine gemini
+[[ "$OUT" == *"gemini が無い"* ]] && grep -q '^EXIT:2$' "$wtr/logs/r-d.done" || fail "gemini の無い構成で --engine gemini を止めない / .done が無い"
+rentry 2 "claude" r-e --engine codex
+[[ "$OUT" == *"codex が無い"* ]] || fail "codex の無い構成で --engine codex を止めない"
+rentry 2 "claude codex gemini" r-f --engine bogus
+rentry 2 "claude codex gemini" r-g --impl-engine bogus
+[[ "$OUT" == *"--impl-engine"* ]] || fail "--impl-engine の誤りの理由が無い"
+pass "--engine の構成に無い道具・知らない名前、--impl-engine の知らない名前は exit 2"
+rentry 2 "claude codex gemini" r-h --impl-engine gemini --engine gemini
+[[ "$OUT" == *"Gemini で実装したもの"* ]] || fail "Gemini 実装に --engine gemini を止めない"
+pass "Gemini で実装したもの（--impl-engine gemini）に --engine gemini は exit 2（同じ道具でレビューしない）"
+LANES_REVIEW_GEMINI_PCT=100 rentry 0 "claude codex gemini" r-i --dry-run
+gem_dry && [[ "$OUT" == *"$STUBS/agy"* && "$OUT" == *"LANES_REVIEW_GEMINI_PCT=100"* ]] || fail "割合 100 で Gemini にならない"
+LANES_REVIEW_GEMINI_PCT=100 rentry 0 "claude codex gemini" r-j --impl-engine gemini --dry-run
+codex_dry && [[ "$OUT" == *"Gemini で実装したもの"* ]] || fail "Gemini 実装を割合で Gemini に回した（①）"
+LANES_REVIEW_GEMINI_PCT=100 rentry 0 "claude gemini" r-k --impl-engine gemini --dry-run
+claude_dry || fail "Gemini 実装を割合で Gemini に回した（③）"
+LANES_REVIEW_GEMINI_PCT=100 rentry 0 "claude codex" r-l --dry-run
+codex_dry || fail "gemini の無い構成で割合が効いた"
+pass "割合 100 は Gemini。Gemini 実装（--impl-engine gemini）は構成の既定（① Codex / ③ Claude）。gemini の無い構成では効かない"
+print -r -- $'pid=999999\nlane=gemini' > "$wtr/logs/gimpl.pid"
+LANES_REVIEW_GEMINI_PCT=100 rentry 0 "claude codex gemini" r-m --dry-run
+codex_dry || fail "logs/ の lane=gemini の .pid を Gemini 実装とみなさない"
+rentry 2 "claude codex gemini" r-n --engine gemini
+[[ "$OUT" == *"Gemini で実装したもの"* ]] || fail "logs/ の lane=gemini の .pid があるのに --engine gemini を通した"
+LANES_REVIEW_GEMINI_PCT=100 rentry 0 "claude codex gemini" r-o --impl-engine claude --dry-run
+codex_dry || fail "--impl-engine claude で logs/ の Gemini 実装を打ち消した（迷ったら Gemini に回さない側のはず）"
+rm -f -- "$wtr/logs/gimpl.pid"
+print -r -- $'pid=999999\nlane=gemini-review' > "$wtr/logs/grev.pid"
+print -r -- $'pid=999999\nlane=qa' > "$wtr/logs/gqa.pid"
+LANES_REVIEW_GEMINI_PCT=100 rentry 0 "claude codex gemini" r-p --dry-run
+gem_dry || fail "レビュー・QA の .pid（lane=gemini-review / qa）を Gemini 実装とみなした"
+rm -f -- "$wtr/logs/grev.pid" "$wtr/logs/gqa.pid"
+pass "logs/ の .pid に Gemini の実装レーン（lane=gemini）があれば Gemini 実装とみなす（--impl-engine claude でも打ち消さない。レビュー・QA は数えない）"
+# 実装の記録を読めないときは実装元が分からないので、Gemini 実装と同じに扱う（割合 100 でも Gemini に回さない。--engine gemini は exit 2）
+print -r -- $'pid=999999\nlane=claude' > "$wtr/logs/gunread.pid"; chmod 000 "$wtr/logs/gunread.pid"   # 読めれば Gemini 実装ではない中身
+LANES_REVIEW_GEMINI_PCT=100 rentry 0 "claude codex gemini" r-q --dry-run
+codex_dry || fail "読めない実装の記録があるのに、割合 100 で Gemini に回した"
+rentry 2 "claude codex gemini" r-r --engine gemini
+[[ "$OUT" == *"実装元が分からない"* ]] || fail "読めない実装の記録があるのに --engine gemini を通した"
+chmod 644 "$wtr/logs/gunread.pid"; rm -f -- "$wtr/logs/gunread.pid"
+pass "logs/ の .pid を読めないときは実装元が分からないので Gemini に回さない（--engine gemini は exit 2）"
+# 割合 50: 誤差の積み上げで「既定・Gemini・既定・Gemini」。dry-run は記録を進めない
+split="$T/split-state"; split_file="$split/lanewright/review-split.state"
+XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" s1
+[[ "$(lane_of s1)" == codex-review && "$(head -1 "$split_file")" == acc=50 ]] || { cat "$split_file" >&2; fail "割合 50 の 1 回目が既定（Codex）でない / 記録が acc=50 でない"; }
+XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" s2 --dry-run
+gem_dry || fail "割合 50 の 2 回目の予測が Gemini でない"
+XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" s2 --dry-run
+gem_dry && [[ "$(head -1 "$split_file")" == acc=50 ]] || fail "dry-run が割合の記録を進めた"
+XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" s2
+XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" s3
+XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" s4
+[[ "$(lane_of s2) $(lane_of s3) $(lane_of s4)" == "gemini-review codex-review gemini-review" && "$(head -1 "$split_file")" == acc=0 ]] \
+  || { cat "$split_file" >&2; fail "割合 50 が既定・Gemini・既定・Gemini の順にならない: $(lane_of s1) $(lane_of s2) $(lane_of s3) $(lane_of s4)"; }
+grep -q '^VERDICT: CLEAN$' "$wtr/logs/s2.done" && grep -q '^VERDICT: CLEAN$' "$wtr/logs/s3.done" || fail "振り分け先のレビューが CLEAN で終わらない"
+pass "割合 50 は既定（Codex）・Gemini・既定・Gemini の順。dry-run は記録（review-split.state）を進めない"
+# 系列の引き継ぎ: r2 は r1 と同じ役（割合より優先。割合の記録も進めない）
+XDG_STATE_HOME="$split" rentry 0 "claude codex gemini" s2-r2 --dry-run
+gem_dry && [[ "$OUT" == *"同じ系列（s2）の前回のレビュー役を続ける"* ]] || fail "系列 s2 の r2 が前回（Gemini）と同じ役にならない"
+XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=100 rentry 0 "claude codex gemini" s1-r2 --dry-run
+codex_dry || fail "系列 s1 の r2 が前回（Codex）と同じ役にならない（割合 100 に負けた）"
+XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" s3-r2
+[[ "$(lane_of s3-r2)" == codex-review && "$(head -1 "$split_file")" == acc=0 ]] || fail "系列の引き継ぎで割合の記録を進めた / 役が変わった"
+python3 -I - "$wtr/logs/.s4.review-state" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p, encoding="utf-8")); assert d.pop("last_reviewer") == "gemini", d
+open(p, "w", encoding="utf-8").write(json.dumps(d, ensure_ascii=False) + "\n")
+PY
+XDG_STATE_HOME="$split" rentry 0 "claude codex gemini" s4-r2 --dry-run
+gem_dry || fail "last_reviewer の無い旧記録で、証跡の見出しから前回の役（Gemini）を読まない"
+print -r -- '## Gemini レビュー証跡（ev-r1）' > "$wtr/logs/ev-r1.evidence.md"
+XDG_STATE_HOME="$split" rentry 0 "claude codex gemini" ev-r2 --dry-run
+gem_dry || fail "記録の無い系列で、証跡（ev-r1.evidence.md）の見出しから前回の役を読まない"
+pass "同じ系列の r2 以降は前回のレビュー役を続ける（記録の last_reviewer、無ければ証跡の見出し）。割合より優先し、割合の記録は進めない"
+XDG_STATE_HOME="$split" rentry 0 "claude codex" s2-r2 --dry-run
+codex_dry && [[ "$OUT" == *"前回の役 gemini は今の構成に無い"* ]] || fail "構成から gemini を外したのに前回の役（Gemini）を使おうとした"
+print -r -- $'pid=999999\nlane=gemini' > "$wtr/logs/gimpl.pid"
+XDG_STATE_HOME="$split" rentry 0 "claude codex gemini" s2-r2 --dry-run
+codex_dry && [[ "$OUT" == *"Gemini では続けない"* ]] || fail "Gemini 実装なのに前回の役（Gemini）を続けた"
+rm -f -- "$wtr/logs/gimpl.pid"
+pass "前回の役が今の構成に無い・Gemini 実装を Gemini で見ることになるときは、構成の既定の役へ逃がす"
+# 振り分け先の起動前の点検で止まった系列（必須検証の記録が無い）を呼び直しても、同じ役を引き継ぎ、数え方を進めない
+for i in 1 2; do
+  XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 LANES_REVIEW_REQUIRE_CHECKS=1 LANES_CHECK_CMD=/usr/bin/true rentry 2 "claude codex gemini" pf
+  codex_dry && [[ "$OUT" == *"chk-run の記録を使えない"* && "$(head -1 "$split_file")" == acc=50 ]] \
+    || { cat "$split_file" >&2; fail "起動前に止まった系列の $i 回目で役が変わった・割合の記録を二重に進めた"; }
+done
+XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" pg --dry-run
+gem_dry || fail "引き継いだ系列の後の新しい系列が、数え方どおり（Gemini）にならない"
+[[ "$(<"$wtr/logs/.pf.review-pick")" == codex && "$(<"$split_file")" == acc=50 ]] \
+  || { cat "$split_file" >&2; fail "割合で決めた役が作業ツリーの logs/ に残らない・割合の記録に割り当てが混ざった"; }
+pass "起動前の点検で止まった系列を呼び直しても、前に割り当てた役（logs/ の .<系列>.review-pick）を引き継ぎ、割合の記録を二重に進めない"
+# 片付けて同じパスに作り直した作業ツリー（logs/ が新しい）には、前の作業ツリーで割合で決めた役を持ち越さない（割り当ては logs/ と同じ寿命）
+mv "$wtr/logs" "$T/logs-route.save"; mkdir "$wtr/logs"
+XDG_STATE_HOME="$split" LANES_REVIEW_GEMINI_PCT=50 rentry 0 "claude codex gemini" pf --dry-run
+gem_dry && [[ "$OUT" != *"前に割り当てた役を引き継ぐ"* ]] || fail "作り直した作業ツリーに、前の作業ツリーの割り当て（codex）を持ち越した"
+rm -rf -- "$wtr/logs"; mv "$T/logs-route.save" "$wtr/logs"
+pass "同じパスに作り直した作業ツリーには、前の割り当てを持ち越さず、割合の数え方どおりに決める"
+unset STUB_AGY_RESPONSE GEMINI_POLL_SEC
+# lanes-roles.sh --print の補足と、割合の値の確かめ
+out="$(LANES_TOOLS="claude codex gemini" LANES_REVIEW_GEMINI_PCT=50 roles --print)"
+[[ "$out" == *"うち 50% を Gemini レビューへ振り分け（Gemini 実装分は除く"* ]] || fail "--print に割合の補足が無い"
+out="$(LANES_TOOLS="claude gemini" LANES_REVIEW_GEMINI_PCT=30 roles --print)"
+[[ "$out" == *"うち 30% を Gemini レビューへ振り分け"* ]] || fail "③ の --print に割合の補足が無い"
+for env_spec in "claude codex|50" "claude codex gemini|0"; do
+  out="$(LANES_TOOLS="${env_spec%|*}" LANES_REVIEW_GEMINI_PCT="${env_spec#*|}" roles --print)"
+  [[ "$out" != *"Gemini レビューへ振り分け"* ]] || fail "--print [${env_spec%|*} / ${env_spec#*|}%] に割合の補足が出た"
+done
+out="$(LANES_TOOLS="claude codex gemini" LANES_REVIEW_GEMINI_PCT=50 roles --env)"
+[[ "$out" == *"LANES_ROLE_REVIEW=codex"* ]] || fail "割合を付けると LANES_ROLE_REVIEW が変わった"
+out="$(LANES_TOOLS="claude codex gemini" LANES_REVIEW_GEMINI_PCT=0050 roles --print)"
+[[ "$out" == *"うち 50% を Gemini レビューへ振り分け"* ]] || fail "LANES_REVIEW_GEMINI_PCT=0050 が 50 として表示されない"
+XDG_STATE_HOME="$T/split-pad" LANES_REVIEW_GEMINI_PCT=0050 rentry 0 "claude codex gemini" pad1
+[[ "$(head -1 "$T/split-pad/lanewright/review-split.state" 2>/dev/null)" == acc=50 ]] || fail "LANES_REVIEW_GEMINI_PCT=0050 が入口で 50 として数えられない"
+for bad in 101 abc -1 5x; do
+  rc=0; LANES_REVIEW_GEMINI_PCT="$bad" roles --print > "$T/pct.out" 2>&1 || rc=$?
+  (( rc == 2 )) && grep -q 'LANES_REVIEW_GEMINI_PCT' "$T/pct.out" || { cat "$T/pct.out" >&2; fail "LANES_REVIEW_GEMINI_PCT=$bad を止めない（$rc）"; }
+done
+pass "lanes-roles.sh --print は割合が 1 以上・gemini ありのときだけ補足を出す（LANES_ROLE_REVIEW は変えない）。先頭の 0 は外して数える（0050 は 50）。0〜100 の整数以外は exit 2"
+
 # ---- 8. 入口は起動前点検を通す（未ログインなら振り分け先へ進まない）----
 : > "$STUB_LOG"
 STUB_CLAUDE_AUTH=none entry 2 "claude" run-impl.sh --dry-run
@@ -467,7 +619,10 @@ early_env=(LANES_NOTIFY=true); early c5 "claude" run-qa.sh
 early_env=(LANES_NOTIFY=true); early c6 "claude" run-impl.sh
 early_env=(LANES_NOTIFY=true); early c7 "claude" run-review.sh
 early_env=(LANES_STALL_MINUTES=0); early c8 "claude gemini" run-gemini.sh --verify true --allow-path owned.txt --no-push
+early_env=(LANES_REVIEW_GEMINI_PCT=101); early c9 "claude codex gemini" run-review.sh
+early_env=(LANES_NOTIFY=true); early c10 "claude codex gemini" run-gemini-review.sh
 early_env=()
+grep -q '設定の誤り: LANES_REVIEW_GEMINI_PCT' "$wt/logs/c9.done" || fail "割合の誤りの理由が .done に残らない"
 grep -q '設定の誤り: LANES_NOTIFY' "$wt/logs/c6.done" || fail "設定値の誤りの理由が .done に残らない"
 pass "設定値の誤りの理由（キーの名前）を .done に残す"
 # dry-run の誤りは記録に触らない
@@ -491,7 +646,7 @@ pass "排他が取れない（実行中）ときは前回の記録に触らず�
 
 # ---- 11. 旧名のランチャ・互換の入口は置かない（公開版は新しい名前だけ） ----
 # 置いてあるランチャ（run-*.sh）とレビュー出力の整形（*-output.py）が、新しい名前の一覧と一致すること
-want_launchers="codex-review-output.py run-claude-review.sh run-claude.sh run-codex-review.sh run-codex.sh run-gemini.sh run-impl.sh run-qa.sh run-review.sh"
+want_launchers="codex-review-output.py run-claude-review.sh run-claude.sh run-codex-review.sh run-codex.sh run-gemini-review.sh run-gemini.sh run-impl.sh run-qa.sh run-review.sh"
 typeset -a have_list; have_list=("$LANES_DIR"/run-*.sh(N:t) "$LANES_DIR"/*-output.py(N:t))
 have_list=(${(o)have_list}); have_launchers="${(j: :)have_list}"
 [[ "$have_launchers" == "$want_launchers" ]] || fail "ランチャの一覧が新しい名前だけになっていない（$have_launchers）"

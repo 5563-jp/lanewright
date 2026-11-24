@@ -2,21 +2,79 @@
 # 偽の agy（Antigravity CLI。テスト専用）。本物の CLI・ネットワークには触らない。
 # agy にはログイン確認のサブコマンドが無く、ランチャと lanes-doctor.sh はログイン情報の置き場所
 # （$HOME/.gemini/antigravity-cli）の有無で判定する。未ログインを試すときはそのディレクトリを作らない（消す）。
-# 環境変数:
-#   STUB_AGY_RESULT    print モードの result の status（既定 SUCCESS）
-#   STUB_LOG           指定があれば、呼ばれた引数を 1 行 1 JSON で追記する
-import json, os, sys
+# 環境変数（どれも省略できる。省略時は前と同じく init と SUCCESS の result を出して 0 で終わる）:
+#   STUB_AGY_RESULT      print モードの result の status（既定 SUCCESS。前からある名前）
+#   STUB_AGY_STATUS      同じ（新しい名前。STUB_AGY_RESULT より優先）。ERROR にすると、時間切れ・失敗のときの本物と同じく
+#                        終了コード 0 のまま status=ERROR の result を出す
+#   STUB_AGY_RESPONSE    result の response（既定「スタブの応答」。\n は改行として扱う）
+#   STUB_AGY_ERROR       result の error（既定は付けない。\n は改行）
+#   STUB_AGY_TOOL        カンマ区切りの道具の名前。result の前に、名前ごとに作業記録（step_update・step_type=tool）を 1 件ずつ出す
+#   STUB_AGY_OMIT_RESULT 1 なら result を出さない（途中で終わった記録）
+#   STUB_AGY_BROKEN      1 なら result の前に JSON でない行を出す（記録の破損）
+#   STUB_AGY_SLEEP       result を出す前に眠る秒数（無出力の見張りを試す）
+#   STUB_AGY_WAIT_FILE   ファイルのパス。init と道具の記録を出した後、そのファイルができるまで result を出さずに待つ（最大 120 秒。
+#                        実行中の様子を、子が確かに動いている間に確かめるテスト用）
+#   STUB_AGY_RC          終了コード（既定 0）
+#   STUB_AGY_FIRST_ERROR ファイルのパス。そのファイルが無い最初の呼び出しだけ、ファイルを作り、stderr に UNAVAILABLE 503 を出して
+#                        status=ERROR・終了コード 1 で終わる（一時エラーの再試行を試す）。2 回目からは通常どおり
+#   STUB_AGY_FIRST_SLEEP STUB_AGY_FIRST_ERROR の最初の呼び出しで、エラーを出す前に眠る秒数（全体の上限の残りが少ないときを試す）
+#   STUB_AGY_HELP        --help の出力を差し替える（オプションが足りない agy を試す）
+#   STUB_RUN             指定があれば、result を返す前にこのシェルのコマンドを子として実行する（作業ツリーで実行。claude / codex のスタブと同じ）。
+#                        STUB_AGY_FIRST_ERROR の最初の呼び出しでも、エラーを出す前に実行する
+#   STUB_RUN_RC          STUB_RUN の終了コードを追記するファイル
+#   STUB_LOG             指定があれば、呼ばれた引数と一部の環境変数（秘密を含まない名前だけ）を 1 行 1 JSON で追記する
+import json, os, subprocess, sys, time
 args = sys.argv[1:]
+ENV_KEYS = ("ANTIGRAVITY_HEADLESS", "GIT_ALLOW_PROTOCOL", "GIT_OPTIONAL_LOCKS", "GIT_PAGER", "GIT_DIR", "GIT_WORK_TREE",
+            "GIT_CONFIG_GLOBAL", "LANES_SCRATCH", "TMPDIR")
 if os.environ.get("STUB_LOG"):
     with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as f:
-        f.write(json.dumps({"bin": "agy", "args": args}, ensure_ascii=False) + "\n")
+        f.write(json.dumps({"bin": "agy", "args": args, "env": {k: os.environ.get(k) for k in ENV_KEYS}}, ensure_ascii=False) + "\n")
+def text(name, default):
+    v = os.environ.get(name)
+    return default if v is None else v.replace("\\n", "\n")
 if "--help" in args or args[:1] == ["help"]:
-    print("Usage of agy (stub):\n  --sandbox\n  --settings\n  --model\n  --effort\n  --print")
+    print(os.environ.get("STUB_AGY_HELP", "Usage of agy (stub):\n  --sandbox\n  --settings\n  --mode\n  --model\n  --effort\n"
+                          "  --output-format\n  --print-timeout\n  --add-dir\n  --print"))
     sys.exit(0)
 if "-p" in args or "--print" in args:
-    print(json.dumps({"event": "init"}), flush=True)
-    print(json.dumps({"event": "result", "result": {"status": os.environ.get("STUB_AGY_RESULT", "SUCCESS"),
-                                                    "response": "スタブの応答"}}), flush=True)
-    sys.exit(0)
+    def event(value):
+        print(json.dumps(value, ensure_ascii=False), flush=True)
+    cmd = os.environ.get("STUB_RUN")
+    if cmd:
+        rc = subprocess.run(["/bin/sh", "-c", cmd], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+        if os.environ.get("STUB_RUN_RC"):
+            with open(os.environ["STUB_RUN_RC"], "a", encoding="utf-8") as f:
+                f.write(f"{rc}\n")
+    first = os.environ.get("STUB_AGY_FIRST_ERROR")
+    if first and not os.path.exists(first):
+        open(first, "w").close()
+        if os.environ.get("STUB_AGY_FIRST_SLEEP"):
+            time.sleep(float(os.environ["STUB_AGY_FIRST_SLEEP"]))
+        print("UNAVAILABLE 503", file=sys.stderr, flush=True)
+        event({"event": "init"})
+        event({"event": "result", "result": {"status": "ERROR", "response": "", "error": "UNAVAILABLE 503"}})
+        sys.exit(1)
+    event({"event": "init"})
+    for name in filter(None, os.environ.get("STUB_AGY_TOOL", "").split(",")):
+        event({"event": "step_update", "step_update": {"step_type": "tool", "tool_name": name,
+                                                       "tool_info": {"parameters": {"Path": "owned.txt"}}}})
+    if os.environ.get("STUB_AGY_BROKEN") == "1":
+        print("{broken", flush=True)
+    if os.environ.get("STUB_AGY_SLEEP"):
+        time.sleep(float(os.environ["STUB_AGY_SLEEP"]))
+    wait_file = os.environ.get("STUB_AGY_WAIT_FILE")
+    if wait_file:
+        deadline = time.time() + 120
+        while not os.path.exists(wait_file) and time.time() < deadline:
+            time.sleep(0.1)
+    if os.environ.get("STUB_AGY_OMIT_RESULT") != "1":
+        result = {"status": os.environ.get("STUB_AGY_STATUS") or os.environ.get("STUB_AGY_RESULT", "SUCCESS"),
+                  "response": text("STUB_AGY_RESPONSE", "スタブの応答")}
+        if os.environ.get("STUB_AGY_ERROR") is not None:
+            result["error"] = text("STUB_AGY_ERROR", "")
+        event({"event": "result", "result": result})
+    sys.exit(int(os.environ.get("STUB_AGY_RC", "0")))
 print("stub agy: 未対応の呼び出し", file=sys.stderr)
 sys.exit(64)

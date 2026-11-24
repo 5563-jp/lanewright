@@ -75,7 +75,7 @@ series="$(rvd_series "$label")"
 if rvd_checks_block "$allow_missing"; then lanes_die "$RVD_CHECKS_BLOCK"; fi
 (( dry )) || lanes_mark_start "$logdir" "$label" claude-review "$wt" "file:.$series.review-state" "file:$series.followups.md" "file:.review-reuse-blocked"
 lanes_require_tool claude run-claude-review.sh
-lanes_entry_preflight
+lanes_entry_preflight "$wt"
 lanes_require_prompt "$prompt"
 round="$(rvd_round "$logdir" "$series" "$label" "$round")"
 [[ "$round" == <-> && ${#round} -le 6 ]] || lanes_die "round が不正"
@@ -84,8 +84,8 @@ prev_head="$(rvd_record_get "$record" head)"
 prev_v="$(rvd_record_get "$record" verdict)"
 requested_mode="$mode"
 policy=early; (( round >= 3 )) && policy=followups
-# 再利用の条件（指示・起点・設定・検証の設定・必須検証の使い回し）。変わったら同じ HEAD でも省略しない（review-dedup.zsh の rvd_context）
-review_context() { rvd_context "$LANES_DIR" "$prompt" "$review_base" "$requested_mode" "$policy" "$CLAUDE_MODEL" "$CLAUDE_EFFORT" "$wt" "$checks_key" claude; }
+# 再利用の条件（指示・起点・設定・検証の設定・必須検証の使い回し・使えるツールと拒否の設定）。変わったら同じ HEAD でも省略しない（review-dedup.zsh の rvd_context）
+review_context() { rvd_context "$LANES_DIR" "$prompt" "$review_base" "$requested_mode" "$policy" "$CLAUDE_MODEL" "$CLAUDE_EFFORT" "$wt" "$checks_key" claude "tools=${CLAUDE_REVIEW_TOOLS:-}|deny=${CLAUDE_REVIEW_DENY:-}"; }
 context="$(review_context)"
 tree="$(rvd_snapshot "$wt")" || lanes_die "レビュー前の内容確認に失敗"
 decided="$(rvd_decide_mode "$wt" "$prev_head" "$prev_v" "$context" "$(rvd_record_get "$record" context)" "$tree" "$(rvd_record_get "$record" tree)")"
@@ -107,7 +107,7 @@ if [[ "$prev_v" == 'VERDICT: NEEDS_FIX' ]]; then
   skip_same=0
   [[ -n "$(rvd_record_get "$record" report)" ]] || lanes_die "前回の未解決指摘本文が無い。復元してから再レビューする"
   if [[ "$requested_mode" != full ]] && ! rvd_reuse_blocked "$logdir" \
-     && [[ "$(rvd_fix_mode "$wt" "$prev_head" "$tree" "$(rvd_record_get "$record" tree)" "$review_base" "$(rvd_record_get "$record" base)")" == delta ]]; then
+     && [[ "$(rvd_fix_mode "$wt" "$prev_head" "$tree" "$(rvd_record_get "$record" tree)" "$review_base" "$(rvd_record_get "$record" base)" claude "$(rvd_record_reviewer "$record")")" == delta ]]; then
     mode=delta; base="$prev_head"
   else
     mode=full; base="$review_base"
@@ -155,7 +155,7 @@ delta_note=""
 [[ "$mode" == "delta" ]] && delta_note="$(rvd_delta_note "$wt" "$base" "$round" "$review_base")"
 
 # テンプレ + 案件固有プロンプト + ランチャの追記（delta の説明・前回の未解決指摘・必須検証のきまり）を結合して、実際に渡した全文を残す
-LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" python3 - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" "$(rvd_checks_rule)" "$delta_note" "$unresolved_note" <<'PY'
+LANES_ACCEPTED_NOTE="$(rvd_accepted_note "$wt")" "$LANES_PY" -I - "$template" "$prompt" "$final" "$wt" "$branch" "$head" "$base" "$mode" "$(lanes_now)" "$(rvd_checks_rule)" "$delta_note" "$unresolved_note" <<'PY'
 import os, sys, pathlib
 tpl, case, out, wt, branch, head, base, mode, date, checks_rule, delta_note, unresolved = sys.argv[1:13]
 t = pathlib.Path(tpl).read_text(encoding="utf-8")
@@ -236,7 +236,7 @@ elapsed=$(( ($(date +%s) - t0) / 60 ))
 # stream-json（1 行 1 イベント）から最後の result イベントを抜いて本文にする。旧形式（単一 JSON）にも対応。
 # result が無ければ exit 4（完走せず）: 生を本文に残すが、途中の tool_result 等から VERDICT を拾わない
 conv_rc=0
-python3 - "$json" "$log" <<'PY' || conv_rc=$?
+"$LANES_PY" -I - "$json" "$log" <<'PY' || conv_rc=$?
 import json, sys, pathlib
 src, dst = sys.argv[1], sys.argv[2]
 raw = pathlib.Path(src).read_text(encoding="utf-8", errors="replace")
@@ -279,7 +279,8 @@ export LANES_CHECKS_PRESENT="$checks_present"
 if (( conv_rc != 0 )); then
   verdict="VERDICT: NONE"
 else
-  verdict="$(lanes_extract_verdict "$log")"
+  # 最終判断は本文末尾の明示の VERDICT 行だけ（無ければ NONE。run-gemini-review.sh と同じ lanes_parse_review の review）
+  verdict="$(lanes_review_verdict "$log")"
 fi
 [[ "$verdict" == "VERDICT: PASS" ]] && verdict="VERDICT: CLEAN"
 (( rc == 0 )) || verdict="VERDICT: NONE"   # claude が非 0 で終わった本文の VERDICT は採用しない
@@ -367,7 +368,7 @@ gate="$(rvd_escalate "$round" "$verdict" "$gate")"
 { print -- ""; print -- "----"; cat "$evidence"; print -- "finished: $(lanes_now)"; print -- "EXIT:$rc"; print -- "$verdict"; } >> "$log"
 cat "$evidence"
 final_rc=$rc
-(( rc == 0 )) && rvd_save_state "$logdir" "$series" "$round" "$(git -C "$wt" rev-parse HEAD)" "$verdict" "$gate" "$label" "$context" "$snapshot_after" "$review_base" "$log" "$pending_note" "$blocking_previous"
+(( rc == 0 )) && rvd_save_state "$logdir" "$series" "$round" "$(git -C "$wt" rev-parse HEAD)" "$verdict" "$gate" "$label" "$context" "$snapshot_after" "$review_base" "$log" "$pending_note" "$blocking_previous" claude
 (( rc == 0 )) && [[ "$verdict" != "VERDICT: CLEAN" && "$verdict" != "VERDICT: NEEDS_FIX" ]] && final_rc=3   # 完走したのに VERDICT が無い
 lanes_mark_done "$final_rc" "$verdict" "claude rc=$rc gate=$gate $sevsum"
 exit $final_rc
