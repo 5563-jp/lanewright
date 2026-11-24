@@ -32,12 +32,10 @@ import unicodedata
 MAX_LIST = 200  # 変更パスの一覧に載せる行数（点検は全件で行う）
 MAX_SHOW = 20   # 点検結果の分類ごとに載せる代表箇所の数
 HUGE = 1048576  # 巨大ファイルとみなす大きさ（バイト）
-SECRET = re.compile(
-    r"(?:^|/)(?:\.env(?:\..+)?|id_(?:rsa|dsa|ecdsa|ed25519)|.+\.(?:pem|key|p8|p12|pfx|keystore)|(?:credentials|service-account.*)\.json)$",
-    re.I,
-)
-RUNSH = re.compile(r"(?:^|/)run-[^/]+\.sh$", re.I)
-LOGS = re.compile(r"(?:^|/)logs/", re.I)
+# 名前による候補は、パスの最後の名前で判定する（re.S: 名前の途中に改行があっても途切れない。ルート直下も下のフォルダも同じ）
+SECRET_EXT = (".pem", ".key", ".p8", ".p12", ".pfx", ".keystore")   # 鍵の拡張子（大文字・小文字を区別しない endswith）
+SECRET_NAME = re.compile(r"\.env(?:\..+)?|id_(?:rsa|dsa|ecdsa|ed25519)|(?:credentials|service-account.*)\.json", re.I | re.S)
+RUNSH = re.compile(r"run-.+\.sh", re.I | re.S)
 HEX = re.compile(rb"[0-9a-f]{40,64}")
 MODE = re.compile(rb"[0-7]{6}")
 STATUS = re.compile(rb"[ACDMTUX]+")
@@ -374,14 +372,16 @@ def show(name):
 
 
 def name_reasons(name):
-    """名前による要確認の理由（照合は各部分の前後の空白を除いた名前で広めに行う。前後に空白を足した名前もすり抜けさせない）。"""
-    norm = "/".join(unicodedata.normalize("NFC", p).strip() for p in name.split("/"))
+    """名前による要確認の理由。パスを / で分けた各部分（前後の空白を除き NFC にそろえる。前後に空白を足した名前もすり抜けさせない）の、
+    最後の名前と途中のフォルダ名で判定する（名前の途中に改行などがあっても途切れない。大文字・小文字は区別しない。内容は開かない）。"""
+    parts = [unicodedata.normalize("NFC", p).strip() for p in name.split("/")]
+    base = parts[-1]
     out = []
-    if SECRET.search(norm):
+    if base.casefold().endswith(SECRET_EXT) or SECRET_NAME.fullmatch(base):
         out.append(("秘密らしい名前", "秘密らしい名前"))
-    if RUNSH.search(norm):
+    if RUNSH.fullmatch(base):
         out.append(("run-*.sh", "名前が run-*.sh（手書きのランチャ・一時スクリプトの可能性）"))
-    if LOGS.search(norm):
+    if any(p.casefold() == "logs" for p in parts[:-1]):
         out.append(("logs/ の下", "logs/ の下"))
     return out
 

@@ -882,5 +882,28 @@ assert "UP.TMP（大きさを確かめられない・その commit の時点の 
 assert "見つからなかった" not in t, t
 ENDPC
 pass "部分 clone で .gitignore の中身を取得できないときは「判定できなかったもの」に分ける（規則なしにしない。変更 1 件につき 1 回数える）"
+# 鍵の候補はパスの最後の名前の末尾で判定する（ルート直下の .key・.p8 も、下のフォルダの .key も、名前の途中に改行がある鍵の名前も候補。
+# 大文字・小文字を区別しない。内容は開かない）。途中で足して消した鍵には HEAD に無いことを添える
+h4="$T/hist4"; git init -q -b main "$h4"; lanes_test_assert_repo "$h4"
+git -C "$h4" config user.name "Test User"; git -C "$h4" config user.email you@example.com; git -C "$h4" config commit.gpgSign false
+h4c() { git -C "$h4" add -A 2>/dev/null; git -C "$h4" commit -qm "test: $1" 2>/dev/null; }
+print -r -- 'x' > "$h4/a.txt"; h4c '起点'
+h4from="$(git -C "$h4" rev-parse HEAD)"
+mkdir -p "$h4/sub"; for f in .key .P8 sub/.key $'a\nb.key' $'c\nd.P8'; do print -r -- 'dummy' > "$h4/$f"; done; h4c '鍵の名前'
+git -C "$h4" rm -q -- $'a\nb.key' $'c\nd.P8'; h4c '名前の途中に改行がある鍵を消す'
+[[ -f "$h4/.key" && -f "$h4/sub/.key" ]] || fail "鍵の名前の一時リポを作れない"
+python3 -I "$LANES_DIR/review-history-inspect.py" "$h4" "$h4from" "$T" > "$T/hist4.out" || fail "鍵の名前の点検処理が動かない"
+python3 -I - "$T/hist4.out" <<'ENDH4' || fail "鍵の候補を最後の名前の末尾で判定していない: $T/hist4.out"
+import sys
+t = open(sys.argv[1], encoding="utf-8").read()
+maybe = t.split("- 要確認候補")[1].split("- 判定できなかったもの")[0]
+assert "- 判定できなかったもの（照合に失敗した。「該当なし」ではない）: 0 件。" in t, t
+for shown in (".key", ".P8", "sub/.key"):
+    assert " の A " + shown + "（秘密らしい名前）" in maybe, (shown, maybe)
+for shown in ('"a\\nb.key"', '"c\\nd.P8"'):
+    assert " の A " + shown + "（秘密らしい名前。HEAD には無い（途中で消したが、公開履歴に残る））" in maybe, (shown, maybe)
+assert "見つからなかった" not in t, t
+ENDH4
+pass "鍵の候補は最後の名前の末尾で判定する（ルート直下・下のフォルダ・名前の途中の改行で差が出ない。大文字・小文字を区別しない）"
 
 print -r -- "PASS: $count 件 / EXIT:0"
