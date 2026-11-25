@@ -19,7 +19,8 @@
 #      （決め打ちの場所 / 渡す環境を作ること / cwd=/ / 複数の引数）
 #   6. 起動したコマンドから見えるもの（環境変数の名前と指紋・作業場所・umask・標準入力・出力先・3 番以降の fd・セッション・無視にした
 #      シグナル・引数のバイト列）は、付けないときと同じ。違うのは親（tmux の画面のプロセス）だけ。標準出力は pid の 1 行、
-#      起動ログと台帳は同じ（umask・作業場所の fd・シグナル・fd を閉じる処理）
+#      起動ログと台帳は同じ。消した作業場所からでも、入口と一時フォルダが相対パスでも起動できる
+#      （umask・作業場所の fd・シグナル・fd を閉じる処理 / 相対パスを絶対にすること）
 #   7. 画面に pid・起動ログの続き・終了コードを出し、--linger 秒のあとでセッションが閉じる（利用者の設定が「終わった画面を残す」でも）。
 #      同じ起動ログへの 2 回目は、今回の分だけを流す。画面の中の親の下に居るのは、起動したコマンドだけ
 #      （remain-on-exit を切ること / 読み口を見出しの後ろへ進めること / 子の回収 / 使わない環境の写しを閉じること）
@@ -45,7 +46,8 @@
 #   - detach-run.sh は、空の環境（env -i）と作り物の変数だけで回す。本物の環境変数は渡さない。値は出力にもファイルにも出さない
 #     （比べるのは名前と指紋）
 #   - 利用者の設定は読まない。作業ツリーの目印は空の .git フォルダ（14 だけ、既存のテストと同じ隔離で git を使う）。全データを一時領域に置く
-#   - 結果は、一時領域の名前（空白・改行・= ・[ があるかどうか）に依らない。パスは文字列で比べる
+#   - 結果は、一時領域の名前（空白・改行・= ・[ があるかどうか）に依らない。パスは文字列で比べる（14 だけは、名前に改行があると
+#     chk-run.sh の側が記録を使い回せないので、省いて LANES_PARTIAL を出す）
 #   - 検査対象が返した番号のプロセスには、何も送らない（居るかどうかを見るだけ）。止めるのは、このテストのいま動いているジョブだけ
 #   - tmux が決まった場所に無い・ソケットのパスが長すぎて置けない（LANES_TEST_SOCKET_ROOT に浅いフォルダを渡すと、そこへ置く）ときは、
 #     1〜4 だけを回して「LANES_PARTIAL: <理由>」を出す
@@ -461,7 +463,8 @@ os.execv(real, [real, "-S", sock, "-f", "/dev/null"] + args)
 EOF_WRAP
 print -r -- "#!/bin/sh"$'\n'"exec ${(qq)REAL} -I -S ${(qq)T}/wrap.py ${(qq)T} ${(qq)real_tmux} ${(qq)sock} ${(qq)REAL} \"\$@\"" > "$T/wrap/tmux"
 chmod +x "$T/wrap/tmux"
-/usr/bin/env -i "$T/wrap/tmux" --baseline || fail "包みを動かせない（用意が誤り）"
+# env には /bin/sh を渡す（包みのパスを直に渡すと、一時領域の名前に = があるとき、変数の代入と読まれる）
+/usr/bin/env -i /bin/sh "$T/wrap/tmux" --baseline || fail "包みを動かせない（用意が誤り）"
 baseline=("${(@f)$(<"$T/wrap.baseline")}")
 mkcopy copy-wrap "$T/wrap/tmux"; DR="$REPLY"
 # 包みが受け取った引数を読む: call_args <番号> → reply
@@ -480,7 +483,8 @@ for d in "$W" "$W/pylib"; do
     print -r -- 'open(__file__ + ".ran", "w").close()' > "$d/$m.py"
   done
 done
-# tmux の設定ファイルのつもりのもの（読まれたら印を書く）と、-f なしの zsh が読むもの
+# tmux の設定ファイルのつもりのもの（読まれたら印を書く。包みは「設定なし」で呼ぶので、ここでは読まれない。設定の場所を決める HOME が
+# 呼び出し元の値でないことは、下で値の指紋を比べて確かめる）と、-f なしの zsh が読むもの
 print -r -- "run-shell 'echo tmux-conf >> ${(q)MARKS}'" > "$W/.tmux.conf"
 cp "$W/.tmux.conf" "$W/conf/tmux/tmux.conf"
 print -r -- "print -r -- zshenv >> ${(qq)MARKS}" > "$W/.zshenv"
@@ -514,13 +518,14 @@ cmp -s "$T/values.want" "$CALLS/0.values" \
   || fail "tmux へ渡した環境変数の値が違う（HOME・USER・LOGNAME は OS のユーザー情報・PATH は決め打ち・LANG と TMUX_TMPDIR は呼び出し元のもの、のはず。違う名前: $(diff "$T/values.want" "$CALLS/0.values" | sed -n 's/^< \([A-Z_]*\) .*/\1/p' | tr '\n' ' ')）"
 [[ "$(sed -n 's/^HOME //p' "$CALLS/0.values")" != "$(sha "$W")" ]] || fail "tmux へ、呼び出し元の HOME（対象の中）を渡した"
 # この起動が立ち上げたサーバーの既定の環境（利用者が後で開くウィンドウへ渡るもの）: 照会の成功と、名前の一覧を別々に見る
-tm show-environment -g > "$T/server.env" || fail "立ち上がったサーバーの既定の環境を照会できない"
-server=("${(@f)$(sed 's/=.*//' "$T/server.env" | LC_ALL=C sort)}"); rm -f -- "$T/server.env"
+# （値はファイルに書かない。名前だけを取り出す）
+tm show-environment -g > /dev/null || fail "立ち上がったサーバーの既定の環境を照会できない"
+server=("${(@f)$(tm show-environment -g | sed 's/=.*//' | LC_ALL=C sort)}")
 (( ${server[(Ie)HOME]} && ${server[(Ie)PATH]} )) || fail "立ち上がったサーバーの既定の環境が取れていない（用意が誤り）"
 extra=(${server:|want}); extra=(${extra:#PWD})
 (( ! ${#extra} )) || fail "立ち上がったサーバーの既定の環境に、決めた名前のほかのものが入っている（名前だけ出す）: ${(j: :)extra}"
 [[ "$(tm show-options -gv default-shell)" != "$W/.venv/bin/zsh" ]] || fail "サーバーの既定のシェルが、呼び出し元の SHELL（対象の中）になった"
-pass "tmux へ渡すもの（サーバーが無い所から）: 実行ファイルは決めた候補だけ・操作は 1 回・接続先の指定なし・作業場所は /・環境変数は名前を挙げた 6 つだけ（HOME・USER・LOGNAME は OS のユーザー情報、PATH は決め打ち）。対象の中の偽物・設定・偽モジュールは動かない。立ち上がったサーバーの既定にも、呼び出し元の変数は入らない"
+pass "tmux へ渡すもの（サーバーが無い所から）: 実行ファイルは決めた候補だけ・操作は 1 回・接続先の指定なし・作業場所は /・環境変数は名前を挙げた 6 つだけ（HOME・USER・LOGNAME は OS のユーザー情報、PATH は決め打ち）。対象の中の偽物・偽モジュールは動かない（設定ファイルの場所と既定のシェルは、呼び出し元の値で決まらない）。立ち上がったサーバーの既定にも、呼び出し元の変数は入らない"
 # ここから先は、サーバーを残す（セッションが無くなるとサーバーが終わる）。利用者の設定のつもりで、「終わった画面を残す」・
 # 既定のシェル（通ったら印を書く）・サーバーの環境変数を入れておく
 tm new-session -d -s keeper -- /bin/sleep 900 || fail "サーバーを残すセッションを作れない（用意が誤り）"
@@ -566,7 +571,14 @@ run "$DR" "$T/gone6" -- --tmux lt-gone --linger 0 "$T/logs/gone.log" /usr/bin/to
 run_pre=':'
 launched "消した作業場所からの --tmux"; finished "消した作業場所からの --tmux"
 [[ ! -d "$T/gone6" && -f "$T/started-6-gone" ]] || fail "消した作業場所からの --tmux: コマンドが動いていない（または作業場所を消せていない）"
-pass "起動したコマンドから見えるもの（環境変数の名前と指紋・作業場所・umask・標準入力・出力先・fd・セッション・無視にしたシグナル・引数）は、付けないときと同じ。違うのは親（tmux の画面のプロセス）だけ。pid の出力・起動ログ・台帳も同じ。既定のシェルを通らない。消した作業場所からでも起動できる"
+# 入口と一時フォルダを相対パスで渡しても起動できる（tmux と画面の中の親は / で動くので、今の場所につないで絶対にして渡す）
+reset_calls
+run "./${DR:t}" "$T" TMPDIR=tmp -- --tmux lt-rel --linger 0 logs/rel.log /usr/bin/touch "$T/started-6-rel"
+launched "相対パスの入口と一時フォルダ"; finished "相対パスの入口と一時フォルダ"
+call_args 0
+[[ -f "$T/started-6-rel" && "${reply[8]}" == "$T/./${DR:t}" && "${reply[10]}" == "$T/tmp/lanes-detach-"[0-9a-f](#c16) ]] \
+  || fail "相対パスの入口と一時フォルダ: コマンドが動いていない・tmux へ渡したパスが、今の場所につないだ絶対パスでない"
+pass "起動したコマンドから見えるもの（環境変数の名前と指紋・作業場所・umask・標準入力・出力先・fd・セッション・無視にしたシグナル・引数）は、付けないときと同じ。違うのは親（tmux の画面のプロセス）だけ。pid の出力・起動ログ・台帳も同じ。既定のシェルを通らない。消した作業場所からでも、入口と一時フォルダが相対パスでも起動できる"
 
 # ---- 7. 画面に pid・起動ログの続き・終了コードを出し、--linger のあとで閉じる ----
 run "$DR" "$CWD" -- --tmux lt-screen --linger 4 "$T/logs/screen.log" /bin/sh -c 'echo "日本語の出力"; sleep 2; echo "おわり"; exit 7'
@@ -832,14 +844,20 @@ grep -q '^- 必須検証: 親の chk-run の記録を使用（head ' "$wt/logs/r
 grep -q '親が同じ中身で実施済み' "$wt/logs/rev-tmux-r1.prompt.md" || fail "指示書に「回さないこと」が入っていない"
 if grep -q '記録は使わない' "$wt/logs/rev-tmux-r1.evidence.md"; then fail "証跡に「使わない」が残っている"; fi
 EOF_REUSE
-rc=0
-/usr/bin/env -i HOME="$T/reuse-home" LOGNAME=fake-user PATH="$STUBS:/usr/bin:/bin:/usr/sbin:/sbin" LANES_DIR="$LANES_DIR" DR="$DR" \
-  LANES_CONF="$T/no-such.conf" LANES_NOTIFY=0 LANES_TOOLS="claude codex" LANES_SCRATCH_ROOT="$T/reuse/scratch" TMPDIR="$T/reuse/" LANES_SCRATCH="$T/reuse" \
-  XDG_STATE_HOME="$T/reuse/state" CLAUDE_BIN="$STUBS/claude" CODEX_BIN="$STUBS/codex" CHK_CACHE="$T/reuse/chk-cache/passed.tsv" LANES_CHECK_CMD=/usr/bin/true \
-  PYTHONPYCACHEPREFIX="$T/reuse/pycache" /bin/zsh -f "$T/reuse.zsh" > "$T/reuse.out" 2>&1 || rc=$?
-(( rc == 0 )) || { cat "$T/reuse.out" >&2; fail "chk-run.sh の直後に --tmux で起動したレビューが、親の記録を使い回さない（rc=$rc）"; }
-wait_for 10 hasnt lt-reuse || fail "レビューのセッションが閉じない"
-pass "chk-run.sh の直後に --tmux で起動したレビュー（偽の CLI の本物の起動）が、親の記録を使い回す"
+partial=""
+if [[ "$T" == *$'\n'* ]]; then
+  # chk-run.sh は、改行を含む作業ツリーのパスでは、--tmux を付けない起動でも記録を使い回せない（test-review-reuse-launch.sh も同じ所で止まる）
+  partial="一時領域の名前に改行があるので、chk-run.sh の記録の使い回し（14）は確かめていない（chk-run.sh の側の制限。--tmux とは別の件）"
+else
+  rc=0
+  /usr/bin/env -i HOME="$T/reuse-home" LOGNAME=fake-user PATH="$STUBS:/usr/bin:/bin:/usr/sbin:/sbin" LANES_DIR="$LANES_DIR" DR="$DR" \
+    LANES_CONF="$T/no-such.conf" LANES_NOTIFY=0 LANES_TOOLS="claude codex" LANES_SCRATCH_ROOT="$T/reuse/scratch" TMPDIR="$T/reuse/" LANES_SCRATCH="$T/reuse" \
+    XDG_STATE_HOME="$T/reuse/state" CLAUDE_BIN="$STUBS/claude" CODEX_BIN="$STUBS/codex" CHK_CACHE="$T/reuse/chk-cache/passed.tsv" LANES_CHECK_CMD=/usr/bin/true \
+    PYTHONPYCACHEPREFIX="$T/reuse/pycache" /bin/zsh -f "$T/reuse.zsh" > "$T/reuse.out" 2>&1 || rc=$?
+  (( rc == 0 )) || { cat "$T/reuse.out" >&2; fail "chk-run.sh の直後に --tmux で起動したレビューが、親の記録を使い回さない（rc=$rc）"; }
+  wait_for 10 hasnt lt-reuse || fail "レビューのセッションが閉じない"
+  pass "chk-run.sh の直後に --tmux で起動したレビュー（偽の CLI の本物の起動）が、親の記録を使い回す"
+fi
 
 # ---- 15. 後片付けの確かめ ----
 wait_for 10 hasnt lt-pane || fail "相手役のセッションが閉じない"
@@ -848,10 +866,9 @@ no_work || fail "受け渡しの一時フォルダが残っている"
 tm capture-pane -p -J -t '=keeper:' > /dev/null || fail "サーバーに問い合わせできない（用意が誤り）"
 rc=0; grep -rqaF -D skip -- "$SECRET" "$T" 2>/dev/null || rc=$?      # ソケットなどは読まない
 [[ "$rc" == 1 ]] || fail "一時領域のどこかに、環境変数の値（鍵のつもりの印）が書かれた・確かめられない（grep rc=$rc）"
-tm show-environment -g > "$T/server.env" || fail "サーバーの既定の環境を照会できない"
-rc=0; grep -qaF -- "$SECRET" "$T/server.env" || rc=$?
-rm -f -- "$T/server.env"
-[[ "$rc" == 1 ]] || fail "tmux のサーバーの既定の環境に、呼び出し元の環境変数の値が入った"
+tm show-environment -g > /dev/null || fail "サーバーの既定の環境を照会できない"
+if tm show-environment -g | grep -qaF -- "$SECRET"; then fail "tmux のサーバーの既定の環境に、呼び出し元の環境変数の値が入った"; fi
 pass "セッションと受け渡しの一時フォルダを残さない。一時領域のどこにも、tmux のサーバーの環境にも、環境変数の値を書いていない"
 
+[[ -z "$partial" ]] || print -r -- "LANES_PARTIAL: $partial"
 print -r -- "合格 $count 件"
