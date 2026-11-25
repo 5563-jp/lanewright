@@ -358,7 +358,8 @@ with open(sys.argv[1] + ".tmp", "w") as f:
     f.write("\n".join(out) + "\n")
 os.rename(sys.argv[1] + ".tmp", sys.argv[1])
 EOF_PROBE
-# テストの合図で進むコマンド: steps.sh <合図の頭> <段の数> <印のファイル> [終了コード]
+# テストの合図で進むコマンド: /bin/sh steps.sh <合図の頭> <段の数> <印のファイル> [終了コード]
+# （/bin/sh の引数として渡す。一時領域が、置いたファイルを直接実行できない設定でも回る。実行の許可は付けない = 直接実行の形に戻すと赤）
 # 段ごとに「steps: <i> 段目」を出して、<合図の頭>.<i> ができるまで待つ（テストが、確かめ終わってから作る。秒数では進まない）。
 # 全部の段が済んだら「steps: 終了」を出し、印のファイルを作って終わる。テストが途中で落ちても残らないように、全部を放す合図
 # （release-all。後片付けが作る）・一時領域が消えた・10 分、のどれかでも先へ進む
@@ -375,7 +376,6 @@ echo "steps: 終了"
 : > "$3"
 exit "${4:-0}"
 EOF_STEPS
-chmod +x "$T/steps.sh"
 
 # ---- 1. 書き方（静的）----
 lines=("${(@f)SRC}")
@@ -463,7 +463,7 @@ if scene.startswith("state") or scene == "nap":
 if flood:
     # この相手役が合図（go.1）を作るまで終わらないコマンド（共通の steps.sh。相手役が途中で落ちても、テストの後片付けが作る
     # release-all で終わる）と、画面が遅れてよい量（1MiB）より多い、前からの中身（約 2MiB）
-    cmd = [os.fsencode(os.path.join(T, "steps.sh")), os.fsencode(go), b"1", os.fsencode(mark), b"7"]
+    cmd = [b"/bin/sh", os.fsencode(os.path.join(T, "steps.sh")), os.fsencode(go), b"1", os.fsencode(mark), b"7"]
     linger = b"0"
     os.write(w, (b"flood " * 10 + b"\n") * 34000)
 body = b"\0".join([linger, b"18", b"", b"%d" % len(cmd)] + cmd + [b"PATH=/usr/bin:/bin", b"FAKE=1"])
@@ -956,7 +956,7 @@ pass "起動したコマンドから見えるもの（環境変数の名前と�
 
 # ---- 9. 画面に pid・起動ログの続き・終了コードを出し、--linger のあとで閉じる ----
 # コマンドは、テストが合図のファイルを作るまで待つ（動いている間の確かめを、秒数と競わせない）。--linger は長くして、テストが自分で閉じる
-run "$DR" "$CWD" -- --tmux lt-screen --linger 600 "$T/logs/screen.log" "$T/steps.sh" "$T/go-9" 1 "$T/mark-9" 7
+run "$DR" "$CWD" -- --tmux lt-screen --linger 600 "$T/logs/screen.log" /bin/sh "$T/steps.sh" "$T/go-9" 1 "$T/mark-9" 7
 launched "画面の確かめ"
 wait_for "$LIMIT" screen_has lt-screen "lanes: 起動した pid $pid$SCREEN_HEAD_REST$pid）。以下は起動ログの続き" || fail "画面に起動した pid が出ていない: $(screen_tail lt-screen)"
 wait_for "$LIMIT" screen_has lt-screen 'steps: 1 段目' || fail "画面に起動ログの続きが出ていない: $(screen_tail lt-screen)"
@@ -982,7 +982,7 @@ if screen_has lt-again 'steps: ' || screen_has lt-again '=== detach-run ==='; th
 tm kill-session -t '=lt-again'
 # 読み終わらない起動ログ（/dev/zero。起動ログに使える文字デバイスで、いくら読んでも終わらない）: 画面には流さず、そう断る。
 # コマンドが終われば、終了コードを出して、--linger どおりに閉じる
-run "$DR" "$CWD" -- --tmux lt-zero --linger 600 /dev/zero "$T/steps.sh" "$T/go-9z" 1 "$T/mark-9z" 5
+run "$DR" "$CWD" -- --tmux lt-zero --linger 600 /dev/zero /bin/sh "$T/steps.sh" "$T/go-9z" 1 "$T/mark-9z" 5
 launched "読み終わらない起動ログ"
 wait_for "$LIMIT" screen_has lt-zero "lanes: 起動した pid $pid$SCREEN_HEAD_REST$pid）。$SCREEN_NOFOLLOW" \
   || fail "普通のファイルでない起動ログ（/dev/zero）のとき、画面に「今は、続きを流せない」と出ていない: $(screen_tail lt-zero | cut -c1-200)"
@@ -996,7 +996,7 @@ launched "読み終わらない起動ログ・--linger 0"; finished "読み終�
 wait_for "$LIMIT" hasnt lt-zero-now || fail "読み終わらない起動ログ（/dev/zero）のとき、コマンドが終わってもセッションが閉じない"
 # 正の --linger: その秒数が過ぎたら、セッションが自分で閉じる（手では閉じない）。ここで見るのは、手で閉じなくても消えることだけ
 # （時間は測らない: 測れるのは、テストが「閉じた」と見るまでの時間。待つのが指定の秒数であることは、項目 4 が、時計に頼らずに見ている）
-run "$DR" "$CWD" -- --tmux lt-linger --linger 2 "$T/logs/linger.log" "$T/steps.sh" "$T/go-9l" 1 "$T/mark-9l"
+run "$DR" "$CWD" -- --tmux lt-linger --linger 2 "$T/logs/linger.log" /bin/sh "$T/steps.sh" "$T/go-9l" 1 "$T/mark-9l"
 launched "正の --linger"
 has lt-linger || fail "正の --linger: コマンドが動いている間なのに、セッションが無い"
 : > "$T/go-9l.1"
@@ -1008,7 +1008,7 @@ tm kill-session -t '=lt-screen'
 pass "画面に pid・起動ログの続き・終了コードを出し、--linger の間は残して、過ぎたら自分で閉じる。0 ならすぐ閉じる（利用者の設定が「終わった画面を残す」でも）。同じ起動ログへの 2 回目は今回の分だけを流す。画面の中の親の下に居るのは、起動したコマンドだけ。読み終わらない起動ログ（/dev/zero）は流さず、コマンドが終われば終了コードを出して閉じる"
 
 # ---- 10. 画面でキーを押しても、セッションを閉じても、コマンドは最後まで動く ----
-run "$DR" "$CWD" -- --tmux lt-keys --linger 600 "$T/logs/keys.log" "$T/steps.sh" "$T/go-10" 2 "$T/keys.mark"
+run "$DR" "$CWD" -- --tmux lt-keys --linger 600 "$T/logs/keys.log" /bin/sh "$T/steps.sh" "$T/go-10" 2 "$T/keys.mark"
 launched "画面のキーとセッションを閉じる確かめ"
 wait_for "$LIMIT" screen_has lt-keys 'steps: 1 段目' || fail "画面に起動ログの続きが出ていない（用意が誤り）"
 # キーを 1 つずつ送り（送れなければ赤）、端末に届いたことを、画面に出る ^C・^Z・^\ で確かめる（届いた時点で、画面の中の親へ
@@ -1031,7 +1031,7 @@ grep -q 'steps: 終了' "$T/logs/keys.log" || fail "セッションを閉じた�
 pass "画面で Ctrl-C・Ctrl-Z・Ctrl-\\ を押しても、画面の中の親は動き続け（押した後の出力が画面に届く）、セッションを閉じても、起動したコマンドは最後まで動き、起動ログに書き続ける"
 
 # ---- 11. 同じ名前のセッションがあれば <名前>-2 ----
-run "$DR" "$CWD" -- --tmux keeper --linger 0 "$T/logs/same.log" "$T/steps.sh" "$T/go-11" 1 "$T/same.mark"
+run "$DR" "$CWD" -- --tmux keeper --linger 0 "$T/logs/same.log" /bin/sh "$T/steps.sh" "$T/go-11" 1 "$T/same.mark"
 launched "同じ名前があるとき"
 [[ "$(<"$T/err")" == "$MSG_NOTE2" ]] || { cat "$T/err" >&2; fail "同じ名前があるとき、標準エラーが決まった 1 行でない"; }
 has keeper && has keeper-2 || fail "同じ名前があるとき、keeper-2 を作っていない・元の keeper が無い（今あるもの: $(sessions)）"
