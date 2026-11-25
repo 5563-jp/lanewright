@@ -19,7 +19,7 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   - 門つきの起動: 画面の中の親が作った子は、コマンドを始める前の門で待ち、門を開けるのは呼び出し元だけ。失敗（決まった文言で exit 2）を返したときは、
     コマンドは始まっていない。起動ログと作業場所は、呼び出し元が開いた fd のまま渡す（画面の側はパスを開かない）。呼び出し元は tmux のセッションを作るだけで、
     閉じる・探す操作をしない。
-  - 起動するコマンドは tmux のサーバーの子孫として動くので、資源の上限・優先度・macOS のログインの文脈などは、tmux のサーバーのものを受け継ぐ
+  - 起動するコマンドは tmux のサーバーの子孫として動くので、資源の上限・優先度・macOS のログインの文脈・サンドボックスなどは、tmux のサーバーのものになる
     （`lanes/README.md` の 12 章の「守られないこと・残る場面」）。
   `--tmux` を付けない起動は変わらない（1 つ目の引数が `--tmux`・`--linger`・`--tmux-pane` そのもののときだけ、新しい動きになる）。
   / `detach-run.sh --tmux <session> [--linger <seconds>] <launch.log> <command> [args...]` creates one tmux session and starts the command from a parent
@@ -32,8 +32,8 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   environment to the user's other windows nor takes its config location, default shell, or `PATH` from caller-controlled values.
   The launch is gated: the child waits before starting the command and only the caller opens the gate, so a failed launch (exit 2) never leaves the
   command running. The launch log and working directory are handed over as already-open file descriptors. The caller only creates its own session;
-  it never closes or looks up other sessions. Because the command runs as a descendant of the tmux server, resource limits, priority, and the macOS
-  login context come from the tmux server. Without `--tmux`, nothing changes.
+  it never closes or looks up other sessions. Because the command runs as a descendant of the tmux server, resource limits, priority, the macOS
+  login context, and any sandbox come from the tmux server, not from the caller. Without `--tmux`, nothing changes.
 
 ## [0.1.11] - レーンが終わったらすぐ見回る・切り離しに使う python3 を決め打ちにする / Check right after a lane finishes; a fixed helper python3 for detaching
 
