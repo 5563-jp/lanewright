@@ -24,6 +24,7 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
     環境変数・コマンド・開いたファイルを送る前／受け取る前に閉じる）。一時フォルダの名前を別の利用者に差し替えられても、その利用者のコマンドは始まらない。
   - 画面に流す起動ログの続きは、普通のファイルのときだけ。流す量を 1 回ごとに区切るので、起動ログが読むより速く増えても（`/dev/zero` のように
     読み終わらなくても）、コマンドが終われば終了コードが出て、`--linger` どおりに閉じる。画面が 1MiB より遅れたら、間を省いて末尾へ進む。
+    起動ログを途中で読めなくなった・状態を取れなくなったときも、止まるのは続きを流すことだけ（終了コードは出る）。
   - 起動するコマンドは tmux のサーバーの子孫として動くので、資源の上限・優先度・macOS のログインの文脈・サンドボックスなどは、tmux のサーバーのものになる
     （`lanes/README.md` の 12 章の「守られないこと・残る場面」）。
   `--tmux` を付けない起動は変わらない（1 つ目の引数が `--tmux`・`--linger`・`--tmux-pane` そのもののときだけ、新しい動きになる）。
@@ -38,7 +39,8 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   The launch is gated: the child waits before starting the command and only the caller opens the gate, so a failed launch (exit 2) never leaves the
   command running. Right after the handover socket connects, both ends ask the OS for the peer's user ID and close without sending or
   receiving anything unless it is their own. Log forwarding to the pane is chunked and limited to regular files, so the exit code still appears
-  (and the session still closes after `--linger`) when the launch log grows faster than it can be read or never ends (`/dev/zero`).
+  (and the session still closes after `--linger`) when the launch log grows faster than it can be read, never ends (`/dev/zero`),
+  or can no longer be read or inspected.
   A relative `TMUX_TMPDIR` is made absolute against the caller's working directory.
   The launch log and working directory are handed over as already-open file descriptors. The caller only creates its own session;
   it never closes or looks up other sessions. Because the command runs as a descendant of the tmux server, resource limits, priority, the macOS
