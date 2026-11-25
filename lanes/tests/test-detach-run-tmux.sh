@@ -97,9 +97,11 @@ job_running() {
   for j in ${(v)jobstates}; do [[ "$j" == running:*:"$1"=* ]] && return 0; done
   return 1
 }
-real_tmux=""; sock=""; sock_dir=""; caller=""
-cleanup() {
-  local st=$?
+real_tmux=""; sock=""; sock_dir=""; caller=""; cleaned=""
+cleanup() {   # [終了コード（省くと、直前のもの）]。動くのは 1 度だけ
+  local st="${1:-$?}"
+  [[ -z "$cleaned" ]] || return 0
+  cleaned=1
   # 合図を待っている小道具（steps.sh・遅らせた相手）を、全部放す
   [[ ! -d "$T" ]] || : > "$T/release-all"
   # 裏で動かした呼び出し元が残っていたら、先に止める（このテストのいま動いているジョブだけ。サーバーを終わらせた後で、
@@ -113,6 +115,15 @@ cleanup() {
   (( st != 0 )) || rm -rf -- "$T"
 }
 trap cleanup EXIT
+# 関数の中で set -e が発火すると、zsh は EXIT の trap を動かさずに終わる（zsh 5.9。専用のソケットのサーバーと、合図を待つ小道具が残る）。
+# 発火の直前に動く ZERR で、理由を出して、同じ後片付けを動かす（$( ) や ( ) の中では動かさない: その失敗は、外側が受けて先へ進む
+# ことがある）
+TRAPZERR() {
+  local st=$?
+  (( ZSH_SUBSHELL )) && return 0
+  print -r -u2 -- "FAIL: テストの途中のコマンドが失敗した（終了コード $st。set -e で止まる）（$T）"
+  cleanup "$st"
+}
 H="$T/home"; TMPD="$T/tmp"; CWD="$T/cwd"; CALLS="$T/calls"
 mkdir -p "$H" "$TMPD" "$CWD" "$CALLS" "$T/wrap" "$T/logs"
 export HOME="$H" XDG_CONFIG_HOME="$H/.config" LANES_CONF="$T/no-such.conf"
@@ -184,16 +195,18 @@ RECV_WATCH='    def recv_seen(*args):
     for recv_op in ("recv", "recvfrom", "recv_into", "recvfrom_into", "recvmsg", "recvmsg_into"):
         setattr(socket.socket, recv_op, recv_seen)
     os.read = recv_seen'
-#  期限を試したい待ちの行。その直前で、期限を短くする（そこまでの準備は、ふつうの期限のまま。待ちの行そのものは、検査対象のまま）。
-#  画面の側（中身を待つ・門の合図を待つ）は「期限があれば 2 秒に縮める。無ければ、無いまま」にする（期限を付け忘れた退行は、
-#  縮められずに待ち続けて赤になる。テストが期限を付けてしまわない）
+#  期限切れを試したい待ちの手前の行。そこで期限を短くする（そこまでの準備は、ふつうの期限のまま。期限を付ける行と、待つ行は、
+#  検査対象のまま）。画面の側（中身を待つ・門の合図を待つ）は「期限があれば 2 秒に縮める。無ければ、無いまま」にする（期限を
+#  付け忘れた退行は、縮められずに待ち続けて赤になる。テストが期限を付けてしまわない）
 RECV_LINE='        mark, extra = conn.recvmsg(1, socket.CMSG_SPACE(3 * 4))[:2]'
 GATE_LINE='        if conn.recv(1) != b"A":'
 SHORT_WAIT='        conn.settimeout(conn.gettimeout() and 2)'
-#  呼び出し元の側（tmux を呼ぶ・つながるのを待つ・pid を待つ）は、期限が 1 つの deadline なので、それを近づける
+#  呼び出し元の側は、期限が 1 つの deadline なので、それを近づける: tmux を呼ぶ輪の前・その輪の最後の行の後ろ（= つながるのを
+#  待つ前）・pid を待つ前
 TMUX_CALL_LINE='        for number in range(1, 10):'
-ACCEPT_LINE='        srv.settimeout(left())'
+SESSION_END_LINE="            raise Refused(\"${MSG_MANY#ERROR: }\")"
 PID_LINE='        pid = waiting(exchange)'
+SHORT_DEADLINE='        deadline = time.monotonic() + '
 HEADER=$'\n=== detach-run ==='
 print -r -- '呼び出し元の標準入力' > "$T/stdin.txt"
 # どの起動にも渡す作り物の変数（HOME・LOGNAME は、渡さないと zsh が本物の値を入れるので必ず渡す）。鍵のつもりの印は毎回違う値
@@ -593,7 +606,7 @@ peer_refused() {   # <場面の名前> <相手の利用者番号を返す行の�
   mkedit "pane-peer-$1" "$PANE_WATCH" "$PEER_LINE" "$2"
   caller_scene "peer-$1" "$REPLY"
   [[ "$REPLY" == $'pid none\npane-exit 2\nstarted False\nlog-bytes 0' ]] \
-    || fail "$3のに、画面の中の親が先へ進んだ（子を作った）: ${REPLY//$'\n'/ / }"
+    || fail "$3のに、画面の中の親が exit 2 で終わらない・先へ進んだ（子を作った）: ${REPLY//$'\n'/ / }"
   [[ "$(<"$T/caller-peer-$1.screen")" == "$MSG_PANE" ]] \
     || { cat "$T/caller-peer-$1.screen" >&2; fail "$3のに、画面の中の親が、断る前に受け取りの操作を呼んだ・画面に出るものが決まった文言でない"; }
 }
@@ -792,12 +805,11 @@ pane_pid() { tm list-panes -t "=$1" -F '#{pane_pid}' 2>/dev/null | head -1; }
 only_child() { [[ "$(ps -ax -o ppid=,pid= | awk -v p="$1" '$1 == p { print $2 }' | tr '\n' ' ')" == "$2 " ]]; }
 mkcopy copy-wrap "$T/wrap/tmux"; DR="$REPLY"
 # 期限の写し。長い（全体の期限を 600 秒に）= 止める合図のテストが、期限と競わない。短い = 外から止めなくても、期限で終わることを見る。
-# 短くするのは、試したい待ちだけ（その待ちの行の直前で deadline を近づける。そこまでの準備は、ふつうの期限 20 秒のまま）
+# 短くするのは、試したい待ちだけ（その待ちの手前で deadline を近づける。そこまでの準備は、ふつうの期限 20 秒のまま）
 mkedit copy-wrap-long "$DR" "$HANDSHAKE_LINE" 'HANDSHAKE_SECONDS = 600'; DR_LONG="$REPLY"
-mkshort() { mkedit "copy-wrap-short-$1" "$DR" "$3" "        deadline = time.monotonic() + $2"$'\n'"$3"; }   # <名前> <秒> <待ちの行>
-mkshort tmux 3 "$TMUX_CALL_LINE"; DR_SHORT_TMUX="$REPLY"
-mkshort accept 2 "$ACCEPT_LINE"; DR_SHORT_ACCEPT="$REPLY"
-mkshort pid 2 "$PID_LINE"; DR_SHORT_PID="$REPLY"
+mkedit copy-wrap-short-tmux "$DR" "$TMUX_CALL_LINE" "${SHORT_DEADLINE}3"$'\n'"$TMUX_CALL_LINE"; DR_SHORT_TMUX="$REPLY"
+mkedit copy-wrap-short-accept "$DR" "$SESSION_END_LINE" "$SESSION_END_LINE"$'\n'"${SHORT_DEADLINE}2"; DR_SHORT_ACCEPT="$REPLY"
+mkedit copy-wrap-short-pid "$DR" "$PID_LINE" "${SHORT_DEADLINE}2"$'\n'"$PID_LINE"; DR_SHORT_PID="$REPLY"
 
 # ---- 7. tmux へ渡すもの（サーバーがまだ無い所から。この起動が立ち上げる）----
 # 起動する対象のリポジトリの模型: PATH は印を書く偽物だけ・HOME と設定の場所とシェルは対象の中・作業場所と PYTHONPATH に偽モジュール
@@ -963,7 +975,7 @@ wait_for "$LIMIT" hasnt lt-zero-now || fail "読み終わらない起動ログ�
 # 実際の秒は SECONDS で測る
 run "$DR" "$CWD" -- --tmux lt-linger --linger 2 "$T/logs/linger.log" "$T/steps.sh" "$T/go-9l" 1 "$T/mark-9l"
 launched "正の --linger"
-has lt-linger || fail "正の --linger: コマンドが動いている間なのに、セッションが無い（用意が誤り）"
+has lt-linger || fail "正の --linger: コマンドが動いている間なのに、セッションが無い"
 : > "$T/go-9l.1"
 finished "正の --linger"
 since=$SECONDS
