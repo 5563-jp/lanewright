@@ -56,10 +56,11 @@
 #     「専用のソケット（-S）・設定なし（-f /dev/null）」を前に付けて本物へ切り替わる（先頭がサブコマンドなら、その後ろに何が付いても
 #     接続先は変わらない）。断ったら、本物を呼ばずに印を書いて exit 97（その印があれば、テストは赤）。検査対象の呼び出しは、
 #     -S・-L で始まる引数がどこかにあるだけでも断る
-#   - 本物のスクリプトを --tmux 付きで回すテストは無い。回すのは、tmux の候補の行だけを置き換えた写し（置き換えが効いていることを
-#     先に確かめる）。候補の先はテスト用の包みで、最初の一歩は環境を書き換えない /usr/bin/perl（/bin/sh や python3 を最初に通すと、
-#     PWD・LC_CTYPE などが足されて、検査対象が渡したものと見分けられない）。渡された環境変数の名前をそこで控えてから、入口へ移る。
-#     入口は、引数・作業場所・決まった名前の値の指紋を記録し、本物の tmux へは、控えた名前の変数だけを渡す
+#   - 確かめるスクリプトは、読むだけで、そのままでは 1 度も動かさない。動かすのは、tmux の候補の行だけを置き換えた写し（置き換えが
+#     効いていることを先に確かめる）と、その 1 行をさらに置き換えた写しだけ。画面の側を直に呼ぶ項目（4〜6）は、候補がどこにも無い写しを
+#     使う。--tmux で起動する項目（7〜）の候補の先はテスト用の包みで、最初の一歩は環境を書き換えない /usr/bin/perl（/bin/sh や python3 を
+#     最初に通すと、PWD・LC_CTYPE などが足されて、検査対象が渡したものと見分けられない）。渡された環境変数の名前をそこで控えてから、
+#     入口へ移る。入口は、引数・作業場所・決まった名前の値の指紋を記録し、本物の tmux へは、控えた名前の変数だけを渡す
 #   - 期限・相手の確かめのテストは、決まった 1 行だけをさらに置き換えた写し（期限の秒数・相手の利用者番号を返す行）で回す
 #   - detach-run.sh は、空の環境（env -i）と作り物の変数だけで回す。本物の環境変数は渡さない。値は出力にもファイルにも出さない
 #     （比べるのは名前と指紋）
@@ -133,7 +134,10 @@ if [[ -f "$C1" && -x "$C1" ]]; then REAL="$C1"; elif [[ -f "$C2" && -x "$C2" ]];
 else fail "決め打ちの 2 つの場所に python3 が無い（detach-run.sh はこの環境では起動できない）"; fi
 py() { /usr/bin/env -i "$REAL" -I -S "$@"; }
 
+# 確かめるスクリプトは、読むだけで、そのままでは 1 度も動かさない（名前を捨てる）。動かすのは、tmux の候補を置き換えた写し（mkcopy）と、
+# その写しの 1 行をさらに置き換えた写し（mkedit）だけ。本物の tmux の候補が残ったスクリプトを、入口を通さずに動かす道を作らない
 SRC="$(<"$DETACH")"
+unset DETACH
 BINS_LINE='TMUX_BINS = ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux")'
 MSG_USAGE=$'usage: detach-run.sh --tmux <セッション名> [--linger <秒>] <launch.log> <cmd> [args...]\n  セッション名は英数と _ -（先頭は英数・100 字まで）。--linger は 0〜86400 の整数の秒（既定 600）'
 MSG_PANE='ERROR: 画面の中の親を始められない（--tmux-pane は、このスクリプトが自分で呼ぶもの。引数・例外本文は非表示）'
@@ -401,8 +405,9 @@ if scene == "no-command":
 if scene.startswith("state"):
     cmd[2], linger = b"echo started; : > \"$0\"; exit 7", b"0"
 if flood:
-    # この相手役が合図（go）を作るまで終わらないコマンドと、画面が遅れてよい量（1MiB）より多い、前からの中身（約 2MiB）
-    cmd = [b"/bin/sh", b"-c", b"while [ ! -e \"$0\" ] && [ -d \"${0%/*}\" ]; do sleep 0.1; done; exit 7", os.fsencode(go)]
+    # この相手役が合図（go.1）を作るまで終わらないコマンド（共通の steps.sh。相手役が途中で落ちても、テストの後片付けが作る
+    # release-all で終わる）と、画面が遅れてよい量（1MiB）より多い、前からの中身（約 2MiB）
+    cmd = [os.fsencode(os.path.join(T, "steps.sh")), os.fsencode(go), b"1", os.fsencode(mark), b"7"]
     linger = b"0"
     os.write(w, (b"flood " * 10 + b"\n") * 34000)
 body = b"\0".join([linger, b"18", b"", b"%d" % len(cmd)] + cmd + [b"PATH=/usr/bin:/bin", b"FAKE=1"])
@@ -477,7 +482,7 @@ if scene == "no-command":
     sys.exit(0)
 if flood:
     # 画面（パイプ）から読めた量の 2 倍を、起動ログへ足し続ける（画面は、追記に追いつけない。速さの競争でなく、仕組みでそうする）。
-    # 読むのは 1 回 8KiB・0.01 秒おき（起動ログに足す量を抑えるため）。256KiB 読めたら、コマンドを終わらせる（go）。
+    # 読むのは 1 回 8KiB・0.01 秒おき（起動ログに足す量を抑えるため）。256KiB 読めたら、コマンドを終わらせる（go.1）。
     # その後、画面の中の親が終わって口が閉じるまで読み続ける（上限つき）
     texts = {"skipped": "=== 画面が追いつかないので、起動ログの途中を省いた（全部は起動ログにある）===".encode(),
              "exit-line": "=== 終了: 終了コード 7。この画面は 0 秒後に閉じる ===".encode()}
@@ -493,15 +498,16 @@ if flood:
                 tail = (tail + chunk)[-256:]
                 os.write(w, b"." * (2 * len(chunk)))
             if not released and total >= 262144:
-                open(go, "w").close()
+                open(go + ".1", "w").close()
                 released, limit = True, time.monotonic() + LIMIT // 2
             time.sleep(0.01)
     finally:
-        open(go, "w").close()
+        open(go + ".1", "w").close()
     result("released", released)
     if not closed:
-        pane.kill()
-    result("pane-exit", pane.wait() if closed else "timeout")
+        pane.kill()      # 画面の出力が閉じないまま、上限に当たった（下の pane-exit は、止めた印の負の数になる）
+    # 画面の出力が閉じても、画面の中の親が終わるとは限らない。終わるのを待つ所にも上限を使う
+    result("pane-exit", pane_exit())
     for name in sorted(texts):
         result(name, name in seen)
     sys.exit(0)
@@ -519,9 +525,11 @@ else:
     result("pane-exit", pane_exit())
 result("log", open(log, "rb").read().decode().replace("\n", "|"))
 EOF_CALLER
-caller_scene() {   # <場面> [入口（省くと、確かめる detach-run.sh）] → REPLY に相手役の出力
+# 画面の側を直に呼ぶ場面の入口は、どれも、tmux の候補がどこにも無い写し（$NONE）か、その 1 行を置き換えた写し（画面の側に tmux の
+# 呼び出しが足される退行があっても、本物の tmux・既定の接続先へ届かない）
+caller_scene() {   # <場面> [入口（省くと、候補がどこにも無い写し）] → REPLY に相手役の出力
   local rc=0
-  REPLY="$(cd "$CWD" && py "$T/fake-caller.py" "$T" "${2:-$DETACH}" "$1" 2> "$T/caller-$1.err")" || rc=$?
+  REPLY="$(cd "$CWD" && py "$T/fake-caller.py" "$T" "${2:-$NONE}" "$1" 2> "$T/caller-$1.err")" || rc=$?
   (( rc == 0 )) || { cat "$T/caller-$1.err" >&2; fail "相手役（呼び出し元・$1）が失敗（rc=$rc。用意が誤りか、画面の中の親がつながらない）"; }
 }
 caller_scene no-ack
@@ -546,21 +554,20 @@ pass "門（画面の側）: 合図を書かずに口を閉じたら、コマン
 # ---- 5. 相手の確かめと期限（画面の側）----
 # 別の利用者は用意できないので、「相手の利用者番号を返す行」だけを置き換えた写しで確かめる（確かめる行そのものは、検査対象のまま）。
 # 用意の確認: 置き換えていない入口では、同じ場面で pid が返る（相手役は、頼まれれば先へ進める役）
-print -r -- "$SRC" > "$T/copy-plain.sh"
-caller_scene peer-self "$T/copy-plain.sh"
+caller_scene peer-self
 [[ "$REPLY" == $'pid received\npane-exit 2\nstarted False\nlog-bytes 0' ]] \
   || fail "相手が自分と同じ利用者のとき、画面の中の親が pid を返さない（用意が誤り）: ${REPLY//$'\n'/ / }"
-mkedit pane-peer-other "$T/copy-plain.sh" "$PEER_LINE" '    return os.geteuid() + 1'
+mkedit pane-peer-other "$NONE" "$PEER_LINE" '    return os.geteuid() + 1'
 caller_scene peer-other "$REPLY"
 [[ "$REPLY" == $'pid none\npane-exit 2\nstarted False\nlog-bytes 0' ]] \
   || fail "相手が別の利用者（OS が返す利用者番号が自分と違う）なのに、画面の中の親が受け取って先へ進んだ（子を作った）: ${REPLY//$'\n'/ / }"
 [[ "$(<"$T/caller-peer-other.screen")" == "$MSG_PANE" ]] || fail "相手が別の利用者のとき、画面に出るものが決まった文言でない"
-mkedit pane-peer-none "$T/copy-plain.sh" "$PEER_LINE" '    return None'
+mkedit pane-peer-none "$NONE" "$PEER_LINE" '    return None'
 caller_scene peer-none "$REPLY"
 [[ "$REPLY" == $'pid none\npane-exit 2\nstarted False\nlog-bytes 0' ]] \
   || fail "相手の利用者番号を取れないのに、画面の中の親が受け取って先へ進んだ（取れないときは、閉じる側へ倒す）: ${REPLY//$'\n'/ / }"
 # 期限だけを短くした写し: 相手がつないだまま何も送らない・合図を書かないとき、外から止めなくても、自分で終わる
-mkedit pane-short "$T/copy-plain.sh" "$PANE_LINE" 'PANE_SECONDS = 2'; PANE_SHORT="$REPLY"
+mkedit pane-short "$NONE" "$PANE_LINE" 'PANE_SECONDS = 2'; PANE_SHORT="$REPLY"
 caller_scene silent "$PANE_SHORT"
 [[ "$REPLY" == $'pane-exit 2\nstarted False\nlog-bytes 0' ]] \
   || fail "相手がつないだまま何も送らないとき、画面の中の親が期限で終わらない: ${REPLY//$'\n'/ / }"
@@ -574,7 +581,7 @@ pass "相手の確かめと期限（画面の側）: 相手が同じ利用者だ
 caller_scene flood
 rm -f -- "$T/caller-flood.log"      # 数 MB ある。後の確かめ（一時領域の全部を読む）の前に消す
 [[ "$REPLY" == $'child-of-pane True\nown-session True\nanswer G\nreleased True\npane-exit 0\nexit-line True\nskipped True' ]] \
-  || fail "起動ログが、画面が読むより速く増え続けるとき、コマンドが終わっても画面の中の親が終了コードを出して終わらない（pane-exit timeout）・遅れすぎた分を省いていない: ${REPLY//$'\n'/ / }"
+  || fail "起動ログが、画面が読むより速く増え続けるとき、コマンドが終わっても画面の中の親が終了コードを出して終わらない（pane-exit が 0 でない）・遅れすぎた分を省いていない: ${REPLY//$'\n'/ / }"
 # 起動ログの状態を取れなくなっても（開いたファイルの状態を取る操作を失敗させた写し。0 = 最初から・1 = 1 回目だけ成功して、その後）、
 # 止まるのは画面へ流すことだけ。コマンドが終われば、終了コードを出して、--linger どおりに終わる
 heads=("$SCREEN_NOFOLLOW" '以下は起動ログの続き')
