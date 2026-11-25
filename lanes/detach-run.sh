@@ -25,9 +25,10 @@
 #     遅れすぎたら間を省くので、起動ログがどんな速さで増えても、コマンドが終われば終了コードが出て、--linger どおりに閉じる。
 #   - セッション名は英数と _ -（先頭は英数・100 字まで）。同じ名前のセッションがあれば <名前>-2 … <名前>-9 を順に試す。
 #   - tmux は、下の本文に書いた 3 つの場所だけから選ぶ（PATH からは探さない）。tmux へ渡す環境変数は、名前を挙げた 6 つだけ
-#     （呼び出し元からは TMUX_TMPDIR と LANG。HOME・USER・LOGNAME は OS のユーザー情報から。PATH は決め打ち）。tmux のサーバーが
-#     まだ無ければ、この起動が立ち上げる。その環境は、利用者が後で開くウィンドウにも受け継がれるので、呼び出し元の環境まるごとは渡さず、
-#     設定ファイルの場所・既定のシェル・PATH を、呼び出し元の値（起動する対象のリポジトリを指しうる）で決めさせない。
+#     （呼び出し元からは TMUX_TMPDIR と LANG。HOME・USER・LOGNAME は OS のユーザー情報から。PATH は決め打ち。TMUX_TMPDIR が相対なら、
+#     呼び出し元の作業場所につないで絶対にして渡す）。tmux のサーバーがまだ無ければ、この起動が立ち上げる。その環境は、利用者が後で開く
+#     ウィンドウにも受け継がれるので、呼び出し元の環境まるごとは渡さず、設定ファイルの場所・既定のシェル・PATH を、呼び出し元の値
+#     （起動する対象のリポジトリを指しうる）で決めさせない。
 #   - 画面の中の親は、この入口を /bin/zsh -f で呼び直したもの（--tmux-pane。手では呼ばない）。tmux のサーバーの環境は、下の exec -c で
 #     捨てる。呼び出し元とは、自分だけが読める一時フォルダ（TMPDIR があればその下。無ければ /tmp）のソケットでつなぎ、環境変数・コマンドと、
 #     呼び出し元が開いた起動ログ・作業場所の fd を受け取る（値をファイル・引数・tmux の環境には書かない。画面の側はパスを開かない）。
@@ -220,8 +221,11 @@ def tmux_launch(tmux, session, linger, cmd, stdout, env, **plain):
         try:
             here = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
             entry = script if os.path.isabs(script) else os.path.join(os.getcwd(), script)
-            base = env.get(b"TMPDIR") or b"/tmp"
-            base = base if os.path.isabs(base) else os.path.join(os.getcwdb(), base)
+            rooted = lambda path: path if os.path.isabs(path) else os.path.join(os.getcwdb(), path)
+            base = rooted(env.get(b"TMPDIR") or b"/tmp")
+            # tmux のサーバーの置き場（TMUX_TMPDIR）も同じ（tmux は / で動かすので、相対のまま渡すと別の場所を指す）。空なら、そのまま
+            sockets = env.get(b"TMUX_TMPDIR")
+            sockets = rooted(sockets) if sockets else sockets
         except OSError:
             raise Refused("作業場所を開けないので起動しない（--tmux は、読めないフォルダからは起動できない）") from None
         mask = os.umask(0o077)
@@ -252,7 +256,7 @@ def tmux_launch(tmux, session, linger, cmd, stdout, env, **plain):
             tmux_env.update({b"HOME": os.fsencode(me.pw_dir), b"USER": os.fsencode(me.pw_name), b"LOGNAME": os.fsencode(me.pw_name)})
         except KeyError:
             pass
-        tmux_env.update({name: env[name] for name in (b"TMUX_TMPDIR", b"LANG") if name in env})
+        tmux_env.update({name: value for name, value in ((b"TMUX_TMPDIR", sockets), (b"LANG", env.get(b"LANG"))) if value is not None})
         def tmux_run(*args):
             # 作業場所は /（サーバーを立ち上げたとき、サーバーが呼び出し元の作業場所を掴み続けない）。出力は読まない
             return subprocess.run([tmux, *args], env=tmux_env, cwd="/", stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
