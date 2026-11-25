@@ -21,6 +21,8 @@
 #   - セッションを閉じても、画面で Ctrl-C を押しても、起動したコマンドは止まらない（別のセッションで動いている。止めるのは、
 #     今までどおり標準出力に出した pid への kill）。コマンドが終わると、画面に終了コードを出し、--linger 秒（0〜86400 の整数。既定 600）
 #     待ってからセッションが閉じる。
+#   - 画面に流す起動ログの続きは、普通のファイルのときだけ（/dev/null のような文字デバイスは流さない）。1 回に流す量を区切り、画面が
+#     遅れすぎたら間を省くので、起動ログがどんな速さで増えても、コマンドが終われば終了コードが出て、--linger どおりに閉じる。
 #   - セッション名は英数と _ -（先頭は英数・100 字まで）。同じ名前のセッションがあれば <名前>-2 … <名前>-9 を順に試す。
 #   - tmux は、下の本文に書いた 3 つの場所だけから選ぶ（PATH からは探さない）。tmux へ渡す環境変数は、名前を挙げた 6 つだけ
 #     （呼び出し元からは TMUX_TMPDIR と LANG。HOME・USER・LOGNAME は OS のユーザー情報から。PATH は決め打ち）。tmux のサーバーが
@@ -105,6 +107,9 @@ HANDSHAKE_SECONDS = 20
 PANE_SECONDS = HANDSHAKE_SECONDS + 5
 # 門を開けた後、コマンドへ切り替わった結果を待つ上限（秒）。過ぎたら、起動したものとして扱う（門はもう開いている）
 RESULT_SECONDS = 10
+# 起動ログの続きを画面へ流すとき、1 回に読む量と、画面が遅れてよい量（バイト）。これより遅れたら、間を省いて末尾の手前へ進む
+FORWARD_CHUNK = 65536
+FORWARD_LAG = 16 * FORWARD_CHUNK
 # 1 つ目の引数がこのどれかのときだけ、--tmux の経路に入る（--tmux-pane は、画面の中の親としての起動。このスクリプトが自分で呼ぶ）
 TMUX_WORDS = ("--tmux", "--linger", "--tmux-pane")
 TMUX_USAGE = ("usage: detach-run.sh --tmux <セッション名> [--linger <秒>] <launch.log> <cmd> [args...]\n"
@@ -435,27 +440,39 @@ def tmux_pane(work):
                 data = data[os.write(1, data):]
         except OSError:
             sys.exit(0)   # 画面が無くなった。起動したコマンドはそのまま動く
-    def drain():
-        while True:
-            try:
-                chunk = os.read(log_r, 65536)
-            except OSError:
-                return
-            if not chunk:
-                return
-            show(chunk)
-    show(("lanes: 起動した pid %d。この画面を閉じても、Ctrl-C を押しても、起動したコマンドは止まらない（止めるのは kill %d）。"
-          "以下は起動ログの続き\n" % (pid, pid)).encode("utf-8"))
+    # 画面へ流すのは、普通のファイルの起動ログだけ（/dev/null のような文字デバイスは流さない。/dev/zero は、いくら読んでも終わらない）
+    follow = stat.S_ISREG(os.fstat(log_r).st_mode)
+    def forward(end):
+        """起動ログの end バイト目までの続きを、1 回分（多くても FORWARD_CHUNK バイト）だけ画面へ流す。流したら True。
+        量を区切るので、追記が読むより速くても、呼ぶ側は 1 回ごとに子の終了を確かめられる。画面が FORWARD_LAG バイトより
+        遅れていたら、間を省いて end の手前へ進む（省いたことを 1 行出す。全部は起動ログにある）"""
+        if not follow:
+            return False
+        try:
+            at = os.lseek(log_r, 0, os.SEEK_CUR)
+            if end - at > FORWARD_LAG:
+                at = os.lseek(log_r, end - FORWARD_LAG, os.SEEK_SET)
+                show("\n=== 画面が追いつかないので、起動ログの途中を省いた（全部は起動ログにある）===\n".encode("utf-8"))
+            chunk = os.read(log_r, min(end - at, FORWARD_CHUNK)) if end > at else b""
+        except OSError:
+            return False
+        show(chunk)
+        return bool(chunk)
+    show(("lanes: 起動した pid %d。この画面を閉じても、Ctrl-C を押しても、起動したコマンドは止まらない（止めるのは kill %d）。" % (pid, pid)
+          + ("以下は起動ログの続き\n" if follow else "起動ログが普通のファイルでないので、続きはこの画面に流さない\n")).encode("utf-8"))
     code = None
     while code is None:
-        drain()
+        moved = forward(os.fstat(log_r).st_size)
         # 終わった子を 1 つずつ回収する（入口のシェルが残した、環境の写しと本文を流し終えた子も。終わったまま画面の下に残さない）
         done, ended = os.waitpid(-1, os.WNOHANG)
         if done == pid:
             code = ended
-        elif not done:
+        elif not done and not moved:
             time.sleep(0.2)
-    drain()
+    # 子が終わった時点の大きさまでを流して終える（その後の追記は流さない。別の書き手が書き続けても、終わりがある）
+    end = os.fstat(log_r).st_size
+    while forward(end):
+        pass
     code = os.WEXITSTATUS(code) if os.WIFEXITED(code) else 128 + os.WTERMSIG(code)
     show(("\n=== 終了: 終了コード %d。この画面は %d 秒後に閉じる ===\n" % (code, linger)).encode("utf-8"))
     time.sleep(linger)
