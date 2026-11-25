@@ -564,9 +564,9 @@ if flood:
     finally:
         open(go + ".1", "w").close()
     result("released", released)
-    if not closed:
-        pane.kill()      # 画面の出力が閉じないまま、上限に当たった（下の pane-exit は、止めた印の負の数になる）
-    # 画面の出力が閉じても、画面の中の親が終わるとは限らない。終わるのを待つ所にも上限を使う
+    # 画面の出力が上限までに閉じたかは、親の終了とは別に見る（親が終わっても、ほかの子が書き口を持ち続ければ閉じない。逆も同じ）。
+    # 親が終わるのを待つ所にも、上限を使う
+    result("output-closed", closed)
     result("pane-exit", pane_exit())
     for name in sorted(texts):
         result(name, name in seen)
@@ -653,8 +653,8 @@ pass "相手の確かめと期限（画面の側）: 相手が同じ利用者だ
 # ---- 6. 起動ログの続きを流すことと、子の終了を見ることは別 ----
 caller_scene flood
 rm -f -- "$T/caller-flood.log"      # 数 MB ある。後の確かめ（一時領域の全部を読む）の前に消す
-[[ "$REPLY" == $'child-of-pane True\nown-session True\nanswer G\nreleased True\npane-exit 0\nexit-line True\nskipped True' ]] \
-  || fail "起動ログが、画面が読むより速く増え続けるとき、コマンドが終わっても画面の中の親が終了コードを出して終わらない（pane-exit が 0 でない）・遅れすぎた分を省いていない: ${REPLY//$'\n'/ / }"
+[[ "$REPLY" == $'child-of-pane True\nown-session True\nanswer G\nreleased True\noutput-closed True\npane-exit 0\nexit-line True\nskipped True' ]] \
+  || fail "起動ログが、画面が読むより速く増え続けるとき、コマンドが終わっても画面の中の親が終了コードを出して終わらない（pane-exit が 0 でない）・画面の出力が閉じない（output-closed が True でない）・遅れすぎた分を省いていない: ${REPLY//$'\n'/ / }"
 # 起動ログの状態を取れなくなっても（開いたファイルの状態を取る操作を失敗させた写し。0 = 最初から・1 = 1 回目だけ成功して、その後）、
 # 止まるのは画面へ流すことだけ。コマンドが終われば、終了コードを出して、--linger どおりに終わる
 heads=("$SCREEN_NOFOLLOW" '以下は起動ログの続き')
