@@ -422,7 +422,7 @@ detach_env_dump() {
 }
 detach_py_source() { print -r -- '
 ' }
-exec -c "$1" -I -S - "${@:2}" 3< <(detach_env_dump) < <(detach_py_source)
+exec -c "$1" -I -S - "$0" "${@:2}" 3< <(detach_env_dump) < <(detach_py_source)
 EOF_SHELL
 print -r -- "${(F)code}" > "$T/shell.got"
 cmp -s "$T/shell.want" "$T/shell.got" \
@@ -430,7 +430,7 @@ cmp -s "$T/shell.want" "$T/shell.got" \
        fail "補助が動き出すまでのシェルの部分が、許した命令の並びと違う（上の差分の < が決まった行、> が検査対象の行）"; }
 [[ "${(F)body}" != *"'"* ]] || fail "補助の本文に一重引用符がある"
 found=(${(M)body:#[[:space:]]#(import|from) *})      # 字下げした読み込みも拾う
-[[ "${(F)found}" == $'import fcntl, os, stat, sys, subprocess\nfrom pathlib import Path' ]] \
+[[ "${(F)found}" == $'import fcntl, os, stat, sys, subprocess\nfrom pathlib import Path\n    import pwd, signal, socket, time' ]] \
   || fail "補助の本文が読み込むものが、決まった標準ライブラリ（偽モジュールを置いている名前）と違う"
 print -r -- "${(F)body}" > "$T/body.py"
 /usr/bin/env -i "$REAL" -I -S -c 'import sys; compile(open(sys.argv[1], "rb").read(), "body", "exec", dont_inherit=True)' "$T/body.py" 2> "$T/err" \
