@@ -269,7 +269,8 @@ def tmux_launch(tmux, session, linger, cmd, stdout, env, **plain):
         if time.monotonic() >= deadline:
             raise TimeoutError
         conn.sendall(b"A")
-        # 子は、門を通ったら G を書いてからコマンドへ切り替わる（切り替わると口が閉じる）。切り替われなかったら F を書く
+        # 子は、門を通ったら G を書いてからコマンドへ切り替わる（切り替わると口が閉じる）。切り替われなかったら F を書く。
+        # 期限まで何も分からないときは、起動したものとして扱う（門はもう開いているので、失敗を返すと「動いているのに失敗」になる）
         conn.settimeout(RESULT_SECONDS)
         answer = b""
         try:
@@ -278,10 +279,12 @@ def tmux_launch(tmux, session, linger, cmd, stdout, env, **plain):
                 if not chunk:
                     break
                 answer += chunk
-        except OSError:
+        except socket.timeout:
             answer = answer or b"G"
+        except OSError:
+            pass
         if not answer:
-            raise EOFError   # 通った印が無いまま口が閉じた（子が居なくなった）
+            raise EOFError   # 通った印が無いまま口が閉じた（子が居なくなった。コマンドは始まっていない）
     except Refused as refused:
         reason = refused.args[0]
     except (OSError, EOFError, ValueError, subprocess.SubprocessError):
@@ -318,6 +321,7 @@ def gated_child(conn, status, log_w, here, mask, ignored, cmd, env):
         os.dup2(os.open(os.devnull, os.O_RDWR), 0)
         os.dup2(log_w, 1)
         os.dup2(log_w, 2)
+        # 0・1・2 のほかの fd は、ここで全部閉じる（受け取った fd も、画面の中の親が受け継いでいたものも。Popen の close_fds と同じ）
         for name in os.listdir("/dev/fd"):
             if int(name) > 2 and int(name) not in (conn.fileno(), status):
                 try:
@@ -355,7 +359,9 @@ def tmux_pane(work):
     画面に pid と起動ログの続きを流し、コマンドが終わったら終了コードを出して、少し待ってから終わる（終わるとセッションが閉じる）。
     門を開けるのは呼び出し元だけで、この親は子を止めない。受け渡しのフォルダには触らない（消すのは作った側）。"""
     try:
-        os.close(3)   # この起動の環境変数の写し（tmux のサーバーのもの）は使わない。子には呼び出し元のものを渡す
+        # この起動の環境変数の写し（tmux のサーバーのもの）は使わない。子には呼び出し元のものを渡す。読まずに閉じる
+        # （開けたままだと、写しが大きいとき、入口のシェルが残した書き手が、画面の下で待ち続ける）
+        os.close(3)
     except OSError:
         pass
     try:
@@ -366,10 +372,7 @@ def tmux_pane(work):
         os.chdir("/")
         mark, extra = conn.recvmsg(1, socket.CMSG_SPACE(3 * 4))[:2]
         raw = extra[0][2] if mark == b"F" and len(extra) == 1 and extra[0][:2] == (socket.SOL_SOCKET, socket.SCM_RIGHTS) else b""
-        fds = [int.from_bytes(raw[i:i + 4], sys.byteorder) for i in range(0, len(raw), 4)]
-        for fd in fds:
-            os.set_inheritable(fd, False)
-        log_w, log_r, here = fds
+        log_w, log_r, here = [int.from_bytes(raw[i:i + 4], sys.byteorder) for i in range(0, len(raw), 4)]
         parts = recv_exact(conn, int(recv_exact(conn, 20))).split(b"\0")
         linger, mask, count = int(parts[0]), int(parts[1]), int(parts[3])
         ignored = {int(s) for s in parts[2].split(b",") if s}
@@ -437,7 +440,10 @@ start = subprocess.Popen
 if sys.argv[1] in TMUX_WORDS:
     import pwd, signal, socket, time
     if sys.argv[1] == "--tmux-pane":
-        sys.exit(tmux_pane(sys.argv[2]))
+        try:
+            sys.exit(tmux_pane(sys.argv[2]))
+        except Exception:
+            sys.exit(2)   # 例外の本文を画面に出さない
     start = tmux_options()
 # ---- ここまで --tmux ----
 log, cmd = Path(sys.argv[1]), sys.argv[2:]
