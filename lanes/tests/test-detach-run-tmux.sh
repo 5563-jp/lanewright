@@ -43,7 +43,7 @@
 #  13. 起動ログを開いた後で別のファイルへ置き換えられたら、起動しない（読み口の照合）
 #  14. 画面の中の親が動き出す前に、利用者が受け取る pid へ止める合図（TERM）を送ると、exit 2 で pid を出さず、一時フォルダを片付け、
 #      コマンドは始まらない。強制終了（KILL）でも、コマンドは始まらず、セッションは自分で閉じる。外から止めなくても、画面の中の親が
-#      つながってこない・tmux が返事をしないときは、期限で exit 2 になり、片付ける（その待ちまで来ていたことも見る）
+#      つながってこない・tmux が返事をしないときは、期限で exit 2 になり、片付ける（期限切れになったのが、その待ちであることも見る）
 #      （合図を受けて片付けること / 待つ所の期限）
 #  15. 呼び出し元の側: テストが相手役（画面の中の親）になる。pid の前後で口が閉じた・通った印が無い・失敗の印 → exit 2。
 #      通った印 → pid を出して exit 0。相手が同じ利用者だと OS が言わない（別の利用者の番号が返る・取れない）ときは、環境変数・
@@ -214,6 +214,16 @@ TMUX_CALL_LINE='        for number in range(1, 10):'
 SESSION_END_LINE="            raise Refused(\"${MSG_MANY#ERROR: }\")"
 PID_LINE='        pid = waiting(exchange)'
 SHORT_DEADLINE='        deadline = time.monotonic() + '
+#  つながるのを待つ操作（accept）を「本物を呼び、その操作自身が期限切れになったら、標準エラーに目印を出して、そのまま投げ直す」ものに
+#  置き換える（期限切れが、その待ちで起きたことを見る。セッションを作る準備の途中で切れた期限と、取り違えない）
+ACCEPT_LATE='TEST: つながるのを待つ操作が、期限切れになった'
+ACCEPT_WATCH='        def accept_seen(sock, real=socket.socket.accept):
+            try:
+                return real(sock)
+            except socket.timeout:
+                say("'"$ACCEPT_LATE"'")
+                raise
+        socket.socket.accept = accept_seen'
 HEADER=$'\n=== detach-run ==='
 print -r -- '呼び出し元の標準入力' > "$T/stdin.txt"
 # どの起動にも渡す作り物の変数（HOME・LOGNAME は、渡さないと zsh が本物の値を入れるので必ず渡す）。鍵のつもりの印は毎回違う値
@@ -822,7 +832,7 @@ mkcopy copy-wrap "$T/wrap/tmux"; DR="$REPLY"
 # 短くするのは、試したい待ちだけ（その待ちの手前で deadline を近づける。そこまでの準備は、ふつうの期限 20 秒のまま）
 mkedit copy-wrap-long "$DR" "$HANDSHAKE_LINE" 'HANDSHAKE_SECONDS = 600'; DR_LONG="$REPLY"
 mkedit copy-wrap-short-tmux "$DR" "$TMUX_CALL_LINE" "${SHORT_DEADLINE}3"$'\n'"$TMUX_CALL_LINE"; DR_SHORT_TMUX="$REPLY"
-mkedit copy-wrap-short-accept "$DR" "$SESSION_END_LINE" "$SESSION_END_LINE"$'\n'"${SHORT_DEADLINE}2"; DR_SHORT_ACCEPT="$REPLY"
+mkedit copy-wrap-short-accept "$DR" "$SESSION_END_LINE" "$SESSION_END_LINE"$'\n'"${SHORT_DEADLINE}2"$'\n'"$ACCEPT_WATCH"; DR_SHORT_ACCEPT="$REPLY"
 mkedit copy-wrap-short-pid "$DR" "$PID_LINE" "${SHORT_DEADLINE}2"$'\n'"$PID_LINE"; DR_SHORT_PID="$REPLY"
 
 # ---- 7. tmux へ渡すもの（サーバーがまだ無い所から。この起動が立ち上げる）----
@@ -1148,12 +1158,11 @@ sleep 0.3
 left=("$TMPD"/lanes-detach-*(N)); (( ${#left} <= 1 )) || fail "強制終了の後に、受け渡しの一時フォルダが 2 つ以上残っている"
 rm -rf -- "$TMPD"/lanes-detach-*(N)
 # 外から止めなくても、期限で終わる（試したい待ちの直前で、期限を短くした写し）。相手は、返事をしないまま
-#  a. セッションはできたが、画面の中の親がつながってこない。つながるのを待つ所まで来ていたこと（セッションができている）も見る
-#     （準備の途中で終わったものを、期限切れと取り違えない）
+#  a. セッションはできたが、画面の中の親がつながってこない。期限切れになったのが、つながるのを待つ操作そのものであることも見る
+#     （標準エラーの 1 行目が、その操作の目印。セッションがあるだけでは、準備の途中で切れた期限と見分けられない）
 run_bg "$DR_SHORT_ACCEPT" "$CWD" -- --tmux lt-late --linger 0 "$T/logs/14.log" /usr/bin/touch "$T/started-14"
 end_bg "$LIMIT" "つながってこない相手の期限"
-stopped "つながってこない相手の期限" 2 "$MSG_TALK" "$T/started-14"
-has lt-late || fail "つながってこない相手の期限: つながるのを待つ所まで来ていない（セッションができていない）"
+stopped "つながってこない相手の期限（つながるのを待つ操作が、期限切れになっていること）" 2 "$ACCEPT_LATE"$'\n'"$MSG_TALK" "$T/started-14"
 no_work || fail "つながってこない相手の期限: 受け渡しの一時フォルダを片付けていない"
 release_pane lt-late
 #  b. tmux そのものが返事をしない（包みが、合図まで何もしないで待つ）。検査対象が、期限で止めて片付ける。tmux を待つ所まで
