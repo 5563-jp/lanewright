@@ -994,17 +994,14 @@ tm kill-session -t '=lt-zero'
 run "$DR" "$CWD" -- --tmux lt-zero-now --linger 0 /dev/zero /usr/bin/true
 launched "読み終わらない起動ログ・--linger 0"; finished "読み終わらない起動ログ・--linger 0"
 wait_for "$LIMIT" hasnt lt-zero-now || fail "読み終わらない起動ログ（/dev/zero）のとき、コマンドが終わってもセッションが閉じない"
-# 正の --linger: その秒数が過ぎたら、セッションが自分で閉じる（手では閉じない）。コマンドが終わったのを見てから測って、15 秒までに
-# 消えること（指定の 7 倍あまり。待ち時間が 10 倍に延びる退行は赤になり、負荷で数秒遅れても緑のまま）。待つ輪は回数で数えるので、
-# 実際の秒は SECONDS で測る
+# 正の --linger: その秒数が過ぎたら、セッションが自分で閉じる（手では閉じない）。ここで見るのは、手で閉じなくても消えることだけ
+# （時間は測らない: 測れるのは、テストが「閉じた」と見るまでの時間。待つのが指定の秒数であることは、項目 4 が、時計に頼らずに見ている）
 run "$DR" "$CWD" -- --tmux lt-linger --linger 2 "$T/logs/linger.log" "$T/steps.sh" "$T/go-9l" 1 "$T/mark-9l"
 launched "正の --linger"
 has lt-linger || fail "正の --linger: コマンドが動いている間なのに、セッションが無い"
 : > "$T/go-9l.1"
 finished "正の --linger"
-since=$SECONDS
 wait_for "$LIMIT" hasnt lt-linger || fail "--linger 2 が過ぎても、セッションが自分で閉じない"
-(( SECONDS - since <= 15 )) || fail "--linger 2 なのに、コマンドが終わってからセッションが閉じるまで $(( SECONDS - since )) 秒かかった（指定より、ずっと長く残る）"
 # --linger の間は残る: 上の場面より前に終わった lt-screen（--linger 600）が、まだある
 has lt-screen || fail "--linger の間なのに、セッションが閉じた"
 tm kill-session -t '=lt-screen'
