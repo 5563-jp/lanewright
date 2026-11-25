@@ -173,7 +173,7 @@ MSG_TALK='ERROR: tmux の画面の側（画面の中の親と、その子）と�
 MSG_PEER='ERROR: 受け渡しの相手が、同じ利用者だと確かめられないので起動しない'
 MSG_NOTE2='NOTE: 同じ名前の tmux のセッションがあるので、名前の後ろに -2 を付けたセッションを作った'
 SCREEN_HEAD_REST='。この画面を閉じても、Ctrl-C を押しても、起動したコマンドは止まらない（止めるのは kill '
-SCREEN_NOFOLLOW='起動ログが普通のファイルでないので、続きはこの画面に流さない'
+SCREEN_NOFOLLOW='今は、起動ログの続きをこの画面に流せない（起動ログが普通のファイルでないか、状態を取れない）'
 # 写しを作るときに置き換える行（検査対象に、この形の行がちょうどあること）
 PEER_LINE='    return int.from_bytes(cred[4:8], sys.byteorder) if known else None'
 HANDSHAKE_LINE='HANDSHAKE_SECONDS = 20'
@@ -975,7 +975,7 @@ tm kill-session -t '=lt-again'
 run "$DR" "$CWD" -- --tmux lt-zero --linger 600 /dev/zero "$T/steps.sh" "$T/go-9z" 1 "$T/mark-9z" 5
 launched "読み終わらない起動ログ"
 wait_for "$LIMIT" screen_has lt-zero "lanes: 起動した pid $pid$SCREEN_HEAD_REST$pid）。$SCREEN_NOFOLLOW" \
-  || fail "普通のファイルでない起動ログ（/dev/zero）のとき、画面に「続きは流さない」と出ていない: $(screen_tail lt-zero | cut -c1-200)"
+  || fail "普通のファイルでない起動ログ（/dev/zero）のとき、画面に「今は、続きを流せない」と出ていない: $(screen_tail lt-zero | cut -c1-200)"
 : > "$T/go-9z.1"
 finished "読み終わらない起動ログ"
 wait_for "$LIMIT" screen_has lt-zero '=== 終了: 終了コード 5。この画面は 600 秒後に閉じる ===' \

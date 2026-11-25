@@ -471,7 +471,8 @@ def tmux_pane(work):
         show(chunk)
         return bool(chunk)
     show(("lanes: 起動した pid %d。この画面を閉じても、Ctrl-C を押しても、起動したコマンドは止まらない（止めるのは kill %d）。" % (pid, pid)
-          + ("以下は起動ログの続き\n" if size() >= 0 else "起動ログが普通のファイルでないので、続きはこの画面に流さない\n")).encode("utf-8"))
+          + ("以下は起動ログの続き\n" if size() >= 0
+             else "今は、起動ログの続きをこの画面に流せない（起動ログが普通のファイルでないか、状態を取れない）\n")).encode("utf-8"))
     code = None
     while code is None:
         moved = forward(size())
