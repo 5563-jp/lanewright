@@ -41,7 +41,8 @@
 #   下に書いた 2 つの絶対パスのどちらかの python3（とその標準ライブラリ）だけ。それが何になるか・起動時に何を読むかは、呼び出し元の
 #   PATH・環境変数・作業場所・設定ファイル・起動ログの場所で変わらない（起動する対象のリポジトリの仮想環境を有効にしたシェルから
 #   呼んでも、その python3・mkdir や、作業場所・PYTHONPATH にある同じ名前のファイルは動かない）。
-#   --tmux のときに加わるのは、決め打ちの場所の tmux と /bin/zsh だけで、どちらにも呼び出し元の環境変数は渡さない。
+#   --tmux のときに加わるのは、決め打ちの場所の tmux と /bin/zsh だけ。tmux へ渡す環境変数は名前を挙げた 6 つ（呼び出し元の値は
+#   TMUX_TMPDIR と LANG だけ）で、/bin/zsh（画面の中の親）は、tmux のサーバーの環境を捨ててから、同じ補助になる。
 #   - 補助は名前で探さない（PATH・環境変数・引数・設定からは決めない）。
 #   - 補助は環境変数を 1 つも持たずに動く（exec -c）。-I で作業場所と PYTHON* を見ず、-S で site（起動時に自動で読む仕組み）を読まない。
 #   - 補助が動き出すまで、このシェルは組み込みと決め打ちの値だけを使う。対象のリポジトリの場所は知らない（場所で動きを変えない）。
@@ -151,12 +152,13 @@ def tmux_launch(tmux, session, linger, cmd, stdout, env, **plain):
     門を開ける（合図を書く）のはここだけ。開ける前に止められた・失敗したときは、合図を書かずに口を閉じる（子はコマンドを始めずに終わる）。
     作ったセッションを閉じる操作はしない（口が閉じたのを見て、画面の中の親が自分で終わる。ほかのセッションを指す操作が無い）。"""
     # 止める合図（呼び出し元が無視にしていないもの）は、待っている所（waiting）でだけ受け付ける。フォルダを作る・片付ける・
-    # 門を開ける間は受け付けない（pthread_sigmask は、届いていた合図のハンドラを自分の中で動かすので、例外はそこから出る）
+    # 門を開ける間は受け付けない（pthread_sigmask は、届いていた合図のハンドラを自分の中で動かすので、例外はそこから出る）。
+    # 待っている所では、入ったときの集合に戻す（呼び出し元がもともと止めていたシグナルを、ここで外さない）
     stops = [s for s in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM) if signal.getsignal(s) != signal.SIG_IGN]
     # 呼び出し元が無視にしていたシグナル（子に引き継ぐ。PIPE と XFSZ は python3 が自分で無視にするもので、Popen は子で既定に戻す）
     ignored = [s for s in range(1, signal.NSIG)
                if signal.getsignal(s) == signal.SIG_IGN and s not in (signal.SIGPIPE, signal.SIGXFSZ)]
-    signal.pthread_sigmask(signal.SIG_BLOCK, stops)
+    before = signal.pthread_sigmask(signal.SIG_BLOCK, stops)
     stopped = []
     def stop(signum, frame):
         if not stopped:
@@ -166,7 +168,7 @@ def tmux_launch(tmux, session, linger, cmd, stdout, env, **plain):
         signal.signal(signum, stop)
     def waiting(call, *args):
         try:
-            signal.pthread_sigmask(signal.SIG_UNBLOCK, stops)
+            signal.pthread_sigmask(signal.SIG_SETMASK, before)
             return call(*args)
         finally:
             signal.pthread_sigmask(signal.SIG_BLOCK, stops)
