@@ -14,8 +14,9 @@
 #      何も受け取らずに終わる（子を作らない = pid を返さない。コマンドは始まらない）。相手がつないだまま何も送らない・合図を書かない
 #      ときは、自分の期限で、コマンドを始めずに終わる（相手の利用者を確かめること / 取れないときは閉じること / 画面の側の期限）
 #   6. 起動ログの続きを流すことと、子の終了を見ることは別: 起動ログが、画面が読むより速く増え続けても（相手役が、画面から読めた量の
-#      2 倍を足し続ける）、コマンドが終われば終了コードを出して終わる。遅れすぎた分は、省いたと断って末尾へ進む
-#      （1 回に流す量を区切ること / 終わった時点の大きさまでで止めること / 遅れすぎたら省くこと）
+#      2 倍を足し続ける）、コマンドが終われば終了コードを出して終わる。遅れすぎた分は、省いたと断って末尾へ進む。起動ログの状態を
+#      取れなくなっても（最初から・途中から）、終了コードを出して、--linger どおりに終わる
+#      （1 回に流す量を区切ること / 終わった時点の大きさまでで止めること / 遅れすぎたら省くこと / 状態を取れないときに止めるのは、流すことだけ）
 #  tmux が要る項目（候補をテスト用の包みに置き換えた写しと、専用のソケットの tmux だけを使う）
 #   7. tmux へ渡すもの: 実行ファイルは写しの候補だけ（PATH の偽の tmux・python3・zsh は動かない）。操作は new-session と has-session だけで、
 #      接続先を指す引数（-S・-L）は付けない。作業場所は /。画面の中の親は /bin/zsh -f <入口> --tmux-pane <TMPDIR の下のフォルダ> を
@@ -154,6 +155,15 @@ SCREEN_NOFOLLOW='起動ログが普通のファイルでないので、続きは
 PEER_LINE='    return int.from_bytes(cred[4:8], sys.byteorder) if known else None'
 HANDSHAKE_LINE='HANDSHAKE_SECONDS = 20'
 PANE_LINE='PANE_SECONDS = HANDSHAKE_SECONDS + 5'
+# 写しに行を足すときの目印（検査対象の行は残して、その後ろにテスト用の行を足す）
+#  子が門を通ったと分かった所。ここから、開いたファイルの状態を取る操作（os.fstat）を、@OK@ 回だけ成功させて、その後は失敗させる
+STATUS_LINE='    os.close(status)'
+STATE_FAULT='    def no_state(fd, real=os.fstat, calls=[]):
+        calls.append(fd)
+        if len(calls) > @OK@:
+            raise OSError
+        return real(fd)
+    os.fstat = no_state'
 HEADER=$'\n=== detach-run ==='
 print -r -- '呼び出し元の標準入力' > "$T/stdin.txt"
 # どの起動にも渡す作り物の変数（HOME・LOGNAME は、渡さないと zsh が本物の値を入れるので必ず渡す）。鍵のつもりの印は毎回違う値
@@ -242,14 +252,15 @@ mkcopy() {
   REPLY="$T/$name.sh"; print -r -- "$body" > "$REPLY"
 }
 # 写しの 1 行だけを、さらに置き換えた写しを作る: mkedit <名前> <元のスクリプト> <元の行> <新しい行> → REPLY
-# （期限の秒数・相手の利用者番号を返す行。元の行がちょうど 1 つあること・置き換えが効いていることを先に確かめる）
+# （相手の利用者番号を返す行・期限の秒数。<新しい行> に元の行を入れて、その前後にテスト用の行を足すのにも使う。元の行がちょうど 1 つ
+# あること・置き換えが効いていること（中身が変わり、新しい行が入っている）を先に確かめる）
 mkedit() {
   local body; body="$(<"$2")"
   local rest="${body#*$'\n'"$3"$'\n'}"
   [[ "$rest" != "$body" && "$rest" != *$'\n'"$3"$'\n'* ]] || fail "写しを作れない（置き換える行が、ちょうど 1 つでない）: $1"
-  body="${body%%$'\n'"$3"$'\n'*}"$'\n'"$4"$'\n'"$rest"
-  [[ "$body" != *$'\n'"$3"$'\n'* && "$body" == *$'\n'"$4"$'\n'* ]] || fail "写しを作れない（置き換えが効いていない）: $1"
-  REPLY="$T/$1.sh"; print -r -- "$body" > "$REPLY"
+  local edited="${body%%$'\n'"$3"$'\n'*}"$'\n'"$4"$'\n'"$rest"
+  [[ "$edited" != "$body" && "$edited" == *$'\n'"$4"$'\n'* ]] || fail "写しを作れない（置き換えが効いていない）: $1"
+  REPLY="$T/$1.sh"; print -r -- "$edited" > "$REPLY"
 }
 
 # 起動したコマンドの側から見えるものを書き出す小道具（環境変数は名前と指紋だけ。値は書かない）: probe.py <書き出す先> [引数...]
@@ -387,6 +398,8 @@ cmd = [b"/bin/sh", b"-c", b"echo started; : > \"$0\"; sleep 1; echo finished; ex
 linger = b"1"
 if scene == "no-command":
     cmd = [os.fsencode(os.path.join(T, "no-such-command"))]
+if scene.startswith("state"):
+    cmd[2], linger = b"echo started; : > \"$0\"; exit 7", b"0"
 if flood:
     # この相手役が合図（go）を作るまで終わらないコマンドと、画面が遅れてよい量（1MiB）より多い、前からの中身（約 2MiB）
     cmd = [b"/bin/sh", b"-c", b"while [ ! -e \"$0\" ] && [ -d \"${0%/*}\" ]; do sleep 0.1; done; exit 7", os.fsencode(go)]
@@ -497,13 +510,13 @@ for n in range(LIMIT * 20):
         break
     time.sleep(0.05)
 result("started", os.path.exists(mark))
-if scene == "ack":
-    result("pane-exit", pane_exit())
-else:
+if scene == "pane-killed":
     for n in range(LIMIT * 20):
         if b"finished" in open(log, "rb").read():
             break
         time.sleep(0.05)
+else:
+    result("pane-exit", pane_exit())
 result("log", open(log, "rb").read().decode().replace("\n", "|"))
 EOF_CALLER
 caller_scene() {   # <場面> [入口（省くと、確かめる detach-run.sh）] → REPLY に相手役の出力
@@ -562,8 +575,19 @@ caller_scene flood
 rm -f -- "$T/caller-flood.log"      # 数 MB ある。後の確かめ（一時領域の全部を読む）の前に消す
 [[ "$REPLY" == $'child-of-pane True\nown-session True\nanswer G\nreleased True\npane-exit 0\nexit-line True\nskipped True' ]] \
   || fail "起動ログが、画面が読むより速く増え続けるとき、コマンドが終わっても画面の中の親が終了コードを出して終わらない（pane-exit timeout）・遅れすぎた分を省いていない: ${REPLY//$'\n'/ / }"
+# 起動ログの状態を取れなくなっても（開いたファイルの状態を取る操作を失敗させた写し。0 = 最初から・1 = 1 回目だけ成功して、その後）、
+# 止まるのは画面へ流すことだけ。コマンドが終われば、終了コードを出して、--linger どおりに終わる
+heads=("$SCREEN_NOFOLLOW" '以下は起動ログの続き')
+for ok in 0 1; do
+  mkedit "pane-state$ok" "$NONE" "$STATUS_LINE" "$STATUS_LINE"$'\n'"${STATE_FAULT//@OK@/$ok}"
+  caller_scene "state$ok" "$REPLY"
+  [[ "$REPLY" == $'child-of-pane True\nown-session True\nanswer G\nstarted True\npane-exit 0\nlog started|' ]] \
+    || fail "起動ログの状態を取れない（$ok 回目より後）とき、コマンドが終わっても、画面の中の親が終了コードを出して終わらない: ${REPLY//$'\n'/ / }"
+  [[ "$(<"$T/caller-state$ok.screen")" == "lanes: 起動した pid "<1->"$SCREEN_HEAD_REST"<1->"）。${heads[ok + 1]}"$'\n\n=== 終了: 終了コード 7。この画面は 0 秒後に閉じる ===' ]] \
+    || { cat "$T/caller-state$ok.screen" >&2; fail "起動ログの状態を取れない（$ok 回目より後）とき、画面に出るもの（pid・終了コード）が決まった形でない"; }
+done
 no_work || fail "相手役の受け渡しのフォルダが残っている（用意が誤り）"
-pass "起動ログが、画面が読むより速く増え続けても、コマンドが終われば、画面の中の親は終了コードを出して終わる（1 回に流す量を区切り、終わった時点の大きさまでで止める。遅れすぎた分は、省いたと断って末尾へ進む）"
+pass "起動ログが、画面が読むより速く増え続けても、状態を取れなくなっても、コマンドが終われば、画面の中の親は終了コードを出して終わる（1 回に流す量を区切り、終わった時点の大きさまでで止める。遅れすぎた分は、省いたと断って末尾へ進む。状態を取れないときに止まるのは、流すことだけ）"
 
 # ---- ここから tmux が要る。専用のソケットと、本物の tmux への入口と、テスト用の包み ----
 partial=""
