@@ -21,7 +21,8 @@
 #      シグナル・引数のバイト列）は、付けないときと同じ。違うのは親（tmux の画面のプロセス）だけ。標準出力は pid の 1 行、
 #      起動ログと台帳は同じ（umask・作業場所の fd・シグナル・fd を閉じる処理）
 #   7. 画面に pid・起動ログの続き・終了コードを出し、--linger 秒のあとでセッションが閉じる（利用者の設定が「終わった画面を残す」でも）。
-#      終わった子プロセスを画面の下に残さない（remain-on-exit を切ること / 子の回収）
+#      同じ起動ログへの 2 回目は、今回の分だけを流す。画面の中の親の下に居るのは、起動したコマンドだけ
+#      （remain-on-exit を切ること / 読み口を見出しの後ろへ進めること / 子の回収 / 使わない環境の写しを閉じること）
 #   8. 画面で Ctrl-C を押しても、セッションを閉じても、コマンドは最後まで動く（画面の中の親が Ctrl-C を受け流すこと）
 #   9. 同じ名前のセッションがあれば <名前>-2。ほかのセッションには触らない。9 つとも埋まっていれば exit 2
 #  10. 失敗（起動できないコマンド・起動ログが使えない・読めない・一時フォルダを作れない・読めない作業場所・セッションを作れない）では、
@@ -30,7 +31,8 @@
 #  12. 画面の中の親が動き出す前に、利用者が受け取る pid へ止める合図（TERM）を送ると、exit 2 で pid を出さず、一時フォルダを片付け、
 #      コマンドは始まらない。強制終了（KILL）でも、コマンドは始まらず、セッションは自分で閉じる（合図を受けて片付けること）
 #  13. 呼び出し元の側: テストが相手役（画面の中の親）になる。pid の前後で口が閉じた・通った印が無い・失敗の印 → exit 2。
-#      通った印 → pid を出して exit 0。pid を返さない相手に止める合図を送ると、合図（門）を書かずに終わる
+#      通った印 → pid を出して exit 0。pid を返さない相手に止める合図を送ると、合図（門）を書かずに終わる。
+#      画面の中の親がつながったら、受け渡しの一時フォルダはすぐ消す（つながった後に片付けること）
 #  14. chk-run.sh の直後に --tmux で起動したレビュー（偽の CLI の本物の起動）が、親の記録を使い回す
 #  15. 後片付け: セッション・一時フォルダを残さない。一時領域のどこにも、画面にも、環境変数の値を書いていない
 # 使い方: test-detach-run-tmux.sh [<detach-run.sh>]
@@ -524,6 +526,8 @@ pass "tmux へ渡すもの（サーバーが無い所から）: 実行ファイ�
 tm new-session -d -s keeper -- /bin/sleep 900 || fail "サーバーを残すセッションを作れない（用意が誤り）"
 print -r -- "#!/bin/sh"$'\n'"echo default-shell >> ${(qq)MARKS}"$'\n'"exec /bin/sh \"\$@\"" > "$T/fake-shell"; chmod +x "$T/fake-shell"
 tm set-option -g remain-on-exit on; tm set-option -g default-shell "$T/fake-shell"; tm set-environment -g FAKE_SERVER_MARK from-server
+# パイプの容量を超える大きさの、サーバーの環境（tmux の 1 回の命令には長さの上限があるので、分けて入れる）
+for i in {1..12}; do tm set-environment -g "FAKE_SERVER_BIG_$i" "${(l:8000::x:):-}"; done
 tm new-session -d -s shell-check "true"; wait_for 5 test -s "$MARKS" || fail "既定のシェルの印が効いていない（用意が誤り）"
 tm kill-session -t '=shell-check'; rm -f -- "$MARKS"
 tm kill-session -t '=lt-first'
@@ -569,10 +573,12 @@ run "$DR" "$CWD" -- --tmux lt-screen --linger 4 "$T/logs/screen.log" /bin/sh -c 
 launched "画面の確かめ"
 wait_for 5 screen_has lt-screen "lanes: 起動した pid $pid。" || fail "画面に起動した pid が出ていない: $(screen_tail lt-screen)"
 wait_for 5 screen_has lt-screen '日本語の出力' || fail "画面に起動ログの続きが出ていない: $(screen_tail lt-screen)"
-sleep 0.6
-# 画面の中の親の下に、終わったままの子（入口のシェルが残したもの）が居ない
+sleep 0.8
+# 画面の中の親の下に居るのは、起動したコマンドだけ（入口のシェルが残した子が、終わったまま・待ったままで残っていない。
+# サーバーの環境が大きくても。tmux の画面のプロセスを一覧にする道具に、余分なものを見せない）
 pp="$(pane_pid lt-screen)"; [[ "$pp" == <1-> ]] || fail "画面のプロセスが分からない（用意が誤り）"
-[[ -z "$(ps -ax -o ppid=,stat= | awk -v p="$pp" '$1 == p && $2 ~ /^Z/')" ]] || fail "画面の中の親の下に、終わったままの子プロセスが残っている"
+[[ "$(ps -ax -o ppid=,pid= | awk -v p="$pp" '$1 == p { print $2 }' | tr '\n' ' ')" == "$pid " ]] \
+  || fail "画面の中の親の下に、起動したコマンドのほかの子プロセス（終わったまま・待ったままのもの）が残っている"
 finished "画面の確かめ"
 wait_for 5 screen_has lt-screen '=== 終了: 終了コード 7。この画面は 4 秒後に閉じる ===' || fail "画面に終了コードが出ていない: $(screen_tail lt-screen)"
 screen_has lt-screen 'おわり' || fail "終わる直前の出力が画面に出ていない"
@@ -581,13 +587,21 @@ wait_for 10 hasnt lt-screen || fail "--linger を過ぎても、セッション�
 run "$DR" "$CWD" -- --tmux lt-now --linger 0 "$T/logs/screen.log" /bin/sh -c 'kill -TERM $$'
 launched "--linger 0"; finished "--linger 0"
 wait_for 10 hasnt lt-now || fail "--linger 0 なのに、コマンドが終わってもセッションが閉じない"
-pass "画面に pid・起動ログの続き・終了コードを出し、--linger の間は残して、過ぎたら閉じる（0 ならすぐ。利用者の設定が「終わった画面を残す」でも）。終わった子プロセスを画面の下に残さない"
+# 同じ起動ログへ追記する 2 回目: 画面に流すのは今回の分だけ（前の回の出力と、見出しは流さない）
+run "$DR" "$CWD" -- --tmux lt-again --linger 30 "$T/logs/screen.log" /bin/sh -c 'echo "2 回目の出力"'
+launched "同じ起動ログへの 2 回目"; finished "同じ起動ログへの 2 回目"
+wait_for 5 screen_has lt-again '2 回目の出力' || fail "2 回目の起動で、画面に今回の出力が出ていない: $(screen_tail lt-again)"
+if screen_has lt-again '日本語の出力' || screen_has lt-again '=== detach-run ==='; then fail "画面に、前の回の出力か見出し（今回の分より前）を流した"; fi
+[[ "$(grep -c '^=== detach-run ===$' "$T/logs/screen.log")" == 3 ]] || fail "同じ起動ログへ追記していない（見出しが 3 回分でない）"
+tm kill-session -t '=lt-again'
+pass "画面に pid・起動ログの続き・終了コードを出し、--linger の間は残して、過ぎたら閉じる（0 ならすぐ。利用者の設定が「終わった画面を残す」でも）。同じ起動ログへの 2 回目は今回の分だけを流す。画面の中の親の下に居るのは、起動したコマンドだけ"
 
 # ---- 8. 画面で Ctrl-C を押しても、セッションを閉じても、コマンドは最後まで動く ----
 run "$DR" "$CWD" -- --tmux lt-keys --linger 30 "$T/logs/keys.log" "$T/slow.sh" 3 "$T/keys.mark"
 launched "Ctrl-C とセッションを閉じる確かめ"
 wait_for 5 screen_has lt-keys 'slow: 開始' || fail "画面に起動ログの続きが出ていない（用意が誤り）"
-tm send-keys -t '=lt-keys:' C-c; tm send-keys -t '=lt-keys:' C-z
+tm send-keys -t '=lt-keys:' C-c || true
+tm send-keys -t '=lt-keys:' C-z 2>/dev/null || true
 sleep 0.5
 alive "$pid" && has lt-keys || fail "画面の Ctrl-C・Ctrl-Z で、コマンドかセッションが止まった"
 tm kill-session -t '=lt-keys'
@@ -612,6 +626,8 @@ tm kill-session -t "=$long100"
 for i in 2 3 4 5 6 7 8 9; do tm new-session -d -s "keeper-$i" -- /bin/sleep 60 || fail "keeper-$i を作れない（用意が誤り）"; done
 run "$DR" "$CWD" -- --tmux keeper --linger 0 "$T/logs/same.log" /usr/bin/touch "$T/started-9"
 stopped "同じ名前が 9 つとも埋まっている" 2 "$MSG_MANY" "$T/started-9"
+[[ "$(sessions)" == "keeper keeper-2 keeper-3 keeper-4 keeper-5 keeper-6 keeper-7 keeper-8 keeper-9 " ]] \
+  || fail "同じ名前が埋まっていて起動をやめたとき、元からあったセッションに触った（今あるもの: $(sessions)）"
 for i in 2 3 4 5 6 7 8 9; do tm kill-session -t "=keeper-$i"; done
 no_work || fail "同じ名前が埋まっていたとき、受け渡しの一時フォルダを残した"
 pass "同じ名前のセッションがあれば <名前>-2 を使い（標準エラーに決まった 1 行）、元のセッションには触らない。100 字の名前でも同じ。9 つとも埋まっていれば exit 2"
@@ -768,6 +784,7 @@ rm -f -- "$T/pane.note"; wrap_mode pane:hold
 run_bg "$DR" "$CWD" -- --tmux lt-pane --linger 0 "$T/logs/13.log" /usr/bin/touch "$T/started-13"
 wait_for 10 grep -q '^request ' "$T/pane.note" || fail "相手役（hold）が中身を受け取っていない（用意が誤り）"
 job_running "$caller" || fail "呼び出し元が、pid を待たずに終わった（用意が誤り）"
+no_work || fail "画面の中の親がつながった後も、受け渡しの一時フォルダが残っている（つながったら、すぐ消す。この後で強制終了されても残さない）"
 kill -TERM "$caller"
 end_bg 10 "pid を待っている間の止める合図"
 wrap_mode
