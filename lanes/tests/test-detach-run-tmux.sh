@@ -63,9 +63,18 @@ esac
 scratch_base="${LANES_SCRATCH:-${TMPDIR:-}}"
 [[ -n "$scratch_base" && -d "$scratch_base" ]] || { print -u2 'LANES_SCRATCH か TMPDIR の既存ディレクトリが必要'; exit 2; }
 T="$(mktemp -d "${scratch_base%/}/test-detach-tmux.XXXXXX")"; T="${T:A}"
-real_tmux=""; sock=""; sock_dir=""
+# <pid>: このテストのジョブで、いま動いているか（終わったジョブの pid は、別のプロセスに使い回されうるので数えない）
+job_running() {
+  local j
+  for j in ${(v)jobstates}; do [[ "$j" == running:*:"$1"=* ]] && return 0; done
+  return 1
+}
+real_tmux=""; sock=""; sock_dir=""; caller=""
 cleanup() {
   local st=$?
+  # 裏で動かした呼び出し元が残っていたら、先に止める（このテストのいま動いているジョブだけ。サーバーを終わらせた後で、
+  # 残った呼び出し元が包みを呼ぶと、専用のソケットにサーバーが立ち上がり直す）
+  if [[ -n "$caller" ]] && job_running "$caller"; then kill -KILL "$caller" 2>/dev/null || true; fi
   # 専用のソケットがあるときだけ、そのサーバーを -S で指して終わらせる（-S なしで呼ぶと、利用者のサーバーへ届く）
   if [[ -n "$real_tmux" && -n "$sock" && -S "$sock" ]]; then
     /usr/bin/env -i "$real_tmux" -S "$sock" kill-server > /dev/null 2>&1 || true
@@ -142,12 +151,6 @@ run_bg() {
   ( cd "$dir" && exec /usr/bin/env -i "${base_env[@]}" "${vars[@]}" /bin/zsh -f "$script" "$@" ) \
     > "$T/out" 2> "$T/err" < "$T/stdin.txt" &
   caller=$!
-}
-# <pid>: このテストのジョブで、いま動いているか（終わったジョブの pid は、別のプロセスに使い回されうるので数えない）
-job_running() {
-  local j
-  for j in ${(v)jobstates}; do [[ "$j" == running:*:"$1"=* ]] && return 0; done
-  return 1
 }
 job_done() { ! job_running "$1"; }
 # <秒> <説明>: 裏の呼び出し元が終わるのを待ち、終了コードを rc に入れる（終わらなければ、いま動いている自分のジョブだけ止めて失敗）
