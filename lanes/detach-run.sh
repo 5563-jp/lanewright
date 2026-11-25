@@ -23,6 +23,7 @@
 #     待ってからセッションが閉じる。
 #   - 画面に流す起動ログの続きは、普通のファイルのときだけ（/dev/null のような文字デバイスは流さない）。1 回に流す量を区切り、画面が
 #     遅れすぎたら間を省くので、起動ログがどんな速さで増えても、コマンドが終われば終了コードが出て、--linger どおりに閉じる。
+#     起動ログを読めなくなった・状態を取れなくなったときも、止まるのは流すことだけ（終了コードは出て、--linger どおりに閉じる）。
 #   - セッション名は英数と _ -（先頭は英数・100 字まで）。同じ名前のセッションがあれば <名前>-2 … <名前>-9 を順に試す。
 #   - tmux は、下の本文に書いた 3 つの場所だけから選ぶ（PATH からは探さない）。tmux へ渡す環境変数は、名前を挙げた 6 つだけ
 #     （呼び出し元からは TMUX_TMPDIR と LANG。HOME・USER・LOGNAME は OS のユーザー情報から。PATH は決め打ち。TMUX_TMPDIR が相対なら、
@@ -445,14 +446,20 @@ def tmux_pane(work):
                 data = data[os.write(1, data):]
         except OSError:
             sys.exit(0)   # 画面が無くなった。起動したコマンドはそのまま動く
-    # 画面へ流すのは、普通のファイルの起動ログだけ（/dev/null のような文字デバイスは流さない。/dev/zero は、いくら読んでも終わらない）
-    follow = stat.S_ISREG(os.fstat(log_r).st_mode)
+    def size():
+        """起動ログの、画面へ流してよい所まで（= 今の大きさ）。画面へ流すのは普通のファイルだけなので、普通のファイルでないとき
+        （/dev/null のような文字デバイス。/dev/zero は、いくら読んでも終わらない）と、状態を取れないときは -1（流すものが無い）。
+        状態を取れなくなっても、止まるのは画面へ流すことだけ（呼ぶ側は、子の終了を見る・終了コードを出す・--linger を待つ、を続ける）"""
+        try:
+            state = os.fstat(log_r)
+            return state.st_size if stat.S_ISREG(state.st_mode) else -1
+        except OSError:
+            return -1
     def forward(end):
         """起動ログの end バイト目までの続きを、1 回分（多くても FORWARD_CHUNK バイト）だけ画面へ流す。流したら True。
         量を区切るので、追記が読むより速くても、呼ぶ側は 1 回ごとに子の終了を確かめられる。画面が FORWARD_LAG バイトより
-        遅れていたら、間を省いて end の手前へ進む（省いたことを 1 行出す。全部は起動ログにある）"""
-        if not follow:
-            return False
+        遅れていたら、間を省いて end の手前へ進む（省いたことを 1 行出す。全部は起動ログにある）。
+        end が読む位置より手前（size の -1 も）・読めないときは、流さずに False（どちらも、止まるのは流すことだけ）"""
         try:
             at = os.lseek(log_r, 0, os.SEEK_CUR)
             if end - at > FORWARD_LAG:
@@ -464,10 +471,10 @@ def tmux_pane(work):
         show(chunk)
         return bool(chunk)
     show(("lanes: 起動した pid %d。この画面を閉じても、Ctrl-C を押しても、起動したコマンドは止まらない（止めるのは kill %d）。" % (pid, pid)
-          + ("以下は起動ログの続き\n" if follow else "起動ログが普通のファイルでないので、続きはこの画面に流さない\n")).encode("utf-8"))
+          + ("以下は起動ログの続き\n" if size() >= 0 else "起動ログが普通のファイルでないので、続きはこの画面に流さない\n")).encode("utf-8"))
     code = None
     while code is None:
-        moved = forward(os.fstat(log_r).st_size)
+        moved = forward(size())
         # 終わった子を 1 つずつ回収する（入口のシェルが残した、環境の写しと本文を流し終えた子も。終わったまま画面の下に残さない）
         done, ended = os.waitpid(-1, os.WNOHANG)
         if done == pid:
@@ -475,7 +482,7 @@ def tmux_pane(work):
         elif not done and not moved:
             time.sleep(0.2)
     # 子が終わった時点の大きさまでを流して終える（その後の追記は流さない。別の書き手が書き続けても、終わりがある）
-    end = os.fstat(log_r).st_size
+    end = size()
     while forward(end):
         pass
     code = os.WEXITSTATUS(code) if os.WIFEXITED(code) else 128 + os.WTERMSIG(code)
