@@ -29,6 +29,8 @@
 #   - 画面の中の親は、この入口を /bin/zsh -f で呼び直したもの（--tmux-pane。手では呼ばない）。tmux のサーバーの環境は、下の exec -c で
 #     捨てる。呼び出し元とは、自分だけが読める一時フォルダ（TMPDIR があればその下。無ければ /tmp）のソケットでつなぎ、環境変数・コマンドと、
 #     呼び出し元が開いた起動ログ・作業場所の fd を受け取る（値をファイル・引数・tmux の環境には書かない。画面の側はパスを開かない）。
+#     つながった直後に、両方の端で、相手が自分と同じ利用者であることを OS に確かめる。違う・確かめられないなら、何も送らず・受け取らずに
+#     閉じる（一時フォルダの名前を別の利用者に差し替えられても、その利用者が渡すコマンドを始めない）。
 #   - 門つきの起動: 画面の中の親が作った子は、付けないときと同じ形に整えてから、コマンドを始める前の「門」で待つ。門を開けるのは
 #     呼び出し元だけ（子の pid を受け取ったら、合図を書く）。合図の前に呼び出し元が止められた・失敗した・期限（20 秒）が来たときは、
 #     コマンドは一度も始まらない（失敗を返したのに動き続けない。始まったコマンドを後から止める処理も無い）。
@@ -125,6 +127,22 @@ def recv_exact(conn, size):
             raise EOFError
         data += chunk
     return data
+
+def peer_uid(conn):
+    """ソケットの相手の利用者番号（OS が、つないだ時点の相手について返すもの）。取れない OS・取れなかったときは None。
+    呼ぶ側は、自分の番号と同じでなければ、何も送らず・受け取らずに閉じる（None も「同じでない」に入る）。
+    macOS・BSD は LOCAL_PEERCRED（0 = SOL_LOCAL。struct xucred: 版・利用者番号・…。版が 0 でなければ、並びが分からないので None）、
+    Linux は SO_PEERCRED（struct ucred: pid・利用者番号・…）。どちらも、利用者番号は 4 バイト目からの 4 バイト"""
+    try:
+        if hasattr(socket, "LOCAL_PEERCRED"):
+            cred = conn.getsockopt(0, socket.LOCAL_PEERCRED, 76)
+            known = len(cred) >= 8 and cred[:4] == bytes(4)
+        else:
+            cred = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+            known = len(cred) == 12
+    except (OSError, AttributeError):
+        return None
+    return int.from_bytes(cred[4:8], sys.byteorder) if known else None
 
 def tmux_options():
     """--tmux <セッション名> [--linger <秒>] を読んで引数から外し、コマンドを起動する関数（subprocess.Popen の代わり）を返す。
@@ -247,6 +265,10 @@ def tmux_launch(tmux, session, linger, cmd, stdout, env, **plain):
             raise Refused("同じ名前の tmux のセッションが多すぎるので起動しない（終わったセッションを閉じるか、別の名前にする）")
         srv.settimeout(left())
         conn = waiting(srv.accept)[0]
+        # 相手が自分と同じ利用者だと OS が言うまで、何も送らない（受け渡しのフォルダの名前を、作ってから開くまでの間に別の利用者に
+        # 差し替えられると、その利用者がつなげる）
+        if peer_uid(conn) != os.geteuid():
+            raise Refused("受け渡しの相手が、同じ利用者だと確かめられないので起動しない")
         tidy()   # つながったので、受け渡しのフォルダはもう要らない
         # 画面へ流す読み口は、渡す直前に開いて、子へ渡す書き口と同じものか確かめる（別のファイルの中身を画面へ流さない）。
         # 画面の側は、起動ログも作業場所もパスでは開かない（ここで開いた fd をそのまま使う）
@@ -357,7 +379,7 @@ def gated_child(conn, status, log_w, here, mask, ignored, cmd, env):
 
 def tmux_pane(work):
     """--tmux で作った画面の中の親（このスクリプトが tmux 経由で自分を呼ぶ。手では呼ばない）。呼び出し元のソケットへつなぎ、
-    起動ログ（書き口・読み口）と作業場所の fd、コマンド、環境変数を受け取り、子を門の前で待たせる。子がコマンドへ切り替わったら、
+    相手が同じ利用者だと確かめてから、起動ログ（書き口・読み口）と作業場所の fd、コマンド、環境変数を受け取り、子を門の前で待たせる。子がコマンドへ切り替わったら、
     画面に pid と起動ログの続きを流し、コマンドが終わったら終了コードを出して、少し待ってから終わる（終わるとセッションが閉じる）。
     門を開けるのは呼び出し元だけで、この親は子を止めない。受け渡しのフォルダには触らない（消すのは作った側）。"""
     try:
@@ -372,6 +394,10 @@ def tmux_pane(work):
         os.chdir(work)
         conn.connect("s")
         os.chdir("/")
+        # 相手が自分と同じ利用者だと OS が言うまで、何も受け取らない（受け渡しのフォルダの名前を別の利用者に差し替えられると、
+        # その利用者のソケットへつながる。そこから受け取ったコマンドを、この利用者の権限で始めない）
+        if peer_uid(conn) != os.geteuid():
+            raise OSError
         mark, extra = conn.recvmsg(1, socket.CMSG_SPACE(3 * 4))[:2]
         raw = extra[0][2] if mark == b"F" and len(extra) == 1 and extra[0][:2] == (socket.SOL_SOCKET, socket.SCM_RIGHTS) else b""
         log_w, log_r, here = [int.from_bytes(raw[i:i + 4], sys.byteorder) for i in range(0, len(raw), 4)]
