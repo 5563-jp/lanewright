@@ -39,7 +39,8 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
   command running. Right after the handover socket connects, both ends ask the OS for the peer's user ID and close without sending or
   receiving anything unless it is their own. Log forwarding to the pane is chunked and limited to regular files, so the exit code still appears
   (and the session still closes after `--linger`) when the launch log grows faster than it can be read or never ends (`/dev/zero`).
-  A relative `TMUX_TMPDIR` is made absolute against the caller's working directory. The launch log and working directory are handed over as already-open file descriptors. The caller only creates its own session;
+  A relative `TMUX_TMPDIR` is made absolute against the caller's working directory.
+  The launch log and working directory are handed over as already-open file descriptors. The caller only creates its own session;
   it never closes or looks up other sessions. Because the command runs as a descendant of the tmux server, resource limits, priority, the macOS
   login context, and any sandbox come from the tmux server, not from the caller. Without `--tmux`, nothing changes.
 
