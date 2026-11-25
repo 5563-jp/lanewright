@@ -377,10 +377,7 @@ def pane_exit():
         pane.kill()
         pane.wait()
         return "timeout"
-srv.settimeout(LIMIT)
-conn = srv.accept()[0]
-os.unlink(os.path.join(work, "s")); os.rmdir(work)
-conn.settimeout(LIMIT)
+# 起動ログ・コマンド・渡す中身は、つながる前に用意しておく（つながってから送るまでの間に、時間のかかることをしない）
 log = os.path.join(T, "caller-%s.log" % scene)
 w = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
 r = os.open(log, os.O_RDONLY)
@@ -396,6 +393,10 @@ if flood:
     linger = b"0"
     os.write(w, (b"flood " * 10 + b"\n") * 34000)
 body = b"\0".join([linger, b"18", b"", b"%d" % len(cmd)] + cmd + [b"PATH=/usr/bin:/bin", b"FAKE=1"])
+srv.settimeout(LIMIT)
+conn = srv.accept()[0]
+os.unlink(os.path.join(work, "s")); os.rmdir(work)
+conn.settimeout(LIMIT)
 def outcome():
     result("pane-exit", pane_exit())
     time.sleep(0.3)
@@ -430,12 +431,6 @@ if scene.startswith("peer"):
     conn.close()
     outcome()
 pid = int(pid)
-ps = subprocess.run(["/bin/ps", "-o", "ppid=,pgid=", "-p", str(pid)], capture_output=True).stdout.split()
-result("child-of-pane", len(ps) == 2 and int(ps[0]) == pane.pid)
-result("own-session", len(ps) == 2 and int(ps[1]) == pid and os.getsid(pid) == pid)
-if scene == "no-ack":
-    conn.close()
-    outcome()
 def answered():
     data = b""
     try:
@@ -448,8 +443,15 @@ def answered():
         data += b"(timeout)"
     return data.decode()
 if scene == "no-gate":
-    # pid は受け取ったが、合図を書かない（口も閉じない）。子は、自分の期限で、コマンドを始めずに終わるはず（失敗の印が返る）
+    # pid は受け取ったが、合図を書かない（口も閉じない）。子は、自分の期限で、コマンドを始めずに終わるはず（失敗の印が返る）。
+    # 子が門の前に居る間の確かめ（下の ps）は、ここではしない（子は、短くした期限で自分から終わるので、確かめがその期限と競う）
     result("answer", answered())
+    outcome()
+ps = subprocess.run(["/bin/ps", "-o", "ppid=,pgid=", "-p", str(pid)], capture_output=True).stdout.split()
+result("child-of-pane", len(ps) == 2 and int(ps[0]) == pane.pid)
+result("own-session", len(ps) == 2 and int(ps[1]) == pid and os.getsid(pid) == pid)
+if scene == "no-ack":
+    conn.close()
     outcome()
 if scene == "pane-killed":
     pane.kill()
@@ -550,7 +552,7 @@ caller_scene silent "$PANE_SHORT"
 [[ "$REPLY" == $'pane-exit 2\nstarted False\nlog-bytes 0' ]] \
   || fail "相手がつないだまま何も送らないとき、画面の中の親が期限で終わらない: ${REPLY//$'\n'/ / }"
 caller_scene no-gate "$PANE_SHORT"
-[[ "$REPLY" == $'child-of-pane True\nown-session True\nanswer F\npane-exit 2\nstarted False\nlog-bytes 0' ]] \
+[[ "$REPLY" == $'answer F\npane-exit 2\nstarted False\nlog-bytes 0' ]] \
   || fail "合図が来ないまま期限が来たとき、子がコマンドを始めずに終わらない・失敗の印を返さない・画面の中の親が終わらない: ${REPLY//$'\n'/ / }"
 no_work || fail "相手役の受け渡しのフォルダが残っている（用意が誤り）"
 pass "相手の確かめと期限（画面の側）: 相手が同じ利用者だと OS が言わない（別の利用者の番号・取れない）とき、画面の中の親は何も受け取らずに終わる（子を作らない・コマンドは始まらない）。相手が何も送らない・合図を書かないときは、自分の期限で、コマンドを始めずに終わる"
