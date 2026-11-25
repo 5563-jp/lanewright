@@ -11,8 +11,9 @@
 #      合図を書いたら始まり、画面に pid・起動ログの続き・終了コードが出る。切り替われないコマンドは、失敗の印が返る。pid を受け取った
 #      後で画面の中の親が居なくなっても、合図を書けばコマンドは最後まで動く（門で待つこと / 結果を子が直に返すこと）
 #   5. 相手の確かめと期限（画面の側）: 相手が同じ利用者だと OS が言わない（別の利用者の番号が返る・取れない）とき、画面の中の親は、
-#      何も受け取らずに終わる（子を作らない = pid を返さない。コマンドは始まらない）。相手がつないだまま何も送らない・合図を書かない
-#      ときは、自分の期限で、コマンドを始めずに終わる（相手の利用者を確かめること / 取れないときは閉じること / 画面の側の期限）
+#      受け取りの操作を 1 度も呼ばずに終わる（受け取りの操作を見張る写しで見る。子を作らない = pid を返さない。コマンドは始まらない）。
+#      相手がつないだまま何も送らない・合図を書かないときは、自分の期限で、コマンドを始めずに終わる
+#      （相手の利用者を確かめること / 確かめるのは、受け取る前であること / 取れないときは閉じること / 画面の側の期限）
 #   6. 起動ログの続きを流すことと、子の終了を見ることは別: 起動ログが、画面が読むより速く増え続けても（相手役が、画面から読めた量の
 #      2 倍を足し続ける）、コマンドが終われば終了コードを出して終わる。遅れすぎた分は、省いたと断って末尾へ進む。起動ログの状態を
 #      取れなくなっても（最初から・途中から）、終了コードを出して、--linger どおりに終わる
@@ -28,22 +29,25 @@
 #      シグナル・引数のバイト列）は、付けないときと同じ。違うのは親（tmux の画面のプロセス）だけ。標準出力は pid の 1 行、
 #      起動ログと台帳は同じ。消した作業場所からでも、入口・一時フォルダ・tmux のサーバーの置き場（TMUX_TMPDIR）が相対パスでも起動できる
 #      （umask・作業場所の fd・シグナル・fd を閉じる処理 / 相対パスを絶対にすること）
-#   9. 画面に pid・起動ログの続き・終了コードを出し、--linger の間は残して、0 ならすぐ閉じる（利用者の設定が「終わった画面を残す」でも）。
-#      同じ起動ログへの 2 回目は、今回の分だけを流す。画面の中の親の下に居るのは、起動したコマンドだけ。読み終わらない起動ログ
-#      （/dev/zero）は流さず、コマンドが終われば終了コードを出して閉じる
-#      （remain-on-exit を切ること / 読み口を見出しの後ろへ進めること / 子の回収 / 使わない環境の写しを閉じること / 流すのは普通のファイルだけ）
+#   9. 画面に pid・起動ログの続き・終了コードを出し、--linger の間は残して、過ぎたら自分で閉じる（短い正の値で、手で閉じずに見る）。
+#      0 ならすぐ閉じる（利用者の設定が「終わった画面を残す」でも）。同じ起動ログへの 2 回目は、今回の分だけを流す。画面の中の親の
+#      下に居るのは、起動したコマンドだけ。読み終わらない起動ログ（/dev/zero）は流さず、コマンドが終われば終了コードを出して閉じる
+#      （--linger の秒数だけ待つこと / remain-on-exit を切ること / 読み口を見出しの後ろへ進めること / 子の回収 /
+#      使わない環境の写しを閉じること / 流すのは普通のファイルだけ）
 #  10. 画面で Ctrl-C・Ctrl-Z・Ctrl-\ を押しても、画面の中の親は動き続け（押した後の新しい出力が画面に届く）、セッションを閉じても、
 #      コマンドは最後まで動く（画面の中の親が、画面のキーを受け流すこと）
 #  11. 同じ名前のセッションがあれば <名前>-2。ほかのセッションには触らない。9 つとも埋まっていれば exit 2
 #  12. 失敗（起動できないコマンド・起動ログが使えない・読めない・一時フォルダを作れない・読めない作業場所・セッションを作れない）では、
 #      付けないときと同じ文言と終了コード（共通の失敗）か、決まった文言で exit 2。コマンドを始めず、セッションも一時フォルダも残さない
-#  13. 起動ログを開いた後で別のファイルへ置き換えられたら、起動せず、その中身を画面へ流さない（読み口の照合）
+#  13. 起動ログを開いた後で別のファイルへ置き換えられたら、起動しない（読み口の照合）
 #  14. 画面の中の親が動き出す前に、利用者が受け取る pid へ止める合図（TERM）を送ると、exit 2 で pid を出さず、一時フォルダを片付け、
 #      コマンドは始まらない。強制終了（KILL）でも、コマンドは始まらず、セッションは自分で閉じる。外から止めなくても、画面の中の親が
-#      つながってこない・tmux が返事をしないときは、期限で exit 2 になり、片付ける（合図を受けて片付けること / 待つ所の期限）
+#      つながってこない・tmux が返事をしないときは、期限で exit 2 になり、片付ける（その待ちまで来ていたことも見る）
+#      （合図を受けて片付けること / 待つ所の期限）
 #  15. 呼び出し元の側: テストが相手役（画面の中の親）になる。pid の前後で口が閉じた・通った印が無い・失敗の印 → exit 2。
 #      通った印 → pid を出して exit 0。相手が同じ利用者だと OS が言わない（別の利用者の番号が返る・取れない）ときは、環境変数・
-#      コマンド・fd を送らずに exit 2。pid を返さない相手には、止める合図でも期限でも、門を開ける合図を書かずに終わる。
+#      コマンド・fd を送らずに exit 2。pid を返さない相手には、止める合図でも期限でも、門を開ける合図を書かずに終わる
+#      （相手役が、中身を受け取った後で「合図が来ないまま口が閉じた」と記録していること）。
 #      画面の中の親がつながったら、受け渡しの一時フォルダはすぐ消す
 #      （相手の利用者を確かめること / 取れないときは閉じること / つながった後に片付けること / やり取りの期限）
 #  16. chk-run.sh の直後に --tmux で起動したレビュー（偽の CLI の本物の起動）が、親の記録を使い回す
@@ -61,14 +65,17 @@
 #     使う。--tmux で起動する項目（7〜）の候補の先はテスト用の包みで、最初の一歩は環境を書き換えない /usr/bin/perl（/bin/sh や python3 を
 #     最初に通すと、PWD・LC_CTYPE などが足されて、検査対象が渡したものと見分けられない）。渡された環境変数の名前をそこで控えてから、
 #     入口へ移る。入口は、引数・作業場所・決まった名前の値の指紋を記録し、本物の tmux へは、控えた名前の変数だけを渡す
-#   - 期限・相手の確かめのテストは、決まった 1 行だけをさらに置き換えた写し（期限の秒数・相手の利用者番号を返す行）で回す
+#   - 相手の確かめ・期限・起動ログの状態のテストは、決まった 1 行だけをさらに置き換えた写し（相手の利用者番号を返す行）か、決まった
+#     1 行の前後にテスト用の行を足した写し（受け取りの操作の見張り・状態を取る操作の失敗・試したい待ちの直前で期限を短くする行）で回す。
+#     期限を短くするのは、試したい待ちだけ（そこまでの準備は、ふつうの期限のまま）。その待ちまで来ていたことを、相手役の記録で必ず見る
 #   - detach-run.sh は、空の環境（env -i）と作り物の変数だけで回す。本物の環境変数は渡さない。値は出力にもファイルにも出さない
 #     （比べるのは名前と指紋）
 #   - 利用者の設定は読まない。作業ツリーの目印は空の .git フォルダ（16 だけ、既存のテストと同じ隔離で git を使う）。全データを一時領域に置く
 #   - 結果は、一時領域の名前（空白・改行・= ・[ があるかどうか）にも、起動元の umask・無視にしているシグナルにも依らない。パスは文字列で
 #     比べる（16 だけは、名前に改行があると chk-run.sh の側が記録を使い回せないので、省いて LANES_PARTIAL を出す）
 #   - 動いている間の確かめは、秒数でなく合図で進める: 起動するコマンド（steps.sh）と、遅らせる相手は、テストが合図のファイルを作るまで
-#     待つ。待ち時間の上限があるのは、確かめる側だけ（上限に当たるのは、赤のときだけ）
+#     待つ。待ち時間の上限があるのは、確かめる側だけ（上限に当たるのは、赤のときだけ）。決まった秒数を待ってから「まだあること」を
+#     見る確かめは置かない。待つ相手（合図を待つコマンド・遅らせた相手）は、後片付けの合図（release-all）でも終わる
 #   - 検査対象が返した番号のプロセスには、何も送らない（居るかどうかを見るだけ）。止めるのは、このテストのいま動いているジョブだけ
 #   - tmux が決まった場所に無い・ソケットのパスが長すぎて置けない（LANES_TEST_SOCKET_ROOT に浅いフォルダを渡すと、そこへ置く）・
 #     /usr/bin/perl が無い（または環境変数を足す）ときは、1〜6 だけを回して「LANES_PARTIAL: <理由>」を出す
@@ -158,8 +165,7 @@ SCREEN_NOFOLLOW='起動ログが普通のファイルでないので、続きは
 # 写しを作るときに置き換える行（検査対象に、この形の行がちょうどあること）
 PEER_LINE='    return int.from_bytes(cred[4:8], sys.byteorder) if known else None'
 HANDSHAKE_LINE='HANDSHAKE_SECONDS = 20'
-PANE_LINE='PANE_SECONDS = HANDSHAKE_SECONDS + 5'
-# 写しに行を足すときの目印（検査対象の行は残して、その後ろにテスト用の行を足す）
+# 写しに行を足すときの目印（検査対象の行は残して、その前か後ろにテスト用の行を足す）
 #  子が門を通ったと分かった所。ここから、開いたファイルの状態を取る操作（os.fstat）を、@OK@ 回だけ成功させて、その後は失敗させる
 STATUS_LINE='    os.close(status)'
 STATE_FAULT='    def no_state(fd, real=os.fstat, calls=[]):
@@ -168,6 +174,26 @@ STATE_FAULT='    def no_state(fd, real=os.fstat, calls=[]):
             raise OSError
         return real(fd)
     os.fstat = no_state'
+#  部品を読み込む行。この後ろで、受け取りの操作（ソケットの 6 つと、fd を直に読む os.read）を「画面に目印を出して、失敗する」ものに
+#  置き換える（画面の中の親が、相手を断る前に 1 度でも受け取りの操作を呼ぶと、画面に目印が残る）
+IMPORT_LINE='    import pwd, signal, socket, time'
+RECV_SEEN='TEST: 受け取りの操作を呼んだ'
+RECV_WATCH='    def recv_seen(*args):
+        say("'"$RECV_SEEN"'")
+        raise OSError
+    for recv_op in ("recv", "recvfrom", "recv_into", "recvfrom_into", "recvmsg", "recvmsg_into"):
+        setattr(socket.socket, recv_op, recv_seen)
+    os.read = recv_seen'
+#  期限を試したい待ちの行。その直前で、期限を短くする（そこまでの準備は、ふつうの期限のまま。待ちの行そのものは、検査対象のまま）。
+#  画面の側（中身を待つ・門の合図を待つ）は「期限があれば 2 秒に縮める。無ければ、無いまま」にする（期限を付け忘れた退行は、
+#  縮められずに待ち続けて赤になる。テストが期限を付けてしまわない）
+RECV_LINE='        mark, extra = conn.recvmsg(1, socket.CMSG_SPACE(3 * 4))[:2]'
+GATE_LINE='        if conn.recv(1) != b"A":'
+SHORT_WAIT='        conn.settimeout(conn.gettimeout() and 2)'
+#  呼び出し元の側（tmux を呼ぶ・つながるのを待つ・pid を待つ）は、期限が 1 つの deadline なので、それを近づける
+TMUX_CALL_LINE='        for number in range(1, 10):'
+ACCEPT_LINE='        srv.settimeout(left())'
+PID_LINE='        pid = waiting(exchange)'
 HEADER=$'\n=== detach-run ==='
 print -r -- '呼び出し元の標準入力' > "$T/stdin.txt"
 # どの起動にも渡す作り物の変数（HOME・LOGNAME は、渡さないと zsh が本物の値を入れるので必ず渡す）。鍵のつもりの印は毎回違う値
@@ -257,14 +283,15 @@ mkcopy() {
 }
 # 写しの 1 行だけを、さらに置き換えた写しを作る: mkedit <名前> <元のスクリプト> <元の行> <新しい行> → REPLY
 # （相手の利用者番号を返す行・期限の秒数。<新しい行> に元の行を入れて、その前後にテスト用の行を足すのにも使う。元の行がちょうど 1 つ
-# あること・置き換えが効いていること（中身が変わり、新しい行が入っている）を先に確かめる）
+# あること・置き換えが効いていること（中身が変わり、新しい行の 1 行目が入っている）を確かめる。行の並びで置き換える: 文字列の
+# パターンで前後を切り出すと、後ろのほうの行では 1 回に 1 秒以上かかる）
 mkedit() {
-  local body; body="$(<"$2")"
-  local rest="${body#*$'\n'"$3"$'\n'}"
-  [[ "$rest" != "$body" && "$rest" != *$'\n'"$3"$'\n'* ]] || fail "写しを作れない（置き換える行が、ちょうど 1 つでない）: $1"
-  local edited="${body%%$'\n'"$3"$'\n'*}"$'\n'"$4"$'\n'"$rest"
-  [[ "$edited" != "$body" && "$edited" == *$'\n'"$4"$'\n'* ]] || fail "写しを作れない（置き換えが効いていない）: $1"
-  REPLY="$T/$1.sh"; print -r -- "$edited" > "$REPLY"
+  local -a rows; rows=("${(@f)$(<"$2")}")
+  local at=${rows[(ie)$3]}
+  (( at <= ${#rows} && at == ${rows[(Ie)$3]} )) || fail "写しを作れない（置き換える行が、ちょうど 1 つでない）: $1"
+  rows[at]="$4"
+  REPLY="$T/$1.sh"; print -r -- "${(F)rows}" > "$REPLY"
+  [[ "$4" != "$3" ]] && grep -qxF -- "${4%%$'\n'*}" "$REPLY" && ! cmp -s "$2" "$REPLY" || fail "写しを作れない（置き換えが効いていない）: $1"
 }
 
 # 起動したコマンドの側から見えるものを書き出す小道具（環境変数は名前と指紋だけ。値は書かない）: probe.py <書き出す先> [引数...]
@@ -379,9 +406,6 @@ here = os.open(".", os.O_RDONLY)
 srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 os.chdir(work); srv.bind("s"); os.fchdir(here); srv.listen(1)
 screen = os.path.join(T, "caller-%s.screen" % scene)
-# 画面は、ふつうはファイル。flood の場面だけ、この相手役が読む速さを決められるパイプにする
-pane = subprocess.Popen(["/bin/zsh", "-f", script, "--tmux-pane", work], env={}, cwd="/", stdin=subprocess.DEVNULL,
-                        stdout=subprocess.PIPE if flood else open(screen, "wb"), stderr=subprocess.STDOUT, start_new_session=True)
 def result(name, value):
     print(name, value, flush=True)
 def pane_exit():
@@ -392,7 +416,8 @@ def pane_exit():
         pane.kill()
         pane.wait()
         return "timeout"
-# 起動ログ・コマンド・渡す中身は、つながる前に用意しておく（つながってから送るまでの間に、時間のかかることをしない）
+# 起動ログ・コマンド・渡す中身は、画面の中の親を起動する前に用意しておく（起動した後は、つながるのを待って、すぐ送るだけ。
+# 画面の中の親の期限と、この相手役の準備を競わせない）
 log = os.path.join(T, "caller-%s.log" % scene)
 w = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
 r = os.open(log, os.O_RDONLY)
@@ -411,6 +436,9 @@ if flood:
     linger = b"0"
     os.write(w, (b"flood " * 10 + b"\n") * 34000)
 body = b"\0".join([linger, b"18", b"", b"%d" % len(cmd)] + cmd + [b"PATH=/usr/bin:/bin", b"FAKE=1"])
+# 画面は、ふつうはファイル。flood の場面だけ、この相手役が読む速さを決められるパイプにする
+pane = subprocess.Popen(["/bin/zsh", "-f", script, "--tmux-pane", work], env={}, cwd="/", stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE if flood else open(screen, "wb"), stderr=subprocess.STDOUT, start_new_session=True)
 srv.settimeout(LIMIT)
 conn = srv.accept()[0]
 os.unlink(os.path.join(work, "s")); os.rmdir(work)
@@ -462,7 +490,8 @@ def answered():
     return data.decode()
 if scene == "no-gate":
     # pid は受け取ったが、合図を書かない（口も閉じない）。子は、自分の期限で、コマンドを始めずに終わるはず（失敗の印が返る）。
-    # 子が門の前に居る間の確かめ（下の ps）は、ここではしない（子は、短くした期限で自分から終わるので、確かめがその期限と競う）
+    # 子が門の前に居る間の確かめ（下の ps）は、ここではしない（子は、短くした期限で自分から終わるので、確かめがその期限と競う）。
+    # pid が届いていること（= 子が門の前まで来たこと）は、上の int(pid) が見ている（届いていなければ、この相手役が失敗する）
     result("answer", answered())
     outcome()
 ps = subprocess.run(["/bin/ps", "-o", "ppid=,pgid=", "-p", str(pid)], capture_output=True).stdout.split()
@@ -553,29 +582,36 @@ pass "門（画面の側）: 合図を書かずに口を閉じたら、コマン
 
 # ---- 5. 相手の確かめと期限（画面の側）----
 # 別の利用者は用意できないので、「相手の利用者番号を返す行」だけを置き換えた写しで確かめる（確かめる行そのものは、検査対象のまま）。
-# 用意の確認: 置き換えていない入口では、同じ場面で pid が返る（相手役は、頼まれれば先へ進める役）
-caller_scene peer-self
-[[ "$REPLY" == $'pid received\npane-exit 2\nstarted False\nlog-bytes 0' ]] \
-  || fail "相手が自分と同じ利用者のとき、画面の中の親が pid を返さない（用意が誤り）: ${REPLY//$'\n'/ / }"
-mkedit pane-peer-other "$NONE" "$PEER_LINE" '    return os.geteuid() + 1'
-caller_scene peer-other "$REPLY"
-[[ "$REPLY" == $'pid none\npane-exit 2\nstarted False\nlog-bytes 0' ]] \
-  || fail "相手が別の利用者（OS が返す利用者番号が自分と違う）なのに、画面の中の親が受け取って先へ進んだ（子を作った）: ${REPLY//$'\n'/ / }"
-[[ "$(<"$T/caller-peer-other.screen")" == "$MSG_PANE" ]] || fail "相手が別の利用者のとき、画面に出るものが決まった文言でない"
-mkedit pane-peer-none "$NONE" "$PEER_LINE" '    return None'
-caller_scene peer-none "$REPLY"
-[[ "$REPLY" == $'pid none\npane-exit 2\nstarted False\nlog-bytes 0' ]] \
-  || fail "相手の利用者番号を取れないのに、画面の中の親が受け取って先へ進んだ（取れないときは、閉じる側へ倒す）: ${REPLY//$'\n'/ / }"
-# 期限だけを短くした写し: 相手がつないだまま何も送らない・合図を書かないとき、外から止めなくても、自分で終わる
-mkedit pane-short "$NONE" "$PANE_LINE" 'PANE_SECONDS = 2'; PANE_SHORT="$REPLY"
-caller_scene silent "$PANE_SHORT"
+# 「pid が返らない・exit 2」だけでは、確かめが受け取りの後へ動いても同じに見えるので、受け取りの操作を見張る写しを元にする
+# （画面の中の親が、受け取りの操作を 1 度でも呼ぶと、画面に目印が出る）。
+# 用意の確認: 相手が同じ利用者（確かめの行に手を入れていない）なら、目印が出る（見張りが効いていて、画面の中の親は受け取りに進む）
+mkedit pane-watch "$NONE" "$IMPORT_LINE" "$IMPORT_LINE"$'\n'"$RECV_WATCH"; PANE_WATCH="$REPLY"
+caller_scene peer-self "$PANE_WATCH"
+[[ "$(<"$T/caller-peer-self.screen")" == "$RECV_SEEN"$'\n'"$MSG_PANE" ]] \
+  || { cat "$T/caller-peer-self.screen" >&2; fail "相手が自分と同じ利用者のとき、画面の中の親が受け取りに進まない・受け取りの見張りが効いていない（用意が誤り）"; }
+peer_refused() {   # <場面の名前> <相手の利用者番号を返す行の代わり> <説明>
+  mkedit "pane-peer-$1" "$PANE_WATCH" "$PEER_LINE" "$2"
+  caller_scene "peer-$1" "$REPLY"
+  [[ "$REPLY" == $'pid none\npane-exit 2\nstarted False\nlog-bytes 0' ]] \
+    || fail "$3のに、画面の中の親が先へ進んだ（子を作った）: ${REPLY//$'\n'/ / }"
+  [[ "$(<"$T/caller-peer-$1.screen")" == "$MSG_PANE" ]] \
+    || { cat "$T/caller-peer-$1.screen" >&2; fail "$3のに、画面の中の親が、断る前に受け取りの操作を呼んだ・画面に出るものが決まった文言でない"; }
+}
+peer_refused other '    return os.geteuid() + 1' "相手が別の利用者（OS が返す利用者番号が自分と違う）な"
+peer_refused none '    return None' "相手の利用者番号を取れない（取れないときは、閉じる側へ倒す）"
+# 期限: 相手がつないだまま何も送らない・合図を書かないとき、外から止めなくても、自分で終わる。短くするのは、試したい待ちだけ
+# （その待ちの行の直前で、期限を 2 秒に縮めた写し。そこまでの準備 = つなぐ・中身を受け取る、は、ふつうの期限のまま）。
+# 試したい待ちまで来ていることは、相手役が見ている（つながらない・pid が届かないときは、相手役が失敗して赤になる）
+mkedit pane-short-recv "$NONE" "$RECV_LINE" "$SHORT_WAIT"$'\n'"$RECV_LINE"
+caller_scene silent "$REPLY"
 [[ "$REPLY" == $'pane-exit 2\nstarted False\nlog-bytes 0' ]] \
   || fail "相手がつないだまま何も送らないとき、画面の中の親が期限で終わらない: ${REPLY//$'\n'/ / }"
-caller_scene no-gate "$PANE_SHORT"
+mkedit pane-short-gate "$NONE" "$GATE_LINE" "$SHORT_WAIT"$'\n'"$GATE_LINE"
+caller_scene no-gate "$REPLY"
 [[ "$REPLY" == $'answer F\npane-exit 2\nstarted False\nlog-bytes 0' ]] \
   || fail "合図が来ないまま期限が来たとき、子がコマンドを始めずに終わらない・失敗の印を返さない・画面の中の親が終わらない: ${REPLY//$'\n'/ / }"
 no_work || fail "相手役の受け渡しのフォルダが残っている（用意が誤り）"
-pass "相手の確かめと期限（画面の側）: 相手が同じ利用者だと OS が言わない（別の利用者の番号・取れない）とき、画面の中の親は何も受け取らずに終わる（子を作らない・コマンドは始まらない）。相手が何も送らない・合図を書かないときは、自分の期限で、コマンドを始めずに終わる"
+pass "相手の確かめと期限（画面の側）: 相手が同じ利用者だと OS が言わない（別の利用者の番号・取れない）とき、画面の中の親は、受け取りの操作を 1 度も呼ばずに終わる（子を作らない・コマンドは始まらない）。相手が何も送らない・合図を書かないときは、自分の期限で、コマンドを始めずに終わる"
 
 # ---- 6. 起動ログの続きを流すことと、子の終了を見ることは別 ----
 caller_scene flood
@@ -755,9 +791,13 @@ pane_pid() { tm list-panes -t "=$1" -F '#{pane_pid}' 2>/dev/null | head -1; }
 # <親の pid> <子の pid>: 親の下に居る子プロセスが、その 1 つだけか（番号だけを見る）
 only_child() { [[ "$(ps -ax -o ppid=,pid= | awk -v p="$1" '$1 == p { print $2 }' | tr '\n' ' ')" == "$2 " ]]; }
 mkcopy copy-wrap "$T/wrap/tmux"; DR="$REPLY"
-# 期限だけを置き換えた写し（長い = 止める合図のテストが、期限と競わない。短い = 外から止めなくても、期限で終わることを見る）
+# 期限の写し。長い（全体の期限を 600 秒に）= 止める合図のテストが、期限と競わない。短い = 外から止めなくても、期限で終わることを見る。
+# 短くするのは、試したい待ちだけ（その待ちの行の直前で deadline を近づける。そこまでの準備は、ふつうの期限 20 秒のまま）
 mkedit copy-wrap-long "$DR" "$HANDSHAKE_LINE" 'HANDSHAKE_SECONDS = 600'; DR_LONG="$REPLY"
-mkedit copy-wrap-short "$DR" "$HANDSHAKE_LINE" 'HANDSHAKE_SECONDS = 3'; DR_SHORT="$REPLY"
+mkshort() { mkedit "copy-wrap-short-$1" "$DR" "$3" "        deadline = time.monotonic() + $2"$'\n'"$3"; }   # <名前> <秒> <待ちの行>
+mkshort tmux 3 "$TMUX_CALL_LINE"; DR_SHORT_TMUX="$REPLY"
+mkshort accept 2 "$ACCEPT_LINE"; DR_SHORT_ACCEPT="$REPLY"
+mkshort pid 2 "$PID_LINE"; DR_SHORT_PID="$REPLY"
 
 # ---- 7. tmux へ渡すもの（サーバーがまだ無い所から。この起動が立ち上げる）----
 # 起動する対象のリポジトリの模型: PATH は印を書く偽物だけ・HOME と設定の場所とシェルは対象の中・作業場所と PYTHONPATH に偽モジュール
@@ -893,9 +933,7 @@ wait_for "$LIMIT" only_child "$pp" "$pid" \
 finished "画面の確かめ"
 wait_for "$LIMIT" screen_has lt-screen '=== 終了: 終了コード 7。この画面は 600 秒後に閉じる ===' || fail "画面に終了コードが出ていない: $(screen_tail lt-screen)"
 screen_has lt-screen 'steps: 終了' || fail "終わる直前の出力が画面に出ていない"
-sleep 1
-has lt-screen || fail "--linger の間なのに、セッションが閉じた"
-tm kill-session -t '=lt-screen'
+# lt-screen は、ここでは閉じない（--linger の間は残ることを、下の場面を済ませた後で見る。決まった秒数を待って見ることはしない）
 run "$DR" "$CWD" -- --tmux lt-now --linger 0 "$T/logs/screen.log" /bin/sh -c 'kill -TERM $$'
 launched "--linger 0"; finished "--linger 0"
 wait_for "$LIMIT" hasnt lt-now || fail "--linger 0 なのに、コマンドが終わってもセッションが閉じない（利用者の設定は「終わった画面を残す」）"
@@ -920,7 +958,21 @@ tm kill-session -t '=lt-zero'
 run "$DR" "$CWD" -- --tmux lt-zero-now --linger 0 /dev/zero /usr/bin/true
 launched "読み終わらない起動ログ・--linger 0"; finished "読み終わらない起動ログ・--linger 0"
 wait_for "$LIMIT" hasnt lt-zero-now || fail "読み終わらない起動ログ（/dev/zero）のとき、コマンドが終わってもセッションが閉じない"
-pass "画面に pid・起動ログの続き・終了コードを出し、--linger の間は残して、0 ならすぐ閉じる（利用者の設定が「終わった画面を残す」でも）。同じ起動ログへの 2 回目は今回の分だけを流す。画面の中の親の下に居るのは、起動したコマンドだけ。読み終わらない起動ログ（/dev/zero）は流さず、コマンドが終われば終了コードを出して閉じる"
+# 正の --linger: その秒数が過ぎたら、セッションが自分で閉じる（手では閉じない）。コマンドが終わったのを見てから測って、15 秒までに
+# 消えること（指定の 7 倍あまり。待ち時間が 10 倍に延びる退行は赤になり、負荷で数秒遅れても緑のまま）。待つ輪は回数で数えるので、
+# 実際の秒は SECONDS で測る
+run "$DR" "$CWD" -- --tmux lt-linger --linger 2 "$T/logs/linger.log" "$T/steps.sh" "$T/go-9l" 1 "$T/mark-9l"
+launched "正の --linger"
+has lt-linger || fail "正の --linger: コマンドが動いている間なのに、セッションが無い（用意が誤り）"
+: > "$T/go-9l.1"
+finished "正の --linger"
+since=$SECONDS
+wait_for "$LIMIT" hasnt lt-linger || fail "--linger 2 が過ぎても、セッションが自分で閉じない"
+(( SECONDS - since <= 15 )) || fail "--linger 2 なのに、コマンドが終わってからセッションが閉じるまで $(( SECONDS - since )) 秒かかった（指定より、ずっと長く残る）"
+# --linger の間は残る: 上の場面より前に終わった lt-screen（--linger 600）が、まだある
+has lt-screen || fail "--linger の間なのに、セッションが閉じた"
+tm kill-session -t '=lt-screen'
+pass "画面に pid・起動ログの続き・終了コードを出し、--linger の間は残して、過ぎたら自分で閉じる。0 ならすぐ閉じる（利用者の設定が「終わった画面を残す」でも）。同じ起動ログへの 2 回目は今回の分だけを流す。画面の中の親の下に居るのは、起動したコマンドだけ。読み終わらない起動ログ（/dev/zero）は流さず、コマンドが終われば終了コードを出して閉じる"
 
 # ---- 10. 画面でキーを押しても、セッションを閉じても、コマンドは最後まで動く ----
 run "$DR" "$CWD" -- --tmux lt-keys --linger 600 "$T/logs/keys.log" "$T/steps.sh" "$T/go-10" 2 "$T/keys.mark"
@@ -1029,16 +1081,17 @@ done
 (( n >= 2 )) || fail "tmux の呼び出しの記録が無い（用意が誤り）"
 pass "失敗（無いコマンド・起動ログが使えない・読めない・一時フォルダを作れない・読めない作業場所・セッションを作れない）では、付けないときと同じ文言と終了コードか、決まった文言で exit 2。コマンドを始めず、セッションも一時フォルダも残さない。tmux に頼む操作は new-session と has-session だけ"
 
-# ---- 13. 起動ログを開いた後で別のファイルへ置き換えられたら、起動しない・その中身を画面へ流さない ----
+# ---- 13. 起動ログを開いた後で別のファイルへ置き換えられたら、起動しない ----
+# （起動しなければ、画面の側へは、起動ログの読み口を渡さない。「置き換えた先の中身が画面に出ていないこと」を画面で見る確かめは、
+# 置かない: 読み口は末尾へ進めてから渡すので、照合を外した写しでも、前からの中身は画面に出ない = 照合の確かめにならない）
 print -r -- "PRIVATE-SWAP" > "$T/private.txt"
 wrap_mode swap
 run "$DR" "$CWD" -- --tmux lt-swap --linger 30 "$T/swap.log" /bin/sh -c 'echo child-output; : > "$0"' "$T/started-13"
 wrap_mode
 [[ ! -e "$T/private.txt" && "$(<"$T/swap.log")" == PRIVATE-SWAP ]] || fail "起動ログが置き換わっていない・置き換えた先へ書いた（用意が誤り、または照合の前に書いた）"
-if has lt-swap && screen_has lt-swap PRIVATE-SWAP; then fail "起動ログを置き換えた先（子が書いていないファイル）の中身を、画面へ流した"; fi
 stopped "起動ログを開いた後で置き換えられた" 2 "$MSG_LOG" "$T/started-13"
 quiet "起動ログを開いた後で置き換えられた"
-pass "起動ログを開いた後で別のファイルへ置き換えられたら、起動せず（exit 2）、その中身を画面へ流さない"
+pass "起動ログを開いた後で別のファイルへ置き換えられたら、起動しない（exit 2。コマンドは始まらず、セッションも残らない）"
 
 # ---- 14. 画面の中の親が動き出す前に、呼び出し元を止める・期限が来る ----
 # 画面の中の親は、テストが合図のファイル（release-pane）を作るまで動かさない（包みの hold）。止める合図のテストは、期限だけを長くした
@@ -1068,21 +1121,24 @@ sleep 0.3
 # 強制終了では片付けられない（空のフォルダとソケットが 1 つ残る。文書に書いた、残る場面）。ここで消す
 left=("$TMPD"/lanes-detach-*(N)); (( ${#left} <= 1 )) || fail "強制終了の後に、受け渡しの一時フォルダが 2 つ以上残っている"
 rm -rf -- "$TMPD"/lanes-detach-*(N)
-# 外から止めなくても、期限で終わる（期限だけを短くした写し）。相手は、返事をしないまま
-#  a. セッションはできたが、画面の中の親がつながってこない
-run_bg "$DR_SHORT" "$CWD" -- --tmux lt-late --linger 0 "$T/logs/14.log" /usr/bin/touch "$T/started-14"
+# 外から止めなくても、期限で終わる（試したい待ちの直前で、期限を短くした写し）。相手は、返事をしないまま
+#  a. セッションはできたが、画面の中の親がつながってこない。つながるのを待つ所まで来ていたこと（セッションができている）も見る
+#     （準備の途中で終わったものを、期限切れと取り違えない）
+run_bg "$DR_SHORT_ACCEPT" "$CWD" -- --tmux lt-late --linger 0 "$T/logs/14.log" /usr/bin/touch "$T/started-14"
 end_bg "$LIMIT" "つながってこない相手の期限"
 stopped "つながってこない相手の期限" 2 "$MSG_TALK" "$T/started-14"
+has lt-late || fail "つながってこない相手の期限: つながるのを待つ所まで来ていない（セッションができていない）"
 no_work || fail "つながってこない相手の期限: 受け渡しの一時フォルダを片付けていない"
 release_pane lt-late
-#  b. tmux そのものが返事をしない（包みが、合図まで何もしないで待つ）。検査対象が、期限で止めて片付ける
+#  b. tmux そのものが返事をしない（包みが、合図まで何もしないで待つ）。検査対象が、期限で止めて片付ける。tmux を待つ所まで
+#     来ていたこと（返事をしない役が動いた記録）も見る
 wrap_mode hang
-run_bg "$DR_SHORT" "$CWD" -- --tmux lt-hang --linger 0 "$T/logs/14.log" /usr/bin/touch "$T/started-14"
+run_bg "$DR_SHORT_TMUX" "$CWD" -- --tmux lt-hang --linger 0 "$T/logs/14.log" /usr/bin/touch "$T/started-14"
 end_bg "$LIMIT" "返事をしない tmux の期限"
 wrap_mode
 stopped "返事をしない tmux の期限" 2 "$MSG_TALK" "$T/started-14"
 no_work || fail "返事をしない tmux の期限: 受け渡しの一時フォルダを片付けていない"
-[[ -s "$T/hang.pid" ]] || fail "返事をしない tmux の役が動いていない（用意が誤り）"
+[[ -s "$T/hang.pid" ]] || fail "返事をしない tmux の期限: tmux を待つ所まで来ていない（返事をしない役が動いた記録が無い）"
 wait_for "$LIMIT" gone "$(<"$T/hang.pid")" || { : > "$T/release-hang"; fail "返事をしない tmux を、期限の後も残した（止めていない）"; }
 quiet "期限の後"
 pass "利用者が受け取る pid へ止める合図（TERM）を送ると、exit 2 で pid を出さず、一時フォルダを片付け、コマンドは始まらない。強制終了（KILL）でも、コマンドは始まらず、セッションは自分で閉じる。外から止めなくても、画面の中の親がつながってこない・tmux が返事をしないときは、期限で exit 2 になり、片付ける"
@@ -1181,15 +1237,18 @@ end_bg "$LIMIT" "pid を待っている間の止める合図"
 stopped "pid を待っている間の止める合図" 2 "$MSG_STOP" "$T/started-15"
 wait_for "$LIMIT" grep -qx 'gate closed' "$T/pane.note" || { cat "$T/pane.note" >&2; fail "止める合図を受けた呼び出し元が、門を開ける合図を書いた（または口を閉じていない）"; }
 quiet "pid を待っている間の止める合図の後"
-# 外から止めなくても、期限で終わる（期限だけを短くした写し）: つながった相手が、pid を返さないまま
+# 外から止めなくても、期限で終わる（pid を待つ直前で、期限を短くした写し）: つながった相手が、pid を返さないまま
 rm -f -- "$T/pane.note"
-run_bg "$DR_SHORT" "$CWD" -- --tmux lt-pane --linger 0 "$T/logs/15.log" /usr/bin/touch "$T/started-15"
+run_bg "$DR_SHORT_PID" "$CWD" -- --tmux lt-pane --linger 0 "$T/logs/15.log" /usr/bin/touch "$T/started-15"
 end_bg "$LIMIT" "pid を返さない相手の期限"
 wrap_mode
 stopped "pid を返さない相手の期限" 2 "$MSG_TALK" "$T/started-15"
 no_work || fail "pid を返さない相手の期限: 受け渡しの一時フォルダを片付けていない"
+# pid を待つ所まで来ていたこと（相手役が中身を受け取った）と、合図が来ないまま口が閉じたこと。相手役は、中身を受け取った後で
+# しか、この記録を書かない（記録が無ければ赤。準備の途中で終わったものを、期限切れと取り違えない）
+wait_for "$LIMIT" grep -qx 'gate closed' "$T/pane.note" \
+  || { cat "$T/pane.note" >&2 2>/dev/null || true; fail "pid を返さない相手の期限: pid を待つ所まで来ていない（相手役が中身を受け取った記録が無い）・門を開ける合図を書いた"; }
 quiet "pid を返さない相手の期限の後"
-if grep -qx 'gate A' "$T/pane.note" 2>/dev/null; then fail "pid を返さない相手に、門を開ける合図を書いた"; fi
 pass "呼び出し元の側: pid の前後で口が閉じた・通った印が無い・失敗の印 → exit 2（コマンドは始まっていない文言）。通った印 → pid を出して exit 0。相手が同じ利用者だと OS が言わない（別の利用者の番号・取れない）ときは、何も送らずに exit 2。pid を返さない相手には、止める合図でも期限でも、門を開ける合図を書かずに終わる"
 
 # ---- 16. chk-run.sh の直後に --tmux で起動したレビューが、親の記録を使い回す ----
