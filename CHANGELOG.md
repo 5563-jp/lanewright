@@ -6,6 +6,35 @@ This file lists user-visible changes. The format follows [Keep a Changelog](http
 
 ## [Unreleased]
 
+### 足したこと / Added
+- `detach-run.sh --tmux <セッション名> [--linger <秒>] <launch.log> <コマンド> [引数...]`: tmux のセッションを 1 つ作り、その画面の中に居続ける親から
+  コマンドを起動する。起動したレーンが tmux のセッションとして見え、つなぐと、起動した pid・起動ログの続き・終わったときの終了コードがその画面に出る
+  （起動したコマンドの親をたどると、tmux の画面のプロセスに着く）。起動するコマンドから見えるもの（環境変数・作業場所・umask・入出力・fd・新しいセッション・
+  無視にしたシグナル）と、pid の出力・起動ログ・台帳・`chk-run.sh` の記録の使い回しは、付けないときと同じ。セッションを閉じても、画面で Ctrl-C を押しても、
+  コマンドは止まらない。終わると `--linger` 秒（0〜86400 の整数。既定 600）のあとでセッションが閉じる。同じ名前のセッションがあれば `<名前>-2` … を使う。
+  - tmux は、決まった 3 つの場所（`/opt/homebrew/bin/tmux`・`/usr/local/bin/tmux`・`/usr/bin/tmux`）だけから選ぶ（`PATH` からは探さない）。
+    tmux へ渡す環境変数は、名前を挙げた 6 つだけ（呼び出し元からは `TMUX_TMPDIR` と `LANG`。`HOME`・`USER`・`LOGNAME` は OS のユーザー情報、`PATH` は決め打ち）。
+    tmux のサーバーがまだ無ければ、この起動が立ち上げる。そのとき、呼び出し元の環境変数を利用者のほかのウィンドウへ広げず、設定ファイルの場所・既定のシェル・
+    `PATH` を、呼び出し元の値（起動する対象のリポジトリを指しうる）で決めさせない。
+  - 門つきの起動: 画面の中の親が作った子は、コマンドを始める前の門で待ち、門を開けるのは呼び出し元だけ。失敗（決まった文言で exit 2）を返したときは、
+    コマンドは始まっていない。起動ログと作業場所は、呼び出し元が開いた fd のまま渡す（画面の側はパスを開かない）。呼び出し元は tmux のセッションを作るだけで、
+    閉じる・探す操作をしない。
+  - 起動するコマンドは tmux のサーバーの子孫として動くので、資源の上限・優先度・macOS のログインの文脈などは、tmux のサーバーのものを受け継ぐ
+    （`lanes/README.md` の 12 章の「守られないこと・残る場面」）。
+  `--tmux` を付けない起動は変わらない（1 つ目の引数が `--tmux`・`--linger`・`--tmux-pane` そのもののときだけ、新しい動きになる）。
+  / `detach-run.sh --tmux <session> [--linger <seconds>] <launch.log> <command> [args...]` creates one tmux session and starts the command from a parent
+  that stays inside its pane. The lane shows up as a tmux session; attaching shows the pid, the rest of the launch log, and the exit code when it ends.
+  What the command sees (environment, working directory, umask, I/O, file descriptors, new session, ignored signals) and what the caller sees
+  (the pid line, launch log, ledger, reuse of `chk-run.sh` records) are the same as without `--tmux`. Closing the session or pressing Ctrl-C in the pane
+  does not stop the command. The session closes `--linger` seconds (integer 0-86400, default 600) after the command exits.
+  tmux is picked only from three fixed locations (never from `PATH`) and receives exactly six named variables (`TMUX_TMPDIR` and `LANG` from the caller;
+  `HOME`, `USER`, `LOGNAME` from the OS user database; a fixed `PATH`), so that a tmux server started by this launch neither spreads the caller's
+  environment to the user's other windows nor takes its config location, default shell, or `PATH` from caller-controlled values.
+  The launch is gated: the child waits before starting the command and only the caller opens the gate, so a failed launch (exit 2) never leaves the
+  command running. The launch log and working directory are handed over as already-open file descriptors. The caller only creates its own session;
+  it never closes or looks up other sessions. Because the command runs as a descendant of the tmux server, resource limits, priority, and the macOS
+  login context come from the tmux server. Without `--tmux`, nothing changes.
+
 ## [0.1.11] - レーンが終わったらすぐ見回る・切り離しに使う python3 を決め打ちにする / Check right after a lane finishes; a fixed helper python3 for detaching
 
 ### 変えたこと / Changed
